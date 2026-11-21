@@ -37,7 +37,7 @@ def build_chart(spec, scale_name="regular"):
         if raw <= mm * k:
             step = mm * k
             break
-    y0line = m["t"] + gh * (0 - bot) / span  # zero baseline
+    y0line = m["t"] + gh * (1 - (0 - bot) / span)  # zero baseline
     ticks = []
     tv = math.ceil(bot / step) * step
     while tv <= top + 1e-9:

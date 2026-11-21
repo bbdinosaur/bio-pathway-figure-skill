@@ -26,6 +26,7 @@ def skeleton(case_id):
 def check_file(path):
     d = json.loads(Path(path).read_text(encoding="utf-8"))
     problems = []
+    warnings = []
     for k in REQUIRED:
         if k not in d:
             problems.append(f"missing field: {k}")
@@ -39,17 +40,33 @@ def check_file(path):
         p = es["path"] if isinstance(es, dict) else es
         if not Path(p).exists():
             problems.append(f"editable_source path not found: {p}")
+        elif isinstance(es, dict) and str(es.get("format", "")).lower() not in ("svg", "drawio", "svg source"):
+            warnings.append(f"editable_source format is {es.get('format')!r}; SVG expected for editability")
     arts = d.get("export_artifact") or []
+    fmts = set()
     for a in arts:
         p = a["path"] if isinstance(a, dict) else a
         if p and not Path(p).exists():
             problems.append(f"export artifact not found: {p}")
-    if not (d.get("content_map") or []):
+        if isinstance(a, dict) and a.get("format"):
+            fmts.add(str(a["format"]).lower())
+    if arts and "png" not in fmts:
+        warnings.append("no PNG export listed (raster preview expected for inspection)")
+    cm = d.get("content_map") or []
+    for i, e in enumerate(cm):
+        if isinstance(e, dict) and not str(e.get("source") or "").strip():
+            problems.append(f"content_map[{i}] ({e.get('element')}) has empty source")
+    if not cm:
         problems.append("content_map empty (need element->source provenance)")
+    cc = d.get("compliance_checks")
+    if isinstance(cc, dict) and not cc.get("geometry"):
+        warnings.append("compliance_checks.geometry empty (paste fig.checks.json)")
     if not isinstance(d.get("exceptions"), list):
         problems.append("exceptions must be a list")
-    return {"valid": not problems, "problems": problems, "fields_present":
-            [k for k in REQUIRED if k in d]}
+    if st == "ok" and isinstance(d.get("exceptions"), list) and d["exceptions"]:
+        warnings.append("status=ok with exceptions: ensure they describe interpretation caveats, not missing deliverables")
+    return {"valid": not problems, "problems": problems, "warnings": warnings,
+            "fields_present": [k for k in REQUIRED if k in d]}
 
 def main():
     ap = argparse.ArgumentParser()

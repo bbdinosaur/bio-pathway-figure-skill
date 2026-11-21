@@ -27,11 +27,11 @@ def build_mechanism(spec, scale_name="regular"):
     lopts = spec.get("layout") or {}
     bands0, _ = auto_compartment_bands(comps)
     placed0, row_w = place_nodes(spec, bands0, comp_kind, gap, 0)
-    bands = tighten_bands(comps, bands0, placed0) if lopts.get("tighten_bands") else bands0
+    bands = tighten_bands(comps, bands0, placed0) if lopts.get("tighten_bands", True) else bands0
     placed, row_w = place_nodes(spec, bands, comp_kind, gap, 0)
     plot_w = max(row_w, 520)
     if comps:
-        draw_compartments(comps, bands, plot_w, prims)
+        draw_compartments(comps, bands, plot_w, prims, placed=placed)
     from viz_geom import bbox_of
     node_boxes = []
     for n in placed:
@@ -48,7 +48,7 @@ def build_mechanism(spec, scale_name="regular"):
     legend_bottom = 0
     if used or spec.get("data_map") or spec.get("legend") is not False:
         lx = 56 + plot_w + 40
-        legend_bottom = build_legend(prims, used, placed, spec, lx, 80)
+        legend_bottom = build_legend(prims, used, placed, spec, lx, 80, opts=lopts)
         legend_w = 330
     W = int(max(56 + plot_w + (40 + legend_w if legend_w else 0) + 30, 760))
     title = spec.get("title", "")

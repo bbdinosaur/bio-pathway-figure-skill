@@ -29,6 +29,10 @@ grayscale print and the legend can be generated from actual usage.
 - Solid = stated as direct in the material; add `"evidence":"direct"` only when the source
   says so (label becomes `[direct]`).
 - `dashed:true` = indirect, inferred, or reported-only; explain in the caption.
+- Optional auto-styling (spec `"layout":{"evidence_auto_style":true}`): edges with
+  `evidence` of reported/inferred/indirect/putative render dashed automatically, and
+  `weak` renders dotted; the legend gains the matching samples. Legend entries derive
+  from actual usage, so legend ≡ map always holds.
 - Conflict between two sources: draw both edges with labels naming the source of each,
   and record the conflict in `exceptions` of result.json.
 

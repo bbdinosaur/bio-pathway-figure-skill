@@ -38,6 +38,7 @@ def draw_edges(edges, placed, gap, prims, node_boxes=None, opts=None):
     used = []
     arc_i = [0]
     opts = opts or {}
+    auto_dash = bool(opts.get("evidence_auto_style"))
     for e in edges:
         a, b = nmap.get(e.get("from")), nmap.get(e.get("to"))
         if not a or not b:
@@ -48,7 +49,7 @@ def draw_edges(edges, placed, gap, prims, node_boxes=None, opts=None):
             used.append(et)
         pts = route_points(a, b, e.get("route", "direct"), gap)
         eff_route = e.get("route", "direct")
-        if eff_route == "direct" and node_boxes and opts.get("auto_arc"):
+        if eff_route == "direct" and node_boxes and opts.get("auto_arc", True):
             same_row = abs(a["cy"] - b["cy"]) <= (a["h"] + b["h"]) / 2.0 + 12
             if same_row and _seg_hits_boxes(pts[0], pts[-1], node_boxes,
                                             skip={e.get("from"), e.get("to")}):
@@ -56,7 +57,13 @@ def draw_edges(edges, placed, gap, prims, node_boxes=None, opts=None):
                 pts = route_points(a, b, "arc", gap,
                                    m_override=26.0 + 15.0 * (arc_i[0] - 1))
                 eff_route = "arc"
-        dashed = bool(e.get("dashed")) or et in ("other",) and e.get("dashed")
+        dashed = bool(e.get("dashed"))
+        if auto_dash and not e.get("dashed"):
+            ev = str(e.get("evidence") or "").lower()
+            if ev in ("reported", "inferred", "indirect", "putative", "weak"):
+                dashed = True
+        dotted = bool(e.get("dotted")) or (
+            auto_dash and str(e.get("evidence") or "").lower() == "weak")
         col = e.get("color") or st["color"]
         tip = pts[-1]
         seg_dir = norm(pts[-1][0] - pts[-2][0], pts[-1][1] - pts[-2][1])
@@ -64,7 +71,7 @@ def draw_edges(edges, placed, gap, prims, node_boxes=None, opts=None):
         line_end = [tip[0] + back[0], tip[1] + back[1]]
         body = pts[:-1] + [line_end]
         prims.append({"op": "polyline", "pts": body, "stroke": col, "stroke_w": 2.4,
-                      "dashed": bool(e.get("dashed")), "role": "edge",
+                      "dashed": dashed, "dotted": dotted, "role": "edge",
                       "_id": f"edge-{len(prims)}-{e.get('from')}-{e.get('to')}"})
         _draw_marker(prims, st, tip, seg_dir, col, et, e)
         if st.get("both"):

@@ -16,6 +16,8 @@ def esc(s):
 
 def apply_edits(svg, edits):
     record = []
+    if isinstance(edits, dict):
+        edits = [edits]
     for e in edits:
         op = e.get("op")
         if op == "replace_text":
@@ -32,7 +34,7 @@ def apply_edits(svg, edits):
                 svg = svg.replace("" + find + "", "" + rep + "", 1)
                 record.append({"op": op, "find": e["find"], "replace": e["replace"], "status": "ok"})
         elif op == "set_text_by_id":
-            pat = re.compile(r'(<text[^>]*id="' + re.escape(e["id"]) + r'"[^>]*>)(.*?)(</text>)', re.S)
+            pat = re.compile(r'(<(?:\w+:)?text\b[^>]*id="' + re.escape(e["id"]) + r'"[^>]*>)(.*?)(</(?:\w+:)?text>)', re.S)
             m = pat.search(svg)
             if not m:
                 record.append({"op": op, "id": e["id"], "status": "not_found"})
@@ -41,7 +43,7 @@ def apply_edits(svg, edits):
             svg = pat.sub(lambda mm: mm.group(1) + esc(e["text"]) + mm.group(3), svg, count=1)
             record.append({"op": op, "id": e["id"], "before": old, "after": str(e["text"]), "status": "ok"})
         elif op == "set_attr_by_id":
-            tag_pat = re.compile(r'<\w+\b[^>]*?id="' + re.escape(e["id"]) + r'"[^>]*?/?>')
+            tag_pat = re.compile(r'<(?:\w+:)?\w+\b[^>]*?id="' + re.escape(e["id"]) + r'"[^>]*?/?>')
             m = tag_pat.search(svg)
             if not m:
                 record.append({"op": op, "id": e["id"], "attr": e["attr"], "status": "not_found"})

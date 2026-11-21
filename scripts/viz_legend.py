@@ -22,7 +22,8 @@ def legend_edge_sample(prims, x, y, et, dashed=False):
     if st.get("both"):
         _draw_marker(prims, st, a, dirv, col, et, {}, start=True)
 
-def build_legend(prims, used_edges, placed, spec, lx, top):
+def build_legend(prims, used_edges, placed, spec, lx, top, opts=None):
+    opts = opts or {}
     y = top
     title = spec.get("legend_title", "LEGEND")
     prims.append({"op": "text", "x": lx, "y": y, "s": title, "size": 15, "anchor": "start",
@@ -38,9 +39,20 @@ def build_legend(prims, used_edges, placed, spec, lx, top):
             prims.append({"op": "text", "x": lx + 84, "y": y, "s": et.capitalize(), "size": 13,
                           "anchor": "start", "fill": "#1e293b", "role": "legend"})
             y += 22
-    if any(e.get("dashed") for e in spec.get("edges", [])):
+    auto = bool(opts.get("evidence_auto_style"))
+    if any(e.get("dashed") or (auto and str(e.get("evidence") or "").lower() in
+           ("reported", "inferred", "indirect", "putative"))
+           for e in spec.get("edges", [])):
         legend_edge_sample(prims, lx + 6, y - 4, "activation", dashed=True)
         prims.append({"op": "text", "x": lx + 84, "y": y, "s": "Indirect / reported", "size": 13,
+                      "anchor": "start", "fill": "#1e293b", "role": "legend"})
+        y += 22
+    if any(e.get("dotted") or (auto and str(e.get("evidence") or "").lower() == "weak")
+           for e in spec.get("edges", [])):
+        prims.append({"op": "polyline", "pts": [[lx + 6, y - 4], [lx + 62, y - 4]],
+                      "stroke": EDGE_STYLES["activation"]["color"], "stroke_w": 2.4,
+                      "dotted": True, "role": "legend_edge"})
+        prims.append({"op": "text", "x": lx + 84, "y": y, "s": "Weak evidence", "size": 13,
                       "anchor": "start", "fill": "#1e293b", "role": "legend"})
         y += 22
     kinds = []

@@ -3,6 +3,8 @@ from __future__ import annotations
 from viz_style import FONT_STACK
 
 def _dash(p):
+    if p.get("dotted"):
+        return ' stroke-dasharray="2,4"'
     return ' stroke-dasharray="7,5"' if p.get("dashed") else ""
 
 def _stroke(p):

@@ -26,7 +26,29 @@ def render(svg, png, width):
         if shutil.which(tool):
             try:
                 subprocess.run(args, check=True, capture_output=True)
-                if Path(png).exists() and Path(png).stat().st_size > 0:
+                if Path(png).exists() and Path(png).stat().st_size > 1000:
+                    return tool + (" (low fidelity: prefer cairosvg/rsvg-convert)"
+                                   if tool == "convert" else "")
+            except Exception:
+                continue
+    return None
+
+def render_pdf(svg, pdf):
+    try:
+        import cairosvg  # type: ignore
+        cairosvg.svg2pdf(url=str(svg), write_to=str(pdf))
+        return "cairosvg"
+    except Exception:
+        pass
+    for tool, args in (
+        ("rsvg-convert", ["rsvg-convert", "-f", "pdf", "-o", str(pdf), str(svg)]),
+        ("inkscape", ["inkscape", str(svg), "--export-type=pdf", f"--export-filename={pdf}"]),
+        ("convert", ["convert", str(svg), str(pdf)]),
+    ):
+        if shutil.which(tool):
+            try:
+                subprocess.run(args, check=True, capture_output=True)
+                if Path(pdf).exists() and Path(pdf).stat().st_size > 200:
                     return tool
             except Exception:
                 continue
@@ -37,10 +59,14 @@ def main():
     ap.add_argument("svg")
     ap.add_argument("-o", "--out", required=True)
     ap.add_argument("--width", type=int, default=2400)
+    ap.add_argument("--pdf", dest="pdf", default=None)
     a = ap.parse_args()
     tool = render(a.svg, a.out, a.width)
+    pdf_tool = render_pdf(a.svg, a.pdf) if a.pdf else None
     if tool:
-        print(json.dumps({"png": str(a.out), "tool": tool}))
+        print(json.dumps({"png": str(a.out), "tool": tool,
+                          "pdf": str(a.pdf) if pdf_tool else None,
+                          "pdf_tool": pdf_tool}))
     else:
         print(json.dumps({"error": "no svg rasterizer available",
                           "hint": "install cairosvg or rsvg-convert, or open SVG in browser and print to PDF"}))

@@ -21,7 +21,7 @@ def to_mpl(prims, W, H, dpi, png=None, pdf=None):
         op = p["op"]; role = p.get("role", "")
         ec = p.get("stroke", "none")
         lw = max((p.get("stroke_w", 1) or 0) * k, 0.1)
-        ls = (0, (7 * k, 5 * k)) if p.get("dashed") else "-"
+        ls = (0, (2 * k, 4 * k)) if p.get("dotted") else ((0, (7 * k, 5 * k)) if p.get("dashed") else "-")
         if op == "rect":
             ax.add_patch(Rectangle((p["x"], p["y"]), p["w"], p["h"],
                          facecolor=p["fill"], edgecolor=ec, linewidth=lw if ec != "none" else 0,

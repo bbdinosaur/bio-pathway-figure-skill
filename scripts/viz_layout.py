@@ -20,18 +20,32 @@ def auto_compartment_bands(comps):
         y += h + GAP
     return bands, y
 
-def draw_compartments(comps, bands, plot_w, prims):
+def draw_compartments(comps, bands, plot_w, prims, placed=None):
     x0, x1 = LEFT - 24, LEFT + plot_w + 24
+    from viz_geom import text_bbox, overlap
+    placed = placed or []
     for c, b in zip(comps, bands):
         st = COMP_STYLES.get(c.get("kind", "custom"), COMP_STYLES["custom"])
         prims.append({"op": "rect", "x": x0, "y": b["y0"], "w": x1 - x0, "h": b["h"],
                       "rx": 10, "fill": st["fill"], "stroke": st["border"],
                       "stroke_w": 1.2, "role": "bg"})
         lbl = c.get("label", c["id"])
-        lx = x0 + 12
         ly = b["y1"] - 12
+        lb = text_bbox(x0 + 12, ly, lbl, 13, "start")
+        hit = any(overlap(lb, [n["cx"] - n["w"] / 2, n["cy"] - n["h"] / 2,
+                               n["cx"] + n["w"] / 2, n["cy"] + n["h"] / 2], tol=2)
+                  for n in placed if n.get("compartment") == c["id"])
+        if hit:
+            lb = text_bbox(x1 - 12, ly, lbl, 13, "end")
+            hit = any(overlap(lb, [n["cx"] - n["w"] / 2, n["cy"] - n["h"] / 2,
+                                   n["cx"] + n["w"] / 2, n["cy"] + n["h"] / 2], tol=2)
+                      for n in placed if n.get("compartment") == c["id"])
+        if hit:
+            lx, anchor = x0 + 12, "start"
+        else:
+            lx, anchor = (x0 + 12, "start") if lb[0] <= x0 + 14 else (x1 - 12, "end")
         prims.append({"op": "text", "x": lx, "y": ly, "s": lbl, "size": 13,
-                      "anchor": "start", "fill": "#64748b", "weight": "bold",
+                      "anchor": anchor, "fill": "#64748b", "weight": "bold",
                       "role": "deco"})
         if c.get("kind") == "membrane":
             n = int((x1 - x0) // 26)

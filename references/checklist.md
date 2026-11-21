@@ -1,5 +1,11 @@
 # Pre-submit checklist & result.json template
 
+## Multiple deliverables in one case
+If the workorder asks for a mechanism figure AND data panels, render each with its own
+`--spec`/`--basename` (fig03, fig_chart, ...). Put the main mechanism SVG in
+`editable_source` and list every export under `export_artifact`; cover all figures in
+one `content_map` (prefix element names with the basename).
+
 ## Before finishing a case, ALL of these must hold
 1. `check_figure.py <out>.svg` → `n_violations: 0` (or violations listed in exceptions with reason).
 2. You visually inspected the PNG: no text overlap, no clipped/overflowing elements,

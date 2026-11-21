@@ -17,6 +17,28 @@ from viz_check import check, attach_check
 from viz_svg import to_svg
 from viz_mpl import to_mpl
 
+def lint_spec(spec):
+    """Honesty/consistency warnings collected into checks.json['spec_warnings']."""
+    from viz_style import EDGE_ORDER, NODE_STYLES
+    w = []
+    ids = {n.get("id") for n in spec.get("nodes", [])}
+    comp_ids = {c.get("id") for c in spec.get("compartments", [])}
+    for n in spec.get("nodes", []):
+        if n.get("kind") not in NODE_STYLES:
+            w.append(f"node {n.get('id')}: unknown kind {n.get('kind')!r} (rendered as other)")
+        if n.get("compartment") and comp_ids and n["compartment"] not in comp_ids:
+            w.append(f"node {n.get('id')}: compartment {n['compartment']!r} not declared")
+        if not str(n.get("source") or "").strip():
+            w.append(f"node {n.get('id')}: missing source provenance")
+    for i, e in enumerate(spec.get("edges", [])):
+        if e.get("type") not in EDGE_ORDER:
+            w.append(f"edge[{i}] {e.get('from')}->{e.get('to')}: unknown type {e.get('type')!r}")
+        if e.get("from") not in ids or e.get("to") not in ids:
+            w.append(f"edge[{i}]: endpoint not in nodes ({e.get('from')}->{e.get('to')})")
+        if not str(e.get("source") or "").strip():
+            w.append(f"edge[{i}] {e.get('from')}->{e.get('to')}: missing source provenance")
+    return w
+
 def render(spec, dpi=300, scales=None, outdir=None, basename="fig"):
     scales = scales or list(SCALES.keys())
     outdir = Path(outdir or ".")
@@ -48,6 +70,7 @@ def render(spec, dpi=300, scales=None, outdir=None, basename="fig"):
     checks = {"violations": p["viol"], "n_violations": p["n"], "scale": p["scale"],
               "canvas": [p["W"], p["H"]], "nodes": len(placed),
               "edge_types_used": used,
+              "spec_warnings": lint_spec(spec),
               "legend": bool([q for q in p["prims"] if q.get("role", "").startswith("legend")])}
     (outdir / f"{basename}.checks.json").write_text(
         json.dumps(checks, ensure_ascii=False, indent=1), encoding="utf-8")
