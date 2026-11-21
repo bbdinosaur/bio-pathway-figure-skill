@@ -48,8 +48,18 @@ def check_file(path):
         p = a["path"] if isinstance(a, dict) else a
         if p and not Path(p).exists():
             problems.append(f"export artifact not found: {p}")
-        if isinstance(a, dict) and a.get("format"):
-            fmts.add(str(a["format"]).lower())
+            continue
+        if not isinstance(a, dict) or not a.get("format"):
+            continue
+        fmt = str(a["format"]).lower()
+        fmts.add(fmt)
+        sig = Path(p).read_bytes()[:600]
+        if fmt == "png" and not sig.startswith(b"\x89PNG"):
+            problems.append(f"{p} is not a valid PNG (bad signature)")
+        if fmt == "pdf" and not sig.startswith(b"%PDF"):
+            problems.append(f"{p} is not a valid PDF (bad signature)")
+        if fmt == "svg" and b"<svg" not in sig:
+            problems.append(f"{p} is not a valid SVG")
     if arts and "png" not in fmts:
         warnings.append("no PNG export listed (raster preview expected for inspection)")
     cm = d.get("content_map") or []

@@ -70,6 +70,8 @@ Engine changes: run `python3 $SK/scripts/selftest.py` (6-figure suite, must prin
 ## Failure & fallback discipline (never stop, never fake)
 - No matplotlib: engine falls back to cairosvg/rsvg-convert for PNG (reported in
   `export_checks`); PDF may be absent — say so.
+- Scanned/image-only PDF (no text layer): state it in `exceptions`, then work from the
+  workorder + any text files; never guess values from an unreadable source.
 - Scripts missing: minimal hand-SVG template + export recipe in
   `references/layout_rules.md` (bottom); keep the same arrow/color/legend conventions.
 - Material lacks direction/confidence: draw `dashed:true`, explain in caption+exceptions.
