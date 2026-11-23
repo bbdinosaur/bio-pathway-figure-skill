@@ -74,10 +74,9 @@ def _extract_contract_keys_typed(cj):
             has_schema = True
             for k in c["properties"].keys():
                 _add(strict, k)
-        if not has_schema:
-            for k in c.keys():
-                if str(k) not in _META_KEYS:
-                    _add(soft, k)
+        for k in c.keys():
+            if str(k) not in _META_KEYS:
+                _add(soft, k)
     elif isinstance(c, list):
         for item in c:
             _add(strict, item)

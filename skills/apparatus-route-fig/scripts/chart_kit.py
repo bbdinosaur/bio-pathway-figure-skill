@@ -363,26 +363,36 @@ def _norm_series_aliases(s):
 
 
 def _parse_yerr(raw, n):
-    """兼容 1D 对称误差棒 [e1,...] 与 2D 非对称误差棒 [[lo1,...], [hi1,...]]。返回 (plot_yerr, lo_list, hi_list, err_msg)。"""
+    """兼容 1D 对称误差棒 [e1,...] 与 2D 非对称误差棒 [[lo1,...], [hi1,...]]；单项缺失 None/NA 自动归 0。"""
     if raw is None:
         return None, None, None, None
+
+    def _safe_err(v):
+        if tp.is_missing(v):
+            return 0.0
+        if not _is_num(v) or _to_float(v) < 0:
+            return None
+        return _to_float(v)
+
     if isinstance(raw, list) and len(raw) == 2 and all(isinstance(row, list) for row in raw):
         lo_r, hi_r = raw[0], raw[1]
         if len(lo_r) != n or len(hi_r) != n:
             return None, None, None, "2D yerr 长度与 y 不一致"
         lo_f, hi_f = [], []
         for j, (lv, hv) in enumerate(zip(lo_r, hi_r)):
-            if not _is_num(lv) or not _is_num(hv) or _to_float(lv) < 0 or _to_float(hv) < 0:
+            fl, fh = _safe_err(lv), _safe_err(hv)
+            if fl is None or fh is None:
                 return None, None, None, "2D yerr[%d] 非法: (%r, %r)" % (j, lv, hv)
-            lo_f.append(_to_float(lv))
-            hi_f.append(_to_float(hv))
+            lo_f.append(fl)
+            hi_f.append(fh)
         return [lo_f, hi_f], lo_f, hi_f, None
     if isinstance(raw, list) and len(raw) == n:
         vals = []
         for j, v in enumerate(raw):
-            if not _is_num(v) or _to_float(v) < 0:
+            fv = _safe_err(v)
+            if fv is None:
                 return None, None, None, "yerr[%d] 非法: %r" % (j, v)
-            vals.append(_to_float(v))
+            vals.append(fv)
         return vals, vals, vals, None
     return None, None, None, "yerr 与 y 长度不一致"
 
@@ -965,7 +975,7 @@ def _plot_panel(ax, p, panel_tag=""):
             span = max(hi_cur - lo_cur, 1e-6)
             step_h = span * 0.11
             tick_h = span * 0.032
-            cur_y = hi_cur + span * 0.04
+            cur_y = hi_cur + span * (0.11 if (kind == "bar" and p.get("show_values")) else 0.04)
             for bi, br in enumerate(brackets):
                 x1 = _br_x(br.get("x1"), br.get("s1"), 0)
                 x2 = _br_x(br.get("x2"), br.get("s2"), max(len(cats) - 1, 1))

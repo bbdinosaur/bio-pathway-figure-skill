@@ -19,8 +19,13 @@ def _legend_prims(sird, parts, used_nt, used_lk, W, y0, groups=None, lang="zh"):
         g: sirmod.PALETTE6[i % len(sirmod.PALETTE6)] for i, g in enumerate(groups or [])
     }
     items = []
+    seen_swatches = set()
     for t in used_nt:
         st = sirmod.NODE_STYLES.get(t, sirmod.NODE_STYLES["process"])
+        sw_key = (st[0], st[1])
+        if sw_key in seen_swatches:
+            continue
+        seen_swatches.add(sw_key)
         items.append({"kind": "node", "key": t, "label": sirmod.node_legend(t, lang),
                       "color": st[0], "stroke": st[1]})
     for k in used_lk:

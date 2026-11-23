@@ -1096,7 +1096,16 @@ def main():
     p10.add_argument("--export-dir", default=None)
     p10.add_argument("--export-png", default=None)
     p10.add_argument("--export-pdf", default=None)
+    p10.add_argument("--preview", default=None)
+    p10.add_argument("--preview-dpi", type=int, default=96)
     p10.add_argument("--dpi", type=int, default=300)
+
+    p11 = sp.add_parser("replace-color")
+    p11.add_argument("svg")
+    p11.add_argument("--old", required=True)
+    p11.add_argument("--value", required=True)
+    p11.add_argument("--id", default=None)
+    _add_common(p11)
 
     a = p.parse_args()
     if a.cmd == "info":
@@ -1118,6 +1127,9 @@ def main():
                                   "anchor": a.anchor, "weight": a.weight, "prov": a.prov, "reason": a.reason})
     if a.cmd == "remove":
         return _run_single_op(a, {"action": "remove", "id": a.id, "reason": a.reason})
+    if a.cmd == "replace-color":
+        return _run_single_op(a, {"action": "replace-color", "old": a.old, "value": a.value,
+                                  "scope_id": a.id, "reason": a.reason})
     if a.cmd == "batch":
         return cmd_batch(a)
     if a.cmd == "diff":

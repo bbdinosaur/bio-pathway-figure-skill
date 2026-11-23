@@ -522,6 +522,12 @@ def _assemble_and_export(spec, loaded_rows, out, name, ff, fam, footer, dpi, pre
         "pdf": str(pdf_path), "render": rmeta,
     }
     (out / (name + "_compose_meta.json")).write_text(json.dumps(rep, ensure_ascii=False, indent=1), encoding="utf-8")
+    (out / "checks_report.json").write_text(json.dumps({
+        "ok": rep["ok"], "errors": rep["errors"], "warns": rep["warns"],
+        "summary": {"canvas": rep["canvas"], "panels": len(panel_meta), "text_nodes": n_text},
+        "panel_checks": panel_checks,
+    }, ensure_ascii=False, indent=1), encoding="utf-8")
+    (out / "render_meta.json").write_text(json.dumps(rmeta, ensure_ascii=False, indent=1), encoding="utf-8")
     return rep, merged_prov
 
 
@@ -625,7 +631,11 @@ def main():
         print("必须提供 --spec 或 --panels", file=sys.stderr)
         return 2
 
-    rep, merged_prov = compose(spec, base, a.out, a.name, dpi=a.dpi, preview=a.preview, preview_dpi=a.preview_dpi)
+    try:
+        rep, merged_prov = compose(spec, base, a.out, a.name, dpi=a.dpi, preview=a.preview, preview_dpi=a.preview_dpi)
+    except (ValueError, FileNotFoundError) as e:
+        print(json.dumps({"ok": False, "stage": "compose_validate", "errors": [str(e)]}, ensure_ascii=False))
+        return 2
     _write_result_skel(a, rep, merged_prov)
     print(json.dumps(rep, ensure_ascii=False, indent=1))
     return 0

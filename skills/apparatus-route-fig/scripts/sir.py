@@ -19,7 +19,7 @@ import unicodedata
 
 # ---- 节点类型样式: type -> (fill, stroke, text_fill, shape, legend_zh, legend_en)
 NODE_STYLES = {
-    "apparatus": ("#E8F1FB", "#2B6CB0", "#1A365D", "rect", "装置/单元", "Apparatus / Unit"),
+    "apparatus": ("#EDF4FC", "#1E5B88", "#123859", "rect", "装置/单元", "Apparatus / Unit"),
     "process":   ("#E8F1FB", "#2B6CB0", "#1A365D", "rect", "工艺步骤",  "Process Step"),
     "decision":  ("#FFF4E0", "#C05621", "#7B341E", "rect", "判定/分支", "Decision / Control"),
     "start":     ("#E6FFED", "#2F855A", "#22543D", "pill", "起点",      "Start"),
@@ -51,6 +51,11 @@ NODE_TYPE_SYNONYMS = {
     "assay": "measure", "sensor": "measure", "detector": "measure", "qc": "measure",
     "analysis": "measure", "characterization": "measure", "readout": "measure", "imaging": "measure",
     "equipment": "apparatus", "device": "apparatus", "instrument": "apparatus", "reactor": "apparatus", "unit": "apparatus",
+    "pump": "apparatus", "valve": "apparatus", "mixer": "apparatus", "laser": "apparatus", "lamp": "apparatus",
+    "heater": "apparatus", "furnace": "apparatus", "oven": "apparatus", "column": "apparatus", "filter": "apparatus",
+    "separator": "apparatus", "centrifuge": "apparatus", "microscope": "apparatus", "spectrometer": "apparatus",
+    "injector": "apparatus", "chamber": "apparatus", "chip": "apparatus", "module": "apparatus",
+    "stage": "apparatus", "lens": "apparatus", "mirror": "apparatus", "beam_splitter": "apparatus",
     "controller": "decision", "gate": "decision", "branch": "decision", "checkpoint": "decision", "control": "decision",
     "buffer": "storage", "tank": "storage", "reservoir": "storage", "pool": "storage", "library": "storage",
     "exhaust": "waste", "effluent": "waste", "byproduct": "waste", "discard": "waste",

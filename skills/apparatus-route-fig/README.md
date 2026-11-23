@@ -24,9 +24,9 @@ scripts/
   compose_panels.py         一键多面板学术复合图无损 SVG 合成器（支持内联 sir/chart 与既有 svg + ID/defs 隔离 + A/B/C + 合并溯源与自检）
   extract.py                中文工艺文本→SIR 草稿启发式起草（需逐条核对）
   pdf_probe.py              科研论文 PDF 探针与按页提取（无平台 PDF 工具时备用：pymupdf→pdftotext→pypdf→限时 pdfplumber）
-  table_probe.py            零依赖源数据表探针与加载器（CSV/TSV/JSON/XLSX 纯标准库兜底，Unicode 负号/均值±误差/表题与表尾注剥离）
-  chart_kit.py              科研数据图一键（宽表/长表 + 别名容错 + volcano 火山图/点标注/step 生存曲线/2D非对称误差/组内括号/OLS/热图/双Y轴）
-  svg_edit.py               保源 SVG 编辑（嵌套与多 tspan 换行/批处理别名容错与多属性 attrs/变换 abs_xy/折线箭头/diff untouched_ratio）
+  table_probe.py            零依赖源数据表探针与加载器（CSV/TSV/JSON/多工作表 XLSX 一步索引与纯标准库解析，Unicode 负号/均值±误差/表尾注剥离）
+  chart_kit.py              科研数据图一键（宽/长表直连 + 原始 p_col 自动 -log10 + volcano 防撞标注/step 生存曲线/2D 误差/组内括号/OLS/热图/无 matplotlib 标准库 SVG 兜底）
+  svg_edit.py               保源 SVG 编辑（多 tspan 换行/batch 批处理/replace-color 色盲友好换色/变换 abs_xy/折线箭头/diff untouched_ratio）
   audit_delivery.py         交付前零依赖契约与落盘核验（严格区分 schema 必填键与描述键，零误报）
 references/
   sir-spec.md               SIR、chart_kit 与 svg_edit 完整字段/参数规范
@@ -39,7 +39,7 @@ references/
 - 核心布图、静态检查、SVG 生成与保源编辑仅依赖 Python 3.8+ 标准库（`PIL` 可选，用于更精准的字宽测量）。
 - SVG 渲染按序尝试：`rsvg-convert` → `cairosvg` → `inkscape` → `pymupdf` → `soffice` → `matplotlib` 镜像渲染；
   任一引擎可用即可产出 PNG/PDF。无中文字体时自动探测并在结果中诚实记录降级。
-- `chart_kit.py` 依赖 `matplotlib`，并设置 `svg.fonttype=none` 与 `pdf.fonttype=42` 以保留可编辑文本。
+- `chart_kit.py` 优先使用 `matplotlib`（设 `svg.fonttype=none` 与 `pdf.fonttype=42` 保留可编辑文本），缺失时自动降级为纯标准库可编辑 SVG + `render.py` 导出。
 - 所有脚本通过 `Path(__file__).resolve().parent` 定位，无工作目录硬编码依赖。
 
 ## 适用边界与限制
