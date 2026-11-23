@@ -612,8 +612,8 @@ def draw_edge(ax, e, src_c, dst_c, src_shape, dst_shape, src_sz, dst_sz, gid,
 
 def place_edge_label(ax, e, pts, src_c, dst_c, src_sz, dst_sz, gid, route, col,
                      out_geom, obstacles=None, meas=None, placed_labels=None,
-                     other_segs=None):
-    """Place an edge label avoiding nodes, group headers, other labels, and edge segments."""
+                     other_segs=None, group_borders=None):
+    """Place an edge label avoiding nodes, group headers/borders, other labels, and edge segments."""
     if not e.get("label"):
         return
     ignore = {e["from"], e["to"]}
@@ -677,10 +677,12 @@ def place_edge_label(ax, e, pts, src_c, dst_c, src_sz, dst_sz, gid, route, col,
         cands = [
             (mx, base_up),
             (mx, base_dn),
-            (p_a[0] * 0.65 + p_b[0] * 0.35, base_up),
-            (p_a[0] * 0.35 + p_b[0] * 0.65, base_up),
-            (p_a[0] * 0.65 + p_b[0] * 0.35, base_dn),
-            (p_a[0] * 0.35 + p_b[0] * 0.65, base_dn),
+            (p_a[0] * 0.68 + p_b[0] * 0.32, (p_a[1] * 0.68 + p_b[1] * 0.32) + 1.1 + lh_mm / 2.0),
+            (p_a[0] * 0.32 + p_b[0] * 0.68, (p_a[1] * 0.32 + p_b[1] * 0.68) + 1.1 + lh_mm / 2.0),
+            (p_a[0] * 0.68 + p_b[0] * 0.32, (p_a[1] * 0.68 + p_b[1] * 0.32) - 1.1 - lh_mm / 2.0),
+            (p_a[0] * 0.32 + p_b[0] * 0.68, (p_a[1] * 0.32 + p_b[1] * 0.68) - 1.1 - lh_mm / 2.0),
+            (p_a[0] * 0.78 + p_b[0] * 0.22, (p_a[1] * 0.78 + p_b[1] * 0.22) + 1.2 + lh_mm / 2.0),
+            (p_a[0] * 0.22 + p_b[0] * 0.78, (p_a[1] * 0.22 + p_b[1] * 0.78) + 1.2 + lh_mm / 2.0),
             (mx, top_pair + 1.0 + lh_mm / 2.0),
             (mx, bot_pair - 1.0 - lh_mm / 2.0),
             (mx, top_pair + 3.8 + lh_mm / 2.0),
@@ -717,6 +719,9 @@ def place_edge_label(ax, e, pts, src_c, dst_c, src_sz, dst_sz, gid, route, col,
         for sp, sq in segs_to_avoid:
             if _seg_hits_box(sp, sq, bb, pad=0.5):
                 score += 18.0
+        for gp, gq in (group_borders or []):
+            if _seg_hits_box(gp, gq, bb, pad=0.4):
+                score += 14.0
         if score < best_score:
             best_score = score
             best_cx, best_cy = cx_c, cy_c

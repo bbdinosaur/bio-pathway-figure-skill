@@ -421,7 +421,14 @@ def draw_schematic(ax, panel, meas, style, avail_w, wrap_w=None):
         deferred_edges.append((len(edge_records) - 1, e_draw, pts_i, gid, rc["route"],
                                S.edge_color(e), rec))
 
-    # Pass 2: place edge labels with full visibility of ALL edge segments
+    # Pass 2: place edge labels with full visibility of ALL edge segments & compartment borders
+    group_border_segs = []
+    for gb in group_geoms.values():
+        gx0, gy0, gx1, gy1 = gb
+        group_border_segs.extend([
+            ((gx0, gy0), (gx1, gy0)), ((gx1, gy0), (gx1, gy1)),
+            ((gx1, gy1), (gx0, gy1)), ((gx0, gy1), (gx0, gy0)),
+        ])
     for ei, e_draw, pts_i, gid, r_kind, col_i, rec in deferred_edges:
         if not e_draw.get("label"):
             continue
@@ -430,7 +437,8 @@ def draw_schematic(ax, panel, meas, style, avail_w, wrap_w=None):
             ax, e_draw, pts_i, pos[e_draw["from"]], pos[e_draw["to"]],
             sizes[e_draw["from"]], sizes[e_draw["to"]], gid, r_kind, col_i,
             rec, obstacles=obstacles, meas=meas,
-            placed_labels=placed_labels, other_segs=other_segs)
+            placed_labels=placed_labels, other_segs=other_segs,
+            group_borders=group_border_segs)
 
     # Draw nodes (zorder 2.0-2.5)
     for n in panel.get("nodes", []):
@@ -479,14 +487,18 @@ def panel_layout_pass(p, meas, style, avail_w, prefer_cjk=False):
     wrapped = False
     s = 1.0
     if met["content_w"] > avail_w:
-        # First try clean unwrapped scaling down to 0.70 (keeps all compartments on one row)
-        s_try = max(min(avail_w / met["content_w"] * 0.97, 0.95), 0.70)
-        st_u = scaled_style(style, s_try)
-        m_u = S.Measurer(st_u["fontsize"], prefer_cjk=prefer_cjk)
-        met_u = _compute_panel_metrics(p, m_u, st_u, avail_w, wrap_w=None)
-        m_u.close()
-        if met_u["content_w"] <= avail_w:
-            return met_u["total_inner_h"], s_try, False
+        # First try clean unwrapped scaling down to 0.62 (keeps 5-6 rank multi-compartment cascades on one axis)
+        s_try = max(min(avail_w / met["content_w"] * 0.96, 0.95), 0.62)
+        for _ in range(3):
+            st_u = scaled_style(style, s_try)
+            m_u = S.Measurer(st_u["fontsize"], prefer_cjk=prefer_cjk)
+            met_u = _compute_panel_metrics(p, m_u, st_u, avail_w, wrap_w=None)
+            m_u.close()
+            if met_u["content_w"] <= avail_w:
+                return met_u["total_inner_h"], s_try, False
+            if s_try <= 0.625:
+                break
+            s_try = max(s_try * (avail_w / met_u["content_w"]) * 0.97, 0.62)
         # Still too wide -> use group-atomic row wrap
         s = style.get("min_scale", 0.78)
         st2 = scaled_style(style, s)

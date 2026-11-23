@@ -352,7 +352,7 @@ def _extract_target_pdf_excerpts(full_txt, task_hint, budget=6500):
                         continue
                     buf = [ln_c.strip()]
                     blank_run = 0
-                    for ln_next in blk_lines[li_c + 1:li_c + 48]:
+                    for ln_next in blk_lines[li_c + 1:li_c + 64]:
                         if stop_re.match(ln_next):
                             break
                         if not ln_next.strip():
@@ -362,13 +362,13 @@ def _extract_target_pdf_excerpts(full_txt, task_hint, budget=6500):
                             continue
                         blank_run = 0
                         buf.append(ln_next.strip())
-                        if sum(len(x) + 1 for x in buf) >= 2600:
+                        if sum(len(x) + 1 for x in buf) >= 4000:
                             break
-                    cblk = "[%s CAPTION] %s" % (ptag, "\n".join(buf)[:2600])
+                    cblk = "[%s CAPTION] %s" % (ptag, "\n".join(buf)[:4000])
                     if cblk not in caps:
                         caps.append(cblk)
         if caps:
-            chosen.append("=== TARGET CAPTIONS (VERBATIM) ===\n" + "\n\n".join(caps[:2])[:3200])
+            chosen.append("=== TARGET CAPTIONS (VERBATIM) ===\n" + "\n\n".join(caps[:2])[:4500])
 
     # 2) Guaranteed coherent full paper pages (full `budget` chars)
     used_pages = 0
@@ -404,7 +404,7 @@ def _extract_target_pdf_excerpts(full_txt, task_hint, budget=6500):
                         if entry not in mentions:
                             mentions.append(entry)
         if mentions:
-            chosen.append("=== CROSS-PAGE RESULTS MENTIONS ===\n" + "\n".join(mentions[:8])[:1200])
+            chosen.append("=== CROSS-PAGE RESULTS MENTIONS ===\n" + "\n".join(mentions[:12])[:2200])
         if unread_hints:
             chosen.append("[PDF_READ_HINT] Additional pages mentioning target figure/table not printed in full: %s — use read(pdf_extract.txt, offset, limit) if any subpanel/molecule/value is missing." % ", ".join(unread_hints[:8]))
     return page_idx, "\n\n".join(chosen)
@@ -562,6 +562,10 @@ def cmd_prepare(a):
                 p, ins.get("viewBox"), ins.get("n_groups_with_id", 0),
                 len(ins.get("named_shapes", [])), len(ins.get("edges", [])), ins.get("n_texts", 0)))
             lines.append("    group_ids: %s" % ins.get("groups", [])[:40])
+            if ins.get("node_boxes"):
+                lines.append("    node_boxes: %s" % [
+                    "%s@%s" % (nb.get("label", "?")[:28], nb.get("bbox"))
+                    for nb in ins.get("node_boxes", [])[:30]])
             if ins.get("named_shapes"):
                 lines.append("    named_shapes: %s" % ins.get("named_shapes", [])[:30])
             if ins.get("edges"):
@@ -740,7 +744,8 @@ def cmd_deliver(a):
         if os.path.exists(checks_path):
             checks_rep = json.load(open(checks_path, encoding="utf-8"))
         audit_rep = {"status": "pass" if not edit_info.get("errors") else "fail",
-                     "errors": edit_info.get("errors", []), "warnings": [],
+                     "errors": edit_info.get("errors", []),
+                     "warnings": edit_info.get("audit_warnings", []),
                      "n_errors": len(edit_info.get("errors", []))}
         json.dump(audit_rep, open(audit_path, "w", encoding="utf-8"), indent=1, ensure_ascii=False)
     else:

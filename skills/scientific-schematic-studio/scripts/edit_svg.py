@@ -139,6 +139,67 @@ def _apply_affine(x, y, mat):
     return (a * x + c * y + e, b * x + d * y + f)
 
 
+def _world_delta_to_local(dx, dy, mat):
+    """Convert a world-space displacement (dx, dy) into local coordinates via linear inverse."""
+    a, b, c, d = mat[0], mat[1], mat[2], mat[3]
+    det = a * d - b * c
+    if abs(det) < 1e-9:
+        return dx, dy
+    return ((d * dx - c * dy) / det, (-b * dx + a * dy) / det)
+
+
+def _shift_connector_endpoint(el, which, ldx, ldy):
+    """Shift start (which=0) or end (which=1) endpoint of <line>/<polyline>/<path> by local (ldx, ldy)."""
+    if el.tag == q("line"):
+        kx, ky = ("x1", "y1") if which == 0 else ("x2", "y2")
+        try:
+            el.set(kx, "%.3f" % (float(el.get(kx, "0")) + ldx))
+            el.set(ky, "%.3f" % (float(el.get(ky, "0")) + ldy))
+            return True
+        except Exception:
+            return False
+    if el.tag == q("polyline"):
+        pts_raw = re.findall(r'[-+]?(?:\d+\.?\d*|\.\d+)', el.get("points", ""))
+        if len(pts_raw) >= 4:
+            pts = [[float(pts_raw[i]), float(pts_raw[i + 1])] for i in range(0, len(pts_raw) - 1, 2)]
+            idx = 0 if which == 0 else (len(pts) - 1)
+            pts[idx][0] += ldx
+            pts[idx][1] += ldy
+            el.set("points", " ".join("%.3f,%.3f" % (p[0], p[1]) for p in pts))
+            return True
+        return False
+    if el.tag == q("path") and el.get("d"):
+        segs = _parse_path_segments(el.get("d"))
+        if not segs:
+            return False
+        new_segs = []
+        for si, (kind, p0, ctrls, p1) in enumerate(segs):
+            np0, nctrls, np1 = p0, list(ctrls), p1
+            if which == 0 and si == 0:
+                np0 = (p0[0] + ldx, p0[1] + ldy)
+                if kind in ("C", "Q") and nctrls:
+                    nctrls[0] = (nctrls[0][0] + ldx, nctrls[0][1] + ldy)
+            if which == 1 and si == len(segs) - 1:
+                np1 = (p1[0] + ldx, p1[1] + ldy)
+                if kind == "C" and len(nctrls) >= 2:
+                    nctrls[1] = (nctrls[1][0] + ldx, nctrls[1][1] + ldy)
+                elif kind == "Q" and nctrls:
+                    nctrls[0] = (nctrls[0][0] + ldx, nctrls[0][1] + ldy)
+            new_segs.append((kind, np0, nctrls, np1))
+        out = ["M %.3f %.3f" % new_segs[0][1]]
+        for kind, _, nctrls, np1 in new_segs:
+            if kind == "L":
+                out.append("L %.3f %.3f" % np1)
+            elif kind == "C":
+                out.append("C %.3f %.3f %.3f %.3f %.3f %.3f" % (
+                    nctrls[0][0], nctrls[0][1], nctrls[1][0], nctrls[1][1], np1[0], np1[1]))
+            elif kind == "Q":
+                out.append("Q %.3f %.3f %.3f %.3f" % (nctrls[0][0], nctrls[0][1], np1[0], np1[1]))
+        el.set("d", " ".join(out))
+        return True
+    return False
+
+
 def _accum_translate(el, pmap):
     """Return effective world translation offset (e, f) for el under ancestor transforms."""
     mat = _accum_affine(el, pmap)
@@ -480,12 +541,23 @@ def inspect_svg(path):
             "marker_end": ed["marker_end"],
             "dash": ed["dash"],
         })
+    # Collect compact node bounding boxes (for spatial awareness in prepare)
+    anchors = _collect_node_anchors(root, pmap)
+    node_boxes = []
+    for anc in anchors[:40]:
+        lbl, bb = anc.get("label"), anc.get("bbox")
+        if lbl and bb:
+            node_boxes.append({
+                "label": lbl[:60],
+                "bbox": [round(bb[0], 1), round(bb[1], 1), round(bb[2], 1), round(bb[3], 1)],
+            })
     return {
         "path": path,
         "width": root.get("width"), "height": root.get("height"),
         "viewBox": root.get("viewBox"),
         "n_groups_with_id": len(groups), "groups": groups[:80],
         "named_shapes": named_shapes[:60],
+        "node_boxes": node_boxes,
         "edges": edges_out,
         "markers": markers, "n_texts": len(texts), "texts": texts[:80],
     }
@@ -742,6 +814,33 @@ def op_set_attr(root, o, log, errs):
                                 _set_style_prop(hsh, "fill", val)
                             if has_stroke:
                                 _set_style_prop(hsh, "stroke", val)
+    # Auto-contrast node text when changing node box fill to dark/light color (unless auto_contrast=False)
+    if attr.lower() == "fill" and o.get("auto_contrast", True) and val.startswith("#"):
+        want_tc = _svg_contrast_color(val)
+        pmap_c = build_parent_map(root)
+        txt_cands = []
+        if el.tag == q("g"):
+            for te in el.findall(".//%s" % q("text")):
+                txt_cands.append(te)
+        elif o.get("by_text"):
+            t_hit = _find_by_text(root, o["by_text"], want_shape=False)
+            if t_hit is not None and t_hit.tag == q("text"):
+                txt_cands.append(t_hit)
+        for te in txt_cands:
+            cur_f = (te.get("fill") or "").strip()
+            if not cur_f:
+                m_cf = re.search(r"(?:^|;)\s*fill\s*:\s*([^;]+)", te.get("style", ""), re.I)
+                cur_f = m_cf.group(1).strip() if m_cf else "#000000"
+            if want_tc == "#FFFFFF" and _svg_contrast_color(cur_f) == "#FFFFFF":
+                _set_style_prop(te, "fill", "#FFFFFF")
+                for ts in te.findall(".//%s" % q("tspan")):
+                    if ts.get("fill") or "fill" in (ts.get("style") or ""):
+                        _set_style_prop(ts, "fill", "#FFFFFF")
+            elif want_tc == "#10243B" and cur_f.lower() in ("#fff", "#ffffff", "white"):
+                _set_style_prop(te, "fill", "#10243B")
+                for ts in te.findall(".//%s" % q("tspan")):
+                    if ts.get("fill") or "fill" in (ts.get("style") or ""):
+                        _set_style_prop(ts, "fill", "#10243B")
     log.append("set_attr %s @%s=%s" % (ref, attr, val))
 
 
@@ -762,6 +861,20 @@ def op_move(root, o, log, errs):
             sb = _shape_bbox(sh_sib, pmap=pmap)
             if wxy and sb and _point_to_box_dist(wxy, sb) <= 12.0 and (sb[2] - sb[0]) < 260 and (sb[3] - sb[1]) < 140:
                 targets.append(sh_sib)
+    # Capture pre-move world bbox + moved element set so connected edges can stay elastically anchored
+    old_boxes = []
+    moved_set = set()
+    for t_el in targets:
+        for d_el in t_el.iter():
+            moved_set.add(d_el)
+        b0 = _shape_bbox(t_el, pmap=pmap)
+        if b0:
+            old_boxes.append(b0)
+    old_bb = (
+        min(b[0] for b in old_boxes), min(b[1] for b in old_boxes),
+        max(b[2] for b in old_boxes), max(b[3] for b in old_boxes),
+    ) if old_boxes else None
+
     tr = "translate(%.3f,%.3f)" % (dx, dy)
     for t_el in targets:
         prev = t_el.get("transform", "").strip()
@@ -769,7 +882,41 @@ def op_move(root, o, log, errs):
         bb = _shape_bbox(t_el, pmap=pmap)
         if bb:
             _expand_viewbox_if_needed(root, bb[0], bb[1], bb[2], bb[3], pad=8.0)
-    log.append("move %s by (%.1f, %.1f)" % (ref, dx, dy))
+
+    # Elastic re-anchoring of external incident edges touching old_bb (opt-out via detach_edges=True)
+    reanchored = 0
+    if old_bb and not o.get("detach_edges"):
+        for ed in _list_svg_edges(root):
+            e_el = ed["el"]
+            if e_el in moved_set:
+                continue
+            p0, p1 = ed["p0"], ed["p1"]
+            d0 = _point_to_box_dist(p0, old_bb)
+            d1 = _point_to_box_dist(p1, old_bb)
+            if d0 <= 14.0 and d1 > 14.0:
+                mat = _accum_affine(e_el, pmap)
+                ldx, ldy = _world_delta_to_local(dx, dy, mat)
+                if _shift_connector_endpoint(e_el, 0, ldx, ldy):
+                    reanchored += 1
+            elif d1 <= 14.0 and d0 > 14.0:
+                mat = _accum_affine(e_el, pmap)
+                ldx, ldy = _world_delta_to_local(dx, dy, mat)
+                if _shift_connector_endpoint(e_el, 1, ldx, ldy):
+                    reanchored += 1
+                    # Also shift any detached polygon arrowhead sitting at old tip p1
+                    for cand_h in root.iter():
+                        if cand_h in moved_set or cand_h is e_el:
+                            continue
+                        if cand_h.tag not in (q("polygon"), q("path")):
+                            continue
+                        hb = _shape_bbox(cand_h, pmap=pmap)
+                        if hb and (hb[2] - hb[0]) <= 18.0 and (hb[3] - hb[1]) <= 18.0:
+                            hcx, hcy = (hb[0] + hb[2]) / 2.0, (hb[1] + hb[3]) / 2.0
+                            if math.hypot(hcx - p1[0], hcy - p1[1]) <= 12.0:
+                                hprev = cand_h.get("transform", "").strip()
+                                cand_h.set("transform", (tr + " " + hprev).strip() if hprev else tr)
+    suf = (" (reanchored %d edge(s))" % reanchored) if reanchored else ""
+    log.append("move %s by (%.1f, %.1f)%s" % (ref, dx, dy, suf))
 
 
 _CSS_PROPS = frozenset({
@@ -1212,9 +1359,40 @@ def _svg_contrast_color(bg_hex):
         return "#10243B"
 
 
+def _resolve_box_ref(root, ref_s):
+    if not ref_s:
+        return None
+    el = find_by_id(root, str(ref_s))
+    if el is not None:
+        pmap = build_parent_map(root)
+        bb = _shape_bbox(el, pmap=pmap)
+        if bb:
+            return bb
+    return _box_for_text(root, str(ref_s))
+
+
 def op_add_node(root, o, log, errs):
-    x, y = float(o.get("x", 40)), float(o.get("y", 40))
-    w, h = float(o.get("w", 96)), float(o.get("h", 38 if o.get("sublabel") else 34))
+    w = float(o.get("w", 96))
+    h = float(o.get("h", 40 if o.get("sublabel") else 34))
+    gap = float(o.get("gap", 46.0))
+    # Smart relative placement (right_of / left_of / below / above) removes coordinate guesswork!
+    x, y = None, None
+    for rel_k in ("right_of", "left_of", "below", "above"):
+        if o.get(rel_k):
+            rb = _resolve_box_ref(root, o[rel_k])
+            if rb:
+                rcx, rcy = (rb[0] + rb[2]) / 2.0, (rb[1] + rb[3]) / 2.0
+                if rel_k == "right_of":
+                    x, y = rb[2] + gap, rcy - h / 2.0
+                elif rel_k == "left_of":
+                    x, y = rb[0] - gap - w, rcy - h / 2.0
+                elif rel_k == "below":
+                    x, y = rcx - w / 2.0, rb[3] + gap
+                elif rel_k == "above":
+                    x, y = rcx - w / 2.0, rb[1] - gap - h
+                break
+    if x is None:
+        x, y = float(o.get("x", 40)), float(o.get("y", 40))
     _expand_viewbox_if_needed(root, x, y, x + w, y + h, pad=8.0)
     fill = o.get("fill", "#EAF2FB")
     stroke = o.get("stroke", "#2E5E8C")
@@ -1225,16 +1403,32 @@ def op_add_node(root, o, log, errs):
         el = ET.SubElement(g, q("ellipse"))
         el.set("cx", "%.2f" % (x + w / 2.0)); el.set("cy", "%.2f" % (y + h / 2.0))
         el.set("rx", "%.2f" % (w / 2.0)); el.set("ry", "%.2f" % (h / 2.0))
+    elif shape == "hexagon":
+        dx_h = min(w * 0.16, h * 0.45)
+        pts_h = [(x + dx_h, y), (x + w - dx_h, y), (x + w, y + h / 2.0),
+                 (x + w - dx_h, y + h), (x + dx_h, y + h), (x, y + h / 2.0)]
+        el = ET.SubElement(g, q("polygon"))
+        el.set("points", " ".join("%.2f,%.2f" % p for p in pts_h))
+    elif shape == "diamond":
+        pts_d = [(x + w / 2.0, y), (x + w, y + h / 2.0), (x + w / 2.0, y + h), (x, y + h / 2.0)]
+        el = ET.SubElement(g, q("polygon"))
+        el.set("points", " ".join("%.2f,%.2f" % p for p in pts_d))
     else:
         el = ET.SubElement(g, q("rect"))
-        el.set("x", str(x)); el.set("y", str(y)); el.set("width", str(w)); el.set("height", str(h))
-        el.set("rx", str(h / 2.0 if shape == "stadium" else o.get("rx", 6)))
+        el.set("x", "%.2f" % x); el.set("y", "%.2f" % y)
+        el.set("width", "%.2f" % w); el.set("height", "%.2f" % h)
+        el.set("rx", "%.2f" % (h / 2.0 if shape == "stadium" else (0.0 if shape == "rect" else float(o.get("rx", 6)))))
     el.set("fill", fill); el.set("stroke", stroke); el.set("stroke-width", "1.3")
+    if shape == "complex":
+        el2 = ET.SubElement(g, q("rect"))
+        el2.set("x", "%.2f" % (x + 2.5)); el2.set("y", "%.2f" % (y + 2.5))
+        el2.set("width", "%.2f" % max(w - 5.0, 2.0)); el2.set("height", "%.2f" % max(h - 5.0, 2.0))
+        el2.set("rx", "4"); el2.set("fill", "none"); el2.set("stroke", stroke); el2.set("stroke-width", "0.9")
     tcol = o.get("text_color") or _svg_contrast_color(fill)
     fs = float(o.get("fs", 12))
     sub = o.get("sublabel")
     t = ET.SubElement(g, q("text"))
-    t.set("x", str(x + w / 2.0))
+    t.set("x", "%.2f" % (x + w / 2.0))
     t.set("y", "%.2f" % (y + h * (0.42 if sub else 0.50) + fs * 0.34))
     t.set("text-anchor", "middle"); t.set("font-family", "sans-serif")
     t.set("font-size", str(fs)); t.set("font-weight", "bold")
@@ -1242,13 +1436,13 @@ def op_add_node(root, o, log, errs):
     t.text = str(o.get("label", "new"))
     if sub:
         ts = ET.SubElement(g, q("text"))
-        ts.set("x", str(x + w / 2.0))
+        ts.set("x", "%.2f" % (x + w / 2.0))
         ts.set("y", "%.2f" % (y + h * 0.76 + fs * 0.22))
         ts.set("text-anchor", "middle"); ts.set("font-family", "sans-serif")
         ts.set("font-size", "%.1f" % (fs * 0.78))
         ts.set("fill", "#E6EEF8" if tcol == "#FFFFFF" else "#4A5B6D")
         ts.text = str(sub)
-    log.append("add_node %s at (%s,%s)" % (g.get("id"), x, y))
+    log.append("add_node %s at (%.1f,%.1f)" % (g.get("id"), x, y))
 
 
 def _box_for_text(root, query):
@@ -1287,18 +1481,62 @@ def op_add_edge(root, o, log, errs):
     raw_pts = o.get("points")
     if raw_pts and len(raw_pts) >= 2:
         pts = [(float(p[0]), float(p[1])) for p in raw_pts]
-    elif o.get("from_text") and o.get("to_text"):
-        b1 = _box_for_text(root, o["from_text"])
-        b2 = _box_for_text(root, o["to_text"])
+    elif (o.get("from_text") or o.get("from_gid")) and (o.get("to_text") or o.get("to_gid")):
+        b1 = _resolve_box_ref(root, o.get("from_gid") or o.get("from_text"))
+        b2 = _resolve_box_ref(root, o.get("to_gid") or o.get("to_text"))
         if not b1 or not b2:
-            errs.append("add_edge: could not resolve from_text=%r / to_text=%r" % (o.get("from_text"), o.get("to_text")))
+            errs.append("add_edge: could not resolve from=%r / to=%r" % (
+                o.get("from_gid") or o.get("from_text"), o.get("to_gid") or o.get("to_text")))
             return
         p1, p2 = _connect_boxes(b1, b2)
         if o.get("elbow"):
             mx = (p1[0] + p2[0]) / 2.0
             pts = [p1, (mx, p1[1]), (mx, p2[1]), p2]
         else:
-            pts = [p1, p2]
+            # Obstacle-aware detour if direct line slices through an intermediate node box!
+            pmap_o = build_parent_map(root)
+            blockers = []
+            for anc_o in _collect_node_anchors(root, pmap_o):
+                ob = anc_o.get("bbox")
+                if not ob:
+                    continue
+                if (abs(ob[0] - b1[0]) < 2 and abs(ob[1] - b1[1]) < 2) or (abs(ob[0] - b2[0]) < 2 and abs(ob[1] - b2[1]) < 2):
+                    continue
+                # Liang-Barsky segment vs shrunk box
+                x0b, y0b, x1b, y1b = ob[0] + 2.0, ob[1] + 2.0, ob[2] - 2.0, ob[3] - 2.0
+                if x1b <= x0b or y1b <= y0b:
+                    continue
+                ddx, ddy = p2[0] - p1[0], p2[1] - p1[1]
+                t0, t1, hit = 0.0, 1.0, True
+                for pp, qq in ((-ddx, p1[0] - x0b), (ddx, x1b - p1[0]), (-ddy, p1[1] - y0b), (ddy, y1b - p1[1])):
+                    if abs(pp) < 1e-9:
+                        if qq < 0:
+                            hit = False; break
+                    else:
+                        rr = qq / pp
+                        if pp < 0:
+                            if rr > t1: hit = False; break
+                            t0 = max(t0, rr)
+                        else:
+                            if rr < t0: hit = False; break
+                            t1 = min(t1, rr)
+                if hit and t0 <= t1:
+                    blockers.append(ob)
+            if blockers:
+                c1x, c1y = (b1[0] + b1[2]) / 2.0, (b1[1] + b1[3]) / 2.0
+                c2x, c2y = (b2[0] + b2[2]) / 2.0, (b2[1] + b2[3]) / 2.0
+                if abs(c2x - c1x) >= abs(c2y - c1y):
+                    top_y = min(min(b[1] for b in blockers), b1[1], b2[1]) - 18.0
+                    bot_y = max(max(b[3] for b in blockers), b1[3], b2[3]) + 18.0
+                    if abs(top_y - (c1y + c2y) / 2.0) <= abs(bot_y - (c1y + c2y) / 2.0):
+                        pts = [(c1x, b1[1]), (c1x, top_y), (c2x, top_y), (c2x, b2[1])]
+                    else:
+                        pts = [(c1x, b1[3]), (c1x, bot_y), (c2x, bot_y), (c2x, b2[3])]
+                else:
+                    r_x = max(max(b[2] for b in blockers), b1[2], b2[2]) + 18.0
+                    pts = [(b1[2], c1y), (r_x, c1y), (r_x, c2y), (b2[2], c2y)]
+            else:
+                pts = [p1, p2]
     else:
         x1, y1 = float(o.get("x1", 40)), float(o.get("y1", 40))
         x2, y2 = float(o.get("x2", 140)), float(o.get("y2", 40))
@@ -1676,6 +1914,33 @@ def main():
                 errs.append("op %s failed: %s" % (o.get("op"), ex))
     groups_after = sum(1 for el in root.iter(q("g")) if el.get("id"))
     texts_after = ["".join(t.itertext()).strip() for t in root.iter(q("text")) if "".join(t.itertext()).strip()]
+    # Post-edit lightweight geometric sanity check (viewBox clipping & severe node-box overlap)
+    edit_audit_warns = []
+    vb_cur = _parse_viewbox(root)
+    pmap_fin = build_parent_map(root)
+    anchors_fin = _collect_node_anchors(root, pmap_fin)
+    if vb_cur:
+        vx0, vy0, vw0, vh0 = vb_cur
+        vx1, vy1 = vx0 + vw0, vy0 + vh0
+        for anc_a in anchors_fin:
+            lbl_a, bb_a = anc_a.get("label", ""), anc_a.get("bbox")
+            if bb_a and (bb_a[0] < vx0 - 4 or bb_a[1] < vy0 - 4 or bb_a[2] > vx1 + 4 or bb_a[3] > vy1 + 4):
+                edit_audit_warns.append("node %r extends outside viewBox" % lbl_a[:30])
+    for i_a in range(len(anchors_fin)):
+        la, ba = anchors_fin[i_a].get("label", ""), anchors_fin[i_a].get("bbox")
+        if not ba:
+            continue
+        for j_a in range(i_a + 1, len(anchors_fin)):
+            lb, bb = anchors_fin[j_a].get("label", ""), anchors_fin[j_a].get("bbox")
+            if not bb:
+                continue
+            ix = min(ba[2], bb[2]) - max(ba[0], bb[0])
+            iy = min(ba[3], bb[3]) - max(ba[1], bb[1])
+            if ix > 6.0 and iy > 6.0:
+                area_a = max((ba[2] - ba[0]) * (ba[3] - ba[1]), 1.0)
+                area_b = max((bb[2] - bb[0]) * (bb[3] - bb[1]), 1.0)
+                if (ix * iy) / min(area_a, area_b) > 0.25:
+                    edit_audit_warns.append("overlapping edited nodes: %r vs %r" % (la[:24], lb[:24]))
     out_svg = os.path.join(a.out_dir, stem + ".svg")
     tree.write(out_svg, xml_declaration=True, encoding="utf-8")
     res = {"edited_svg": out_svg, "original_copy": orig_copy,
@@ -1684,7 +1949,7 @@ def main():
            "viewBox_before": vb_before, "viewBox_after": root.get("viewBox"),
            "texts_added": [t for t in texts_after if t not in texts_before][:20],
            "texts_removed": [t for t in texts_before if t not in texts_after][:20],
-           "applied_ops": log, "errors": errs, "n_ops": len(ops)}
+           "applied_ops": log, "errors": errs, "audit_warnings": edit_audit_warns[:12], "n_ops": len(ops)}
     if not a.no_render:
         res["render"] = render(out_svg, a.out_dir, stem, dpi=a.dpi)
     print(json.dumps(res, indent=1, ensure_ascii=False))

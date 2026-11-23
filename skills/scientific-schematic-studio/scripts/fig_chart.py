@@ -409,6 +409,38 @@ def load_chart_table(ch, spec_dir=None):
             out["series"] = series
             out["_source_sha256"] = src_sha
             return out
+        # Auto-group numbered/suffixed replicate columns (e.g. WT_1..WT_3, WT rep1..rep3, Ctrl-r1..r3)
+        # Triggers when want_y names match prefixes of >=2 columns OR when agg is set and no exact y_cols given
+        _REP_SUF = re.compile(r"^(?P<pfx>.+?)(?:[_\-\s]+(?:rep(?:licate)?|r|#)?\s*\d+|\(\s*(?:rep\s*)?\d+\s*\))$", re.I)
+        x_name_l = (want_x or (header[0].strip() if header else "")).strip().lower()
+        pfx_groups = {}
+        for h_i, h_raw in enumerate(header):
+            hs = h_raw.strip()
+            if not hs or hs.lower() == x_name_l:
+                continue
+            m_rep = _REP_SUF.match(hs)
+            if m_rep:
+                pk = m_rep.group("pfx").strip()
+                if pk:
+                    pfx_groups.setdefault(pk, []).append(hs)
+        if pfx_groups and any(len(v) >= 2 for v in pfx_groups.values()):
+            auto_cg = {}
+            if want_y:
+                # Only trigger if at least one requested y_col isn't an exact column but matches a replicate prefix
+                if any(str(yc).strip().lower() not in {h.strip().lower() for h in header} for yc in want_y):
+                    low_pfx = {k.lower(): (k, v) for k, v in pfx_groups.items() if len(v) >= 2}
+                    for yc in want_y:
+                        yl = str(yc).strip().lower()
+                        if yl in low_pfx:
+                            auto_cg[str(yc)] = low_pfx[yl][1]
+                        elif yl in {h.strip().lower() for h in header}:
+                            auto_cg[str(yc)] = [yc]
+            elif agg in ("mean_sd", "mean_sem", "median"):
+                for pk, cols_p in pfx_groups.items():
+                    if len(cols_p) >= 2:
+                        auto_cg[pk] = cols_p
+            if auto_cg and any(len(v) >= 2 for v in auto_cg.values()):
+                col_groups = auto_cg
 
     if isinstance(col_groups, dict) and col_groups:
         x_col = want_x or header[0].strip()
@@ -682,13 +714,15 @@ def draw_chart(ax, panel, colors, spec_dir=None):
                                    lw=0.65, zorder=3.4)
                 if ch.get("show_values") and not math.isnan(vals[j]):
                     span = max(abs(max_y or 0.0), abs(min_y or 0.0), 1.0)
-                    y_off = span * 0.025
-                    top_pt = max(pts_groups[j]) if (pts_groups and j < len(pts_groups) and pts_groups[j]) else vals[j]
+                    has_pts = bool(pts_groups and j < len(pts_groups) and pts_groups[j] and ch.get("show_points", True))
+                    y_off = span * (0.055 if has_pts else 0.025)
+                    top_pt = max(pts_groups[j]) if has_pts else vals[j]
+                    bot_pt = min(pts_groups[j]) if has_pts else vals[j]
                     if vals[j] >= 0:
                         yv = max(vals[j] + (yerr[j] if yerr else 0.0), top_pt) + y_off
                         va = "bottom"
                     else:
-                        yv = vals[j] - (yerr[j] if yerr else 0.0) - y_off
+                        yv = min(vals[j] - (yerr[j] if yerr else 0.0), bot_pt) - y_off
                         va = "top"
                     ax.text(r.get_x() + r.get_width() / 2.0, yv,
                             ("%.3g" % vals[j]), ha="center", va=va,
@@ -740,7 +774,7 @@ def draw_chart(ax, panel, colors, spec_dir=None):
             kw = {}
             if yerr:
                 kw.update(xerr=yerr, capsize=2.4, ecolor="#333333",
-                          error_kw=dict(lw=0.9))
+                          error_kw=dict(lw=0.9, zorder=3.1))
             if ch.get("bar_colors"):
                 bh_cols = [ch["bar_colors"][j % len(ch["bar_colors"])] for j in range(len(vals))]
                 cat_cols_used = bh_cols
@@ -754,7 +788,8 @@ def draw_chart(ax, panel, colors, spec_dir=None):
                            label=s["name"], zorder=2.5, **kw)
             for j, r in enumerate(bars):
                 r.set_gid("series-%d-bar-%d" % (i, j))
-                if pts_groups and j < len(pts_groups) and (ch.get("show_points", True)):
+                has_pts = bool(pts_groups and j < len(pts_groups) and pts_groups[j] and ch.get("show_points", True))
+                if has_pts:
                     grp = [v for v in (pts_groups[j] or []) if not math.isnan(_parse_float(v))]
                     if grp:
                         k_m = len(grp)
@@ -764,9 +799,10 @@ def draw_chart(ax, panel, colors, spec_dir=None):
                                    lw=0.65, zorder=3.4)
                 if ch.get("show_values") and not math.isnan(vals[j]):
                     span = max(abs(max_y or 0.0), abs(min_y or 0.0), 1.0)
-                    top_pt = max(pts_groups[j]) if (pts_groups and j < len(pts_groups) and pts_groups[j]) else vals[j]
-                    bot_pt = min(pts_groups[j]) if (pts_groups and j < len(pts_groups) and pts_groups[j]) else vals[j]
-                    xv = (max(vals[j] + (yerr[j] if yerr else 0.0), top_pt) + span * 0.025) if vals[j] >= 0 else (min(vals[j] - (yerr[j] if yerr else 0.0), bot_pt) - span * 0.025)
+                    pad_v = span * (0.078 if has_pts else 0.032)
+                    top_pt = max(pts_groups[j]) if has_pts else vals[j]
+                    bot_pt = min(pts_groups[j]) if has_pts else vals[j]
+                    xv = (max(vals[j] + (yerr[j] if yerr else 0.0), top_pt) + pad_v) if vals[j] >= 0 else (min(vals[j] - (yerr[j] if yerr else 0.0), bot_pt) - pad_v)
                     ax.text(xv, r.get_y() + r.get_height() / 2.0, ("%.3g" % vals[j]),
                             ha="left" if vals[j] >= 0 else "right", va="center",
                             fontsize=6.5, color="#222222")
@@ -791,10 +827,43 @@ def draw_chart(ax, panel, colors, spec_dir=None):
             sc.set_gid("series-%d" % i)
             plabs = s.get("point_labels") or ch.get("point_labels")
             if plabs:
+                fin_xs = [v for v in xs if not math.isnan(v)]
+                fin_ys = [v for v in vals if not math.isnan(v)]
+                x_sp = max((max(fin_xs) - min(fin_xs)) if len(fin_xs) >= 2 else 1.0, 1e-6)
+                y_sp = max((max(fin_ys) - min(fin_ys)) if len(fin_ys) >= 2 else 1.0, 1e-6)
+                placed_pl = []
+                # Pre-register scatter dot positions so labels never sit on top of neighboring points
+                for x_d, y_d in zip(xs, vals):
+                    if not math.isnan(x_d) and not math.isnan(y_d):
+                        nx_d = (x_d - (min(fin_xs) if fin_xs else 0.0)) / x_sp
+                        ny_d = (y_d - (min(fin_ys) if fin_ys else 0.0)) / y_sp
+                        placed_pl.append((nx_d - 0.025, ny_d - 0.032, nx_d + 0.025, ny_d + 0.032))
+                cand_offs = [(5, 5), (-5, 5), (5, -11), (-5, -11), (11, 0), (-11, 0), (5, 14), (-5, 14), (5, -18), (-5, -18)]
                 for x_p, y_p, pl_t in zip(xs, vals, plabs):
                     if pl_t and not math.isnan(y_p):
-                        ax.annotate(str(pl_t), (x_p, y_p), xytext=(3, 3),
-                                    textcoords="offset points", fontsize=6.5, color="#222222")
+                        txt_s = str(pl_t)
+                        lw_n = max(len(txt_s) * 0.026, 0.08)
+                        lh_n = 0.075
+                        best_off, best_ha, best_va = (5, 5), "left", "bottom"
+                        best_box = None
+                        for ox_pt, oy_pt in cand_offs:
+                            ha_c = "left" if ox_pt >= 0 else "right"
+                            va_c = "bottom" if oy_pt >= 0 else "top"
+                            nx_c = (x_p - (min(fin_xs) if fin_xs else 0.0)) / x_sp + (ox_pt / 135.0)
+                            ny_c = (y_p - (min(fin_ys) if fin_ys else 0.0)) / y_sp + (oy_pt / 105.0)
+                            bx0 = nx_c if ha_c == "left" else (nx_c - lw_n)
+                            by0 = ny_c if va_c == "bottom" else (ny_c - lh_n)
+                            if bx0 < -0.02 or (bx0 + lw_n) > 1.06:
+                                continue
+                            box_c = (bx0, by0, bx0 + lw_n, by0 + lh_n)
+                            if not any(min(box_c[2], ob[2]) > max(box_c[0], ob[0]) and min(box_c[3], ob[3]) > max(box_c[1], ob[1]) for ob in placed_pl):
+                                best_off, best_ha, best_va, best_box = (ox_pt, oy_pt), ha_c, va_c, box_c
+                                break
+                        if best_box is not None:
+                            placed_pl.append(best_box)
+                        ax.annotate(txt_s, (x_p, y_p), xytext=best_off,
+                                    textcoords="offset points", ha=best_ha, va=best_va,
+                                    fontsize=6.5, color="#222222")
         series_color_meta.append((color, cat_cols_used))
 
     if kind == "barh":
@@ -806,7 +875,7 @@ def draw_chart(ax, panel, colors, spec_dir=None):
         ax.set_ylabel(ch.get("x_label", ""), fontsize=8.5)
         xl = str(ch.get("y_label", "") or "").strip()
         u_str = str(ch.get("unit", "") or "").strip()
-        if u_str and u_str.lower() != xl.lower() and ("(%s)" % u_str).lower() not in xl.lower():
+        if u_str and u_str.lower() not in xl.lower():
             xl = (xl + " " if xl else "") + "(%s)" % u_str
         ax.set_xlabel(xl, fontsize=8.5)
         ax.xaxis.grid(True, ls=(0, (2, 3)), lw=0.5, color="#CCCCCC", zorder=0)
@@ -815,7 +884,7 @@ def draw_chart(ax, panel, colors, spec_dir=None):
         if ch.get("x_lim"):
             ax.set_xlim(ch["x_lim"][0], ch["x_lim"][1])
         elif max_y is not None or min_y is not None:
-            pad_f = 0.24 if ch.get("show_values") else 0.14
+            pad_f = 0.34 if ch.get("show_values") else 0.16
             hi_x = max(max_y or 0.0, 0.0)
             lo_x = min(min_y or 0.0, 0.0)
             span_x = max(hi_x - lo_x, 1.0)
@@ -835,7 +904,7 @@ def draw_chart(ax, panel, colors, spec_dir=None):
         ax.set_xlabel(ch.get("x_label", ""), fontsize=8.5)
         yl = str(ch.get("y_label", "") or "").strip()
         u_str = str(ch.get("unit", "") or "").strip()
-        if u_str and u_str.lower() != yl.lower() and ("(%s)" % u_str).lower() not in yl.lower():
+        if u_str and u_str.lower() not in yl.lower():
             yl = (yl + " " if yl else "") + "(%s)" % u_str
         ax.set_ylabel(yl, fontsize=8.5)
         ax.yaxis.grid(True, ls=(0, (2, 3)), lw=0.5, color="#CCCCCC", zorder=0)
@@ -856,13 +925,16 @@ def draw_chart(ax, panel, colors, spec_dir=None):
         if ch.get("y_scale"):
             ax.set_yscale(ch["y_scale"])
         elif ch.get("y_lim") is None and (max_y is not None or min_y is not None):
-            if min_y is not None and min_y < 0:
-                hi_y = max(max_y or 0.0, 0.0) * 1.24
-                lo_y = min_y * (1.34 if ch.get("show_values") else 1.22)
-                ax.set_ylim(bottom=lo_y, top=hi_y if hi_y > 0 else 0.2 * abs(min_y))
-            elif max_y is not None and max_y > 0:
-                lo_y = 0.0 if kind in ("bar", "stacked_bar") else None
-                ax.set_ylim(bottom=lo_y, top=max_y * 1.24)
+            hl_ys = [float(hl["y"]) if isinstance(hl, dict) else float(hl) for hl in ch.get("hlines", [])]
+            eff_min_y = min([v for v in ([min_y] + hl_ys) if v is not None], default=min_y)
+            eff_max_y = max([v for v in ([max_y] + hl_ys) if v is not None], default=max_y)
+            if eff_min_y is not None and eff_min_y < 0:
+                hi_y = max(eff_max_y or 0.0, 0.0) * 1.24
+                lo_y = eff_min_y * (1.34 if ch.get("show_values") else 1.22)
+                ax.set_ylim(bottom=lo_y, top=hi_y if hi_y > 0 else 0.2 * abs(eff_min_y))
+            elif eff_max_y is not None and eff_max_y > 0:
+                lo_y = 0.0 if (kind in ("bar", "stacked_bar") or (hl_ys and min(hl_ys) >= 0 and (min_y is None or min(hl_ys) < min_y))) else None
+                ax.set_ylim(bottom=lo_y, top=eff_max_y * 1.24)
         if ch.get("y_lim"):
             lo_req, hi_req = ch["y_lim"][0], ch["y_lim"][1]
             if str(ch.get("y_scale", "")).lower() == "log" and lo_req <= 0:

@@ -319,6 +319,11 @@ def main():
             else:
                 exp_by_fmt.setdefault(str(ex.get("format", "")).lower(), ex["path"])
     aliases = {
+        "deliverables": result["main_result"],
+        "artifacts": result["main_result"],
+        "outputs": result["main_result"],
+        "schema_version": result["version"],
+        "summary": result["notes"],
         "editable_source": deliv.get("editable_source"),
         "editable_svg": esrc_path,
         "svg_path": esrc_path,

@@ -68,11 +68,11 @@ python3 ${SKILL_DIR:-/skills/weekly-skill}/scripts/run_pipeline.py deliver /app/
   {"op": "replace_text", "find": "Old", "replace": "New"},
   {"op": "set_attr", "by_text": "Target", "attr": "fill", "value": "#FADBD8"},
   {"op": "set_marker", "from_text": "Target", "to_text": "Kinase", "marker": "tbar"},
-  {"op": "add_node", "id": "node-M", "label": "mTORC1", "sublabel": "Ser2448-P", "shape": "stadium", "x": 240, "y": 120, "w": 110, "h": 40, "fill": "#0072B2"},
+  {"op": "add_node", "id": "node-M", "label": "mTORC1", "sublabel": "Ser2448-P", "shape": "stadium", "right_of": "Kinase", "fill": "#0072B2"},
   {"op": "add_edge", "id": "edge-new", "from_text": "Target", "to_text": "mTORC1", "marker": "arrow", "label": "activates"},
   {"op": "add_legend", "items": [{"kind": "activates", "label": "Activation"}, {"kind": "inhibits", "label": "Inhibition"}]}]}
 ```
-ops：`retext`/`replace_text`/`set_attr`/`set_dash`/`move`/`swap_edge`/`set_marker`(`arrow|tbar|open|none`)/`add_node`/`add_edge`(`from_text`+`to_text`|`points`/`elbow`)/`add_group`/`add_legend`/`delete`/`add_note`（边支持 `gid`/`from_text`+`to_text`/`edge_idx`/`by_text`、仿射矩阵与贝塞尔，超界扩 `viewBox`）。
+ops：`retext`/`replace_text`/`set_attr`(暗底自适配白字)/`set_dash`/`move`(连边弹性跟随)/`swap_edge`/`set_marker`(`arrow|tbar|open|none`)/`add_node`(`right_of|below|x,y`)/`add_edge`(自动避障)/`add_group`/`add_legend`/`delete`/`add_note`（边支持 `gid`/`from_text`+`to_text`/`edge_idx`，超界扩 `viewBox`）。
 
 ## 无脚本兜底与资源
 仅 `run_pipeline.py` 连续失败才手写 SVG → `soffice --headless --convert-to pdf` + `pdftoppm -png -r 300` → `result.json`。

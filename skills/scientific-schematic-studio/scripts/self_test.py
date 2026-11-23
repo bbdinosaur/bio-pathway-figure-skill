@@ -1119,6 +1119,74 @@ def main():
           "肿瘤微环境" in cjk_probe and "巨噬细胞" in cjk_probe,
           repr(cjk_probe))
 
+    # 37) v26: elastic edge re-anchoring on op_move + auto-contrast dark fill + relative add_node + obstacle-aware add_edge
+    v26_ops = os.path.join(wd, "v26_ops.json")
+    json.dump({"ops": [
+        {"op": "move", "by_text": "DstC", "dx": 24, "dy": 28},
+        {"op": "set_attr", "by_text": "MidB", "attr": "fill", "value": "#0072B2"},
+        {"op": "add_node", "id": "node-Inh", "label": "InhX", "shape": "hexagon", "below": "MidB", "gap": 32, "fill": "#FADBD8"},
+        {"op": "add_edge", "id": "edge-bypass", "from_text": "SrcA", "to_text": "DstC", "marker": "tbar", "label": "bypass"},
+    ]}, open(v26_ops, "w", encoding="utf-8"))
+    r26e = run([os.path.join(HERE, "edit_svg.py"), ext_mk_svg, v26_ops, "--out-dir", wd, "--stem", "v26_ed", "--no-render"])
+    j26e = json.loads(r26e.stdout) if r26e.returncode == 0 else {}
+    s26 = open(os.path.join(wd, "v26_ed.svg"), encoding="utf-8").read() if os.path.exists(os.path.join(wd, "v26_ed.svg")) else ""
+    import re as _re26
+    check("v26: elastic op_move reanchors edge + auto-contrast white text + relative hexagon node + detour add_edge",
+          r26e.returncode == 0
+          and any("reanchored 1 edge" in op for op in j26e.get("applied_ops", []))
+          and 'x2="269.000"' in s26 and 'y2="76.000"' in s26
+          and 'fill:#FFFFFF' in s26
+          and '<polygon' in s26
+          and len(_re26.findall(r'L\s+[-\d.]+', s26)) >= 3
+          and not j26e.get("audit_warnings"),
+          str(j26e.get("applied_ops")) + " warns=" + str(j26e.get("audit_warnings")))
+
+    # 38) v26: automatic numbered/suffixed replicate column aggregation (WT_1..WT_3, KO_1..KO_3)
+    rep_csv = os.path.join(wd, "v26_rep_suf.csv")
+    open(rep_csv, "w", encoding="utf-8").write(
+        "Gene,WT_1,WT_2,WT_3,KO_1,KO_2,KO_3\nRIPK1,1.0,1.2,1.1,3.2,3.5,3.4\nMLKL,0.8,0.9,1.0,4.1,4.3,4.2\n"
+    )
+    import fig_chart as _FC26
+    t26 = _FC26.load_chart_table({"data_file": rep_csv, "x_col": "Gene", "y_cols": ["WT", "KO"], "agg": "mean_sd"})
+    s_by_nm = {s["name"]: s for s in t26.get("series", [])}
+    check("v26: auto-aggregates suffixed replicate cols (WT_1..3, KO_1..3) from y_cols=['WT','KO']",
+          set(s_by_nm.keys()) == {"WT", "KO"}
+          and abs(s_by_nm["WT"]["values"][0] - 1.1) < 1e-3
+          and abs(s_by_nm["KO"]["values"][1] - 4.2) < 1e-3
+          and len(s_by_nm["KO"]["points"][0]) == 3,
+          str(s_by_nm))
+
+    # 39) v26: balanced orphan-free wrap_label (no single-char Roman numeral orphan line)
+    import fig_style as _FS26
+    w26 = _FS26.wrap_label("Mitochondrial Oxidative Phosphorylation Complex I", max_chars=24)
+    w26_lines = w26.split("\n")
+    check("v26: balanced orphan-free wrap_label eliminates tiny orphan last line",
+          len(w26_lines) <= 3 and len(w26_lines[-1]) >= 6 and "Complex I" in w26_lines[-1],
+          repr(w26))
+
+    # 40) v26: scatter collision-avoiding point_labels renders cleanly with 0 audit errors
+    v26_sc = os.path.join(wd, "v26_scatter.json")
+    json.dump({
+        "preset": "nature_single",
+        "panels": [{
+            "id": "p1", "type": "scatter", "title": "Volcano Highlights", "height_mm": 56,
+            "chart": {
+                "x_values": [-2.1, -1.9, 2.2, 2.35, 2.45],
+                "series": [{"name": "DEGs", "values": [4.2, 4.3, 5.1, 5.2, 5.25],
+                            "point_labels": ["BCL2", "MCL1", "RIPK3", "MLKL", "ZBP1"]}],
+                "x_label": "log2FC", "y_label": "-log10(padj)", "unit": "-log10", "legend": False,
+                "hlines": [{"y": 1.3, "label": "p=0.05"}],
+            }
+        }]
+    }, open(v26_sc, "w", encoding="utf-8"))
+    v26_g, v26_a = os.path.join(wd, "v26_g.json"), os.path.join(wd, "v26_a.json")
+    r26b = run([os.path.join(HERE, "build_figure.py"), v26_sc, "--out-dir", wd, "--stem", "v26s", "--geom", v26_g])
+    r26a = run([os.path.join(HERE, "audit_figure.py"), v26_g, "--spec", v26_sc, "--out", v26_a])
+    aud26 = json.load(open(v26_a, encoding="utf-8")) if os.path.exists(v26_a) else {}
+    check("v26: collision-avoiding scatter point_labels + hline passes audit with 0 errors",
+          r26b.returncode == 0 and r26a.returncode == 0 and aud26.get("n_errors") == 0,
+          (r26b.stderr or "") + str(aud26.get("errors")))
+
     ok = all(c for _, c, _ in results)
     print("== self_test %s ==" % ("PASS" if ok else "FAIL"))
     for name, cond, detail in results:

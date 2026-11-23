@@ -37,7 +37,7 @@ def contrast_text_color(bg_hex, dark="#10243B", light="#FFFFFF"):
 
 
 def wrap_label(text, max_chars=24):
-    """Auto-wrap long single-line node labels into 2-3 balanced lines without losing words."""
+    """Auto-wrap long single-line labels into 2-3 balanced, orphan-free lines without losing words."""
     s = str(text or "")
     if "\n" in s or not s.strip():
         return s
@@ -46,16 +46,37 @@ def wrap_label(text, max_chars=24):
         return s
     words = s.split()
     if len(words) >= 2:
-        lines, cur = [], ""
-        for w in words:
-            cand = (cur + " " + w).strip() if cur else w
-            if cur and len(cand) > eff_max:
-                lines.append(cur)
-                cur = w
-            else:
+        # Try 2 lines first if balanced length fits within slight slack, else up to 3 balanced lines
+        def _split_k(ws, k):
+            total = sum(len(w) for w in ws) + len(ws) - 1
+            target = total / float(k)
+            lines, cur = [], ""
+            for wi, w in enumerate(ws):
+                rem_lines = k - len(lines) - 1
+                rem_words = len(ws) - wi - 1
+                cand = (cur + " " + w).strip() if cur else w
+                if cur and rem_lines > 0 and rem_words >= rem_lines - 1:
+                    if len(cand) > eff_max or (len(cur) >= target * 0.82 and abs(len(cand) - target) > abs(len(cur) - target)):
+                        lines.append(cur)
+                        cur = w
+                        continue
                 cur = cand
-        if cur:
-            lines.append(cur)
+            if cur:
+                lines.append(cur)
+            return lines
+
+        k_need = 2 if len(s) <= eff_max * 2 + 2 else 3
+        lines = _split_k(words, k_need)
+        # Prevent ugly 1-3 char orphan last line (e.g. Roman numeral "I" / "II" / "A")
+        if len(lines) >= 2 and len(lines[-1]) <= 3 and len(lines[-2].split()) >= 2:
+            prev_ws = lines[-2].split()
+            if len(lines[-2]) + 1 + len(lines[-1]) <= eff_max + 4:
+                lines[-2] = lines[-2] + " " + lines[-1]
+                lines.pop()
+            else:
+                moved = prev_ws.pop()
+                lines[-2] = " ".join(prev_ws)
+                lines[-1] = moved + " " + lines[-1]
         return "\n".join(lines[:3])
     # Single long token (e.g., CJK or slash/hyphen-joined): split cleanly near midpoint
     mid = len(s) // 2
