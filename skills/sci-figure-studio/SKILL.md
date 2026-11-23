@@ -29,7 +29,7 @@ python3 "${SKILL_DIR:-/skills/weekly-skill}/scripts/inspect_input.py" /input --c
 1. 按 `references/chart_recipes.md` §1 写 `/app/work/fig1.spec.json`：
    - 图型：`bar/grouped_bar/stacked_bar(normalize_pct)/barh/line(error_style:"band")/errorbar/scatter(fit_line)/box/violin/pie/donut/heatmap(vcenter:0)`；预设见 `assets/journal_presets.json`；高阶项（双 Y `secondary_series`、`data.filter`、`x_order`、`error_low/high`、`export.transparent`）见 recipe；
    - 数据：支持 CSV/TSV/XLSX(零依赖)/`json_file`、tidy/宽表 `y_cols` 及宽矩阵热图；重复观测自动 `mean±SD` 留行号（`show_points:true` 叠散点）；
-   - 标注：轴带单位；>1e4 自动科学计数；散点避障；`legend_loc:"outer_top"/"outer_right"`；显著性 `auto:true`（取自源结论）；`export.preview_png:true` 出 100 DPI 预览。
+   - 标注：轴带单位；>1e4 自动科学计数；散点避障；`legend_loc:"outer_top"/"outer_right"`；显著性 `auto:true`（取自源结论）；默认同步 300 DPI PNG 与 100 DPI 预览。
 2. 运行：
 ```bash
 python3 "${SKILL_DIR:-/skills/weekly-skill}/scripts/chart_tool.py" /app/work/fig1.spec.json --outdir /app/output --base fig1
@@ -43,7 +43,8 @@ python3 "${SKILL_DIR:-/skills/weekly-skill}/scripts/svg_edit.py" --inspect --inp
 2. 按 `references/chart_recipes.md` §3 写 `/app/work/ops.json`，运行：
 ```bash
 python3 "${SKILL_DIR:-/skills/weekly-skill}/scripts/svg_edit.py" --input <原图> --ops /app/work/ops.json \
-  --out-svg /app/output/fig_edited.svg --out-pdf /app/output/fig_edited.pdf --preview /app/output/fig_edited_preview.png --dpi 100
+  --out-svg /app/output/fig_edited.svg --out-pdf /app/output/fig_edited.pdf \
+  --out-png /app/output/fig_edited.png --preview /app/output/fig_edited_preview.png --dpi 100
 ```
    PDF 自动产出 `<text>` SVG 与 `.provenance.json`；`exact/contains/regex` 同步红改保彩底；`recolor/move/delete` 自动重导该页 PDF。
 
@@ -55,7 +56,8 @@ python3 "${SKILL_DIR:-/skills/weekly-skill}/scripts/svg_edit.py" --extract-pdf <
 2. 按 `references/chart_recipes.md` §2 写 `/app/work/mech.json`（`TB|LR`、`role` 配色、`complexes`、`badge`、`style:"membrane"`、平滑 90° 入框与双向平行分离），运行（`--verify-pdf` 查拼错）：
 ```bash
 python3 "${SKILL_DIR:-/skills/weekly-skill}/scripts/svg_edit.py" --diagram /app/work/mech.json --verify-pdf <paper.pdf> \
-  --out-svg /app/output/figure03.svg --out-pdf /app/output/figure03.pdf --preview /app/output/figure03_preview.png --dpi 100
+  --out-svg /app/output/figure03.svg --out-pdf /app/output/figure03.pdf \
+  --out-png /app/output/figure03.png --preview /app/output/figure03_preview.png --dpi 100
 ```
    （反馈/跨泳道自动走外侧圆角走廊防穿框；手工坐标用 `--blank 宽x高 --ops ops.json`。）
 

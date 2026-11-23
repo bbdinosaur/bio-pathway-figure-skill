@@ -219,16 +219,37 @@ def apply_ops(svg_path, ops):
                 new = op["replace"]
                 mode = op.get("match", "contains")
                 applied_pairs = []
+
+                def _do_sub(s):
+                    if mode == "exact":
+                        return new
+                    if mode == "regex":
+                        return re.sub(find, new, s)
+                    return s.replace(find, new)
+
+                def _span_hit(s):
+                    if mode == "exact":
+                        return s == find
+                    if mode == "regex":
+                        return bool(re.search(find, s))
+                    return find in s
+
                 for el in hits:
                     old = _full_text(el)
-                    if mode == "exact":
-                        replaced = new
-                    elif mode == "regex":
-                        replaced = re.sub(find, new, old)
+                    tspans = [c for c in el if c.tag.split("}")[-1] == "tspan"]
+                    matched_ts = [t for t in tspans if _span_hit("".join(t.itertext()))] if len(tspans) > 1 else []
+                    if matched_ts:
+                        for t in matched_ts:
+                            t_old = "".join(t.itertext())
+                            t_new = _do_sub(t_old)
+                            if len(t_new) != len(t_old) and t.get("x") and len(t.get("x").split()) > 1:
+                                t.set("x", t.get("x").split()[0])
+                            t.text = t_new
+                        applied_pairs.append((old, _full_text(el)))
                     else:
-                        replaced = old.replace(find, new)
-                    _set_text(el, replaced)
-                    applied_pairs.append((old, replaced))
+                        replaced = _do_sub(old)
+                        _set_text(el, replaced)
+                        applied_pairs.append((old, replaced))
                 if hits:
                     entry.update(status="applied", before=applied_pairs[0][0],
                                  after=applied_pairs[0][1], n=len(hits))
@@ -284,23 +305,34 @@ def apply_ops(svg_path, ops):
                     "stroke": "stroke", "stroke_width": "stroke-width",
                     "opacity": "opacity",
                 }
+
+                def _apply_css(node, attr, val):
+                    node.set(attr, val)
+                    st = node.get("style")
+                    if st is not None:
+                        if re.search(rf"(?:^|;)\s*{attr}\s*:", st):
+                            node.set("style", re.sub(rf"((?:^|;)\s*){attr}\s*:\s*[^;]+", rf"\1{attr}:{val}", st))
+                        else:
+                            sep = "" if (not st or st.rstrip().endswith(";")) else ";"
+                            node.set("style", f"{st}{sep}{attr}:{val}")
+
                 for el in hits:
+                    targets_st = [el] + [c for c in el if c.tag.split("}")[-1] == "tspan"]
                     for k_in, attr in style_map.items():
                         if k_in in op and op[k_in] is not None:
                             val = str(op[k_in])
-                            el.set(attr, val)
-                            if el.get("style") and re.search(rf"\b{attr}\s*:", el.get("style", "")):
-                                el.set("style", re.sub(rf"\b{attr}\s*:\s*[^;]+", f"{attr}:{val}", el.get("style", "")))
+                            for nd_t in targets_st:
+                                _apply_css(nd_t, attr, val)
                 entry.update(status="applied" if hits else "not_found", n=len(hits))
             elif kind == "move":
-                hits = [el for el in root.iter() if el.get("id") == op.get("id")]
+                hits = find_target(root, op)
                 for el in hits:
                     tr = el.get("transform", "")
                     el.set("transform", (tr + " " if tr else "") +
                            f"translate({op.get('dx', 0)},{op.get('dy', 0)})")
                 entry.update(status="applied" if hits else "not_found", n=len(hits))
             elif kind == "delete":
-                hits = find_target(root, op.get("target", {}))
+                hits = find_target(root, op.get("target") or op)
                 pmap = _parent_map(root)
                 for el in hits:
                     entry.setdefault("before", _full_text(el) or el.get("id", ""))

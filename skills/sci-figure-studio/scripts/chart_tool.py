@@ -189,7 +189,7 @@ def build_figure(spec):
             "numeric_x": bool(resolved.get("numeric_x")),
             "aggregated": bool(resolved.get("aggregated")),
             "aggregation_mode": resolved.get("aggregation_mode"),
-            "mapping": pnl.get("mapping"),
+            "mapping": pnl.get("mapping") or (pnl.get("data") or {}).get("mapping"),
             "xlabel": pnl.get("xlabel"),
             "ylabel": pnl.get("ylabel"),
             "groups": resolved.get("groups", []),
@@ -297,7 +297,7 @@ def main():
     paths["pdf"] = str(pdf_path)
     fig.savefig(png_path, dpi=png_dpi, transparent=transparent)
     paths["png"] = str(png_path)
-    if exp_cfg.get("preview_png"):
+    if exp_cfg.get("preview_png", True):
         prev_path = outdir / f"{base}_preview.png"
         fig.savefig(prev_path, dpi=preview_dpi, transparent=transparent)
         paths["preview"] = str(prev_path)
@@ -322,6 +322,13 @@ def main():
         "max_abs_diff": max((float(g.get("max_abs_diff", 0.0)) for g in ga_list), default=0.0),
         "panels": ga_list,
     }
+    empty_panels = [
+        p["panel"] for p in prov
+        if not any(el.get("value") is not None for el in p.get("elements", []))
+    ]
+    df_warns = [w for p in prov for w in p.get("warnings", [])]
+    if empty_panels:
+        df_warns.append(f"空面板告警：面板 {empty_panels} 有效数值为 0，请检查 mapping 列名与源表表头是否匹配")
     checks = {
         "legend_series_match": all(c["match"] for c in legend_checks) if legend_checks else True,
         "legend_details": legend_checks,
@@ -330,10 +337,13 @@ def main():
         "glyph_value_audit": glyph_value_audit,
         "annotation_audit": ann_audit,
         "data_fidelity": {
+            "ok": len(empty_panels) == 0,
+            "empty_panels": empty_panels,
             "n_panels": len(prov),
             "n_elements": sum(len(p["elements"]) for p in prov),
+            "n_valid_elements": sum(1 for p in prov for el in p["elements"] if el.get("value") is not None),
             "n_missing": sum(len(p["missing_cells"]) for p in prov),
-            "warnings": [w for p in prov for w in p.get("warnings", [])],
+            "warnings": df_warns,
         },
     }
     ec = png_edge_check(paths["png"])
@@ -399,6 +409,7 @@ def main():
         and bool(checks.get("editable_svg", {}).get("ok"))
         and bool(checks.get("legend_series_match"))
         and bool(checks.get("glyph_value_audit", {}).get("ok", True))
+        and bool(checks.get("data_fidelity", {}).get("ok", True))
         and not ec.get("clipping_suspect")
     )
     summary = {

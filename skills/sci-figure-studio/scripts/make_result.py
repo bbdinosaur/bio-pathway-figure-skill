@@ -170,6 +170,18 @@ def main():
                     out["checks"][fk] = fobj["self_check"]
     if args.change:
         out["change_log"] = (out.get("change_log") or []) + [{"change": c} for c in args.change]
+    elif isinstance(out.get("source_mapping"), dict) and not out.get("change_log"):
+        sm0 = out["source_mapping"]
+        if isinstance(sm0.get("change_log"), list) and sm0["change_log"]:
+            out["change_log"] = sm0["change_log"]
+        elif isinstance(sm0.get("reproducibility"), dict):
+            rep = sm0["reproducibility"]
+            out["change_log"] = [{
+                "action": "generate",
+                "tool": sm0.get("generated_by") or "sci-figure-studio",
+                "figure": sm0.get("figure") or sm0.get("title"),
+                "command": rep.get("command"),
+            }]
     if args.uncertainty:
         out["uncertainty"] = sorted(set((out.get("uncertainty") or []) + args.uncertainty))
     if args.limit:

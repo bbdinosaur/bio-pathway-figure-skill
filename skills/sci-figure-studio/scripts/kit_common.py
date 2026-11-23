@@ -210,7 +210,8 @@ def rasterize_any(src, out_png, dpi=150):
                     cw = min(im.width, max(1, int(round(vw * scale))))
                     ch = min(im.height, max(1, int(round(vh * scale))))
                     if cw < im.width or ch < im.height:
-                        im.crop((0, 0, cw, ch)).save(out)
+                        im = im.crop((0, 0, cw, ch))
+                    im.save(out, dpi=(dpi, dpi))
                 except Exception:
                     pass
                 return {"ok": True, "tool": "chrome-headless"}

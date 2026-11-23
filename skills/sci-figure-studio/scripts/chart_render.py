@@ -363,7 +363,7 @@ def draw_series_panel(ax, p, opts):
     audit_vals = []
     show_vals = bool(p.get("show_values", False))
     show_pts = bool(p.get("show_points", False))
-    val_fmt = p.get("value_fmt", "{:.2g}")
+    val_fmt = p.get("value_fmt", "{:.3g}")
 
     if kind in ("bar", "grouped_bar", "stacked_bar"):
         pos_b = np.zeros(y.shape[1])
@@ -552,7 +552,7 @@ def draw_heatmap(ax, p, opts):
     ax.set_xticklabels(p["col_labels"])
     ax.set_yticks(np.arange(mat.shape[0]))
     ax.set_yticklabels(p["row_labels"])
-    if p.get("annot", False):
+    if p.get("annot") or p.get("annotate") or p.get("show_values"):
         fmt = p.get("annot_fmt", "{:.2f}")
         for i in range(mat.shape[0]):
             for j in range(mat.shape[1]):
@@ -782,7 +782,15 @@ def draw_panel(ax, fig, p, style):
             ax2.spines["top"].set_visible(False)
         if p["kind"] not in ("pie", "donut"):
             used_brackets = []
-            for ann in p.get("annotations", []):
+            all_anns = list(p.get("annotations") or [])
+            for sig in (p.get("significance") or []):
+                s_ann = dict(sig)
+                s_ann.setdefault("type", "signif")
+                if "text" not in s_ann and "label" in s_ann:
+                    s_ann["text"] = s_ann["label"]
+                s_ann.setdefault("auto", True)
+                all_anns.append(s_ann)
+            for ann in all_anns:
                 if ann.get("type") == "signif":
                     _resolve_signif_x(p, ann)
                     if ann.get("auto") or "y" not in ann:

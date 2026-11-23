@@ -215,10 +215,19 @@ def _agg_values(vals, mode):
     return mean, sd, n
 
 
+def _get_mapping(panel):
+    """兼容 panel.mapping 与 panel.data.mapping 两种写法。"""
+    mp = panel.get("mapping")
+    if isinstance(mp, dict) and mp:
+        return mp
+    dmp = (panel.get("data") or {}).get("mapping")
+    return dmp if isinstance(dmp, dict) else {}
+
+
 def _from_xy_points(panel):
     """连续数值 X 轴模式（scatter 或 numeric_x=true 的 line/errorbar）：保留每个原始 (x,y) 点不覆盖。"""
     data = panel.get("data", {})
-    mp = panel.get("mapping", {})
+    mp = _get_mapping(panel)
     cols, rows, src = _load_rows(data)
     xcol = mp.get("x", "x")
     ycol = mp.get("y", "y")
@@ -264,7 +273,7 @@ def _from_xy_points(panel):
 def _from_tidy_box(panel):
     """box 图支持 tidy 表：按 mapping.x（或 series）分组收集所有观测值。"""
     data = panel.get("data", {})
-    mp = panel.get("mapping", {})
+    mp = _get_mapping(panel)
     cols, rows, src = _load_rows(data)
     gcol = mp.get("x") or mp.get("series") or (cols[0] if cols else "group")
     ycol = mp.get("y") or (cols[1] if len(cols) > 1 else "y")
@@ -293,7 +302,7 @@ def _from_tidy(panel):
     """tidy 长表或宽表(mapping.y_cols)：file(CSV/TSV/XLSX)/json_file 或 inline columns/rows。
     若同一 (series, group) 含多个重复观测且无 error 列，自动聚合 mean±SD（可设 aggregate），保留 raw_points 与全部行号。"""
     data = panel.get("data", {})
-    mp = panel.get("mapping", {})
+    mp = _get_mapping(panel)
     cols, rows, src = _load_rows(data)
     xcol = mp.get("x", "x")
     ycol = mp.get("y", "y")
@@ -465,7 +474,7 @@ def _from_heatmap(panel):
         src = {"inline": True, "spec": "data.matrix"}
     else:
         cols, rows, src = _load_rows(data)
-        mp = panel.get("mapping", {})
+        mp = _get_mapping(panel)
         rk, ck, vk = mp.get("row", "row"), mp.get("col", "col"), mp.get("value", "value")
         is_tidy = (rk in cols and ck in cols and vk in cols)
         if is_tidy:
@@ -548,7 +557,7 @@ def resolve_panel(panel):
     if kind == "scatter" or panel.get("numeric_x"):
         # 若 x 列全是数值则走连续 X 轴；否则仍回退分类 tidy
         cols, rows, _ = _load_rows(data)
-        xcol = panel.get("mapping", {}).get("x", "x")
+        xcol = _get_mapping(panel).get("x", "x")
         sample_x = [r.get(xcol) for r in rows[:20] if str(r.get(xcol, "")).strip() != ""]
         if sample_x and all(to_num(v) is not None for v in sample_x):
             return _from_xy_points(panel)

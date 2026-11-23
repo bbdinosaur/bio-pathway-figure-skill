@@ -21,7 +21,7 @@ sys.path.insert(0, str(HERE))
 
 from kit_common import (  # noqa: E402
     dump_json, rasterize_any, pdf_to_png, svg_to_pdf_any,
-    verify_svg_editable, sha256_of, _import_fitz,
+    verify_svg_editable, sha256_of, _import_fitz, png_edge_check,
 )
 from svg_ops import apply_ops, _est_text_w, _wrap_text, DEFAULT_FONT  # noqa: E402
 
@@ -450,28 +450,60 @@ def extract_pdf_text(pdf_path, query=None, out_txt=None, render_hits=None):
     )
     captions, matches, mech_sents = [], [], []
     hit_pages = []
+    fig_line_pat = re.compile(
+        r"(?m)^(?=\s*(?:Extended\s+Data\s+|Supplementary\s+)?(?:Fig(?:ure)?\.?\s*\d+[A-Za-z]?|图\s*\d+)\b)",
+        re.I,
+    )
     for pi, txt in enumerate(pages):
         clean_pg = re.sub(r"-\s*\n\s*", "", txt)
-        paras = [p.strip() for p in re.split(r"\n\s*\n", clean_pg) if p.strip()]
+        # 兼容单换行排版 PDF：先按空行切，再按行首 Figure/图 标题切块，避免整页粘连导致漏提图注
+        raw_blocks = [p.strip() for p in re.split(r"\n\s*\n", clean_pg) if p.strip()]
+        paras = []
+        for blk in raw_blocks:
+            subs = [s.strip() for s in fig_line_pat.split(blk) if s.strip()]
+            paras.extend(subs if len(subs) > 1 else [blk])
         for p in paras:
             one = re.sub(r"\s+", " ", p)
             if fig_pat.search(p[:180]):
                 captions.append({"page": pi, "text": one[:2500]})
-            if q_pat and q_pat.search(one):
-                matches.append({"page": pi, "text": one[:2500]})
-                if pi not in hit_pages:
-                    hit_pages.append(pi)
+            if q_pat:
+                qm = q_pat.search(one)
+                if qm:
+                    if len(one) > 2500:
+                        st = max(0, qm.start() - 300)
+                        snippet = one[st:st + 2500]
+                    else:
+                        snippet = one
+                    matches.append({"page": pi, "text": snippet})
+                    if pi not in hit_pages:
+                        hit_pages.append(pi)
     if not hit_pages and captions:
         hit_pages = sorted({c["page"] for c in captions})[:3]
-    for pi in (hit_pages or list(range(min(len(pages), 4)))):
-        clean_pg = re.sub(r"-\s*\n\s*", "", pages[pi])
-        for sent in re.split(r"(?<=[.!?])\s+", re.sub(r"\s+", " ", clean_pg)):
-            if 25 <= len(sent) <= 360 and mech_verb_pat.search(sent):
-                mech_sents.append({"page": pi, "sentence": sent.strip()})
+    seen_s = set()
+    # 优先从查询命中段与图注提取因果机制句，再补充命中页正文
+    priority_sources = [(m["page"], m["text"]) for m in matches] + [(c["page"], c["text"]) for c in captions]
+    for pi, txt_src in priority_sources:
+        for sent in re.split(r"(?<=[.!?])\s+", txt_src):
+            st_s = sent.strip()
+            if 25 <= len(st_s) <= 360 and st_s not in seen_s and mech_verb_pat.search(st_s):
+                seen_s.add(st_s)
+                mech_sents.append({"page": pi, "sentence": st_s})
                 if len(mech_sents) >= 25:
                     break
         if len(mech_sents) >= 25:
             break
+    if len(mech_sents) < 25:
+        for pi in (hit_pages or list(range(min(len(pages), 4)))):
+            clean_pg = re.sub(r"-\s*\n\s*", "", pages[pi])
+            for sent in re.split(r"(?<=[.!?])\s+", re.sub(r"\s+", " ", clean_pg)):
+                st_s = sent.strip()
+                if 25 <= len(st_s) <= 360 and st_s not in seen_s and mech_verb_pat.search(st_s):
+                    seen_s.add(st_s)
+                    mech_sents.append({"page": pi, "sentence": st_s})
+                    if len(mech_sents) >= 25:
+                        break
+            if len(mech_sents) >= 25:
+                break
 
     # 对命中页提取空间坐标标签（帮助准确还原原图 Figure 中的基因/蛋白/区室名及上下游位置）
     spatial_pages = []
@@ -609,7 +641,6 @@ def _build_diagram_lr(spec, nodes, edges, compartments, lanes, node_dims, font_f
              for ln, ms in lanes.items()}
     max_col_h = max(col_h.values(), default=180.0)
     total_cols_w = sum(col_w[ln] for ln in sorted(lanes.keys())) + max(0, len(lanes) - 1) * gap_x
-    canvas_w = float(spec.get("width") or max(780.0, total_cols_w + 2 * margin_x + 40.0))
 
     used_styles = []
     for e in edges:
@@ -618,9 +649,23 @@ def _build_diagram_lr(spec, nodes, edges, compartments, lanes, node_dims, font_f
         if key not in used_styles:
             used_styles.append(key)
     want_legend = spec.get("legend", True) and bool(used_styles)
+    label_map_lr = {
+        ("activate", False): "Activation / Direct", ("activate", True): "Indirect / Transport",
+        ("inhibit", False): "Inhibition (T-bar)", ("tbar", False): "Inhibition (T-bar)",
+        ("inhibit", True): "Indirect Inhibition", ("both", False): "Bidirectional",
+        ("line", False): "Association",
+    }
+    leg_items_lr = [(st, dsh, label_map_lr.get((st, dsh), f"{st}" + (" (dashed)" if dsh else "")))
+                    for st, dsh in used_styles[:4]]
+    leg_total_w = (sum(44 + _est_text_w(txt, 10) + 24 for _, _, txt in leg_items_lr) - 24) if want_legend else 0.0
+    canvas_w = float(spec.get("width") or max(780.0, total_cols_w + 2 * margin_x + 40.0, leg_total_w + 68.0))
+
+    title_lines = _wrap_text(str(spec["title"]), max(280.0, canvas_w - 64.0), 15.0) if spec.get("title") else []
+    title_h = (32.0 + len(title_lines) * 20.0) if title_lines else 22.0
     caption_txt = spec.get("caption") or (f"Source: {spec['source']}" if spec.get("source") else "")
+    cap_lines = _wrap_text(str(caption_txt), max(280.0, canvas_w - 64.0), 9.2) if caption_txt else []
     legend_h = 42.0 if want_legend else 10.0
-    caption_h = 22.0 if caption_txt else 0.0
+    caption_h = (len(cap_lines) * 14.5 + 8.0) if cap_lines else 0.0
 
     body_y0 = title_h + corridor_top + comp_pad_top + 12.0
     canvas_h = float(spec.get("height") or (body_y0 + max_col_h + 26.0 + corridor_bot + legend_h + caption_h))
@@ -643,9 +688,10 @@ def _build_diagram_lr(spec, nodes, edges, compartments, lanes, node_dims, font_f
         cur_x += cw + gap_x
 
     ops = []
-    if spec.get("title"):
-        ops.append({"op": "add_text", "id": "diagram-title", "x": canvas_w / 2.0, "y": 32,
-                    "text": spec["title"], "font_pt": 15, "bold": True,
+    for ti, tl in enumerate(title_lines):
+        ops.append({"op": "add_text", "id": "diagram-title" if ti == 0 else f"diagram-title-{ti}",
+                    "x": canvas_w / 2.0, "y": 30.0 + ti * 20.0,
+                    "text": tl, "font_pt": 15, "bold": True,
                     "fill": "#1A2B3C", "anchor": "middle", "font_family": font_fam})
 
     # 垂直列区室框（等高对齐）
@@ -827,27 +873,20 @@ def _build_diagram_lr(spec, nodes, edges, compartments, lanes, node_dims, font_f
         ops.append(op_e)
 
     if want_legend:
-        ly = canvas_h - (40.0 if caption_txt else 22.0)
-        label_map = {
-            ("activate", False): "Activation / Direct", ("activate", True): "Indirect / Transport",
-            ("inhibit", False): "Inhibition (T-bar)", ("tbar", False): "Inhibition (T-bar)",
-            ("inhibit", True): "Indirect Inhibition", ("both", False): "Bidirectional",
-            ("line", False): "Association",
-        }
-        items = [(st, dsh, label_map.get((st, dsh), f"{st}" + (" (dashed)" if dsh else "")))
-                 for st, dsh in used_styles[:4]]
-        total_lw = sum(44 + _est_text_w(txt, 10) + 24 for _, _, txt in items) - 24
-        lx = max(32.0, (canvas_w - total_lw) / 2.0)
-        for st, dsh, txt in items:
+        ly = canvas_h - caption_h - 18.0
+        lx = max(32.0, (canvas_w - leg_total_w) / 2.0)
+        for st, dsh, txt in leg_items_lr:
             ops.append({"op": "add_arrow" if st != "line" else "add_line",
                         "x1": lx, "y1": ly, "x2": lx + 34, "y2": ly,
                         "style": st, "dashed": dsh, "width": 1.6})
             ops.append({"op": "add_text", "x": lx + 42, "y": ly + 4, "text": txt,
                         "font_pt": 10, "fill": "#334455", "font_family": font_fam})
             lx += 44 + _est_text_w(txt, 10) + 24
-    if caption_txt:
-        ops.append({"op": "add_text", "id": "diagram-caption", "x": canvas_w / 2.0, "y": canvas_h - 12.0,
-                    "text": str(caption_txt), "font_pt": 9.2, "fill": "#5A6B7C",
+    for ci_l, cl in enumerate(cap_lines):
+        cy_l = canvas_h - caption_h + 13.0 + ci_l * 14.5
+        ops.append({"op": "add_text", "id": "diagram-caption" if ci_l == 0 else f"diagram-caption-{ci_l}",
+                    "x": canvas_w / 2.0, "y": cy_l,
+                    "text": cl, "font_pt": 9.2, "fill": "#5A6B7C",
                     "anchor": "middle", "font_family": font_fam})
 
     provenance = {
@@ -855,7 +894,7 @@ def _build_diagram_lr(spec, nodes, edges, compartments, lanes, node_dims, font_f
         "case_id": spec.get("case_id"), "title": spec.get("title"),
         "direction": "LR", "source": spec.get("source"),
         "entities": [{"id": n["id"], "label": n.get("label") or n.get("name"),
-                      "sublabel": n.get("sublabel"), "lane": n.get("lane", 0),
+                      "sublabel": n.get("sublabel") or n.get("subtitle"), "lane": n.get("lane", 0),
                       "source_ref": n.get("source_ref")} for n in nodes],
         "relations": [{"from": e["from"], "to": e["to"],
                        "type": e.get("style") or e.get("type") or "activate",
@@ -922,20 +961,44 @@ def _build_diagram_ops(spec):
         if c_lanes:
             comp_lane_first[min(c_lanes)] = c
 
-    # 先算总宽（含外侧反馈走廊留白）
+    # 先算图例与总宽（含外侧反馈走廊留白，防长标题/宽图例越界）
+    used_styles = []
+    for e in edges:
+        st = e.get("style") or e.get("type") or "activate"
+        key = (st, bool(e.get("dashed")))
+        if key not in used_styles:
+            used_styles.append(key)
+    want_legend = spec.get("legend", True) and bool(used_styles)
+    label_map_tb = {
+        ("activate", False): "Activation / Direct",
+        ("activate", True): "Indirect / Transport",
+        ("inhibit", False): "Inhibition (T-bar)",
+        ("tbar", False): "Inhibition (T-bar)",
+        ("inhibit", True): "Indirect Inhibition",
+        ("both", False): "Bidirectional",
+        ("line", False): "Association",
+    }
+    leg_items_tb = [(st, dsh, label_map_tb.get((st, dsh), f"{st}" + (" (dashed)" if dsh else "")))
+                    for st, dsh in used_styles[:4]]
+    leg_total_w_tb = (sum(44 + _est_text_w(txt, 10) + 24 for _, _, txt in leg_items_tb) - 24) if want_legend else 0.0
+
     row_widths = {}
     for ln, ms in lanes.items():
         rw = sum(node_dims[m["id"]][0] for m in ms) + max(0, len(ms) - 1) * gap_x
         row_widths[ln] = rw
-    canvas_w = float(spec.get("width") or max(760, max(row_widths.values(), default=640) + 2 * margin_x + 40))
+    canvas_w = float(spec.get("width") or max(760.0, max(row_widths.values(), default=640.0) + 2 * margin_x + 40.0, leg_total_w_tb + 68.0))
+    title_lines = _wrap_text(str(spec["title"]), max(280.0, canvas_w - 64.0), 15.0) if spec.get("title") else []
+    title_h = (34.0 + len(title_lines) * 20.0) if title_lines else 24.0
 
-    # 逐泳道分配坐标
+    # 逐泳道分配坐标（若区室顶泳道含复合物包络框，额外加 18px 避免区室标题与复合物框撞车）
+    cx_members = {mid for cx in (spec.get("complexes") or []) for mid in (cx.get("members") or [])}
     pos = {}
     lane_y_bounds = {}
     cur_y = title_h + 18.0
     for ln in sorted(lanes.keys()):
         if ln in comp_lane_first:
-            cur_y += 28.0  # 给区室标题留足空间
+            has_cx_top = any(m["id"] in cx_members for m in lanes[ln])
+            cur_y += 46.0 if has_cx_top else 28.0  # 给区室标题(+可选复合物框)留足空间
         ms = lanes[ln]
         row_h = max(node_dims[m["id"]][1] for m in ms)
         rw = row_widths[ln]
@@ -949,24 +1012,19 @@ def _build_diagram_ops(spec):
         lane_y_bounds[ln] = (cur_y, cur_y + row_h)
         cur_y += row_h + gap_y
 
-    # 底部图例区 + 可选图注/来源行
-    used_styles = []
-    for e in edges:
-        st = e.get("style") or e.get("type") or "activate"
-        key = (st, bool(e.get("dashed")))
-        if key not in used_styles:
-            used_styles.append(key)
-    want_legend = spec.get("legend", True) and bool(used_styles)
+    # 底部图例区 + 可选图注/来源行（自动换行防越界）
     caption_txt = spec.get("caption") or (f"Source: {spec['source']}" if spec.get("source") else "")
+    cap_lines = _wrap_text(str(caption_txt), max(280.0, canvas_w - 64.0), 9.2) if caption_txt else []
     legend_h = 42.0 if want_legend else 10.0
-    caption_h = 22.0 if caption_txt else 0.0
+    caption_h = (len(cap_lines) * 14.5 + 8.0) if cap_lines else 0.0
     canvas_h = float(spec.get("height") or (cur_y - gap_y + 34.0 + legend_h + caption_h))
 
     ops = []
     # 标题
-    if spec.get("title"):
-        ops.append({"op": "add_text", "id": "diagram-title", "x": canvas_w / 2.0, "y": 34,
-                    "text": spec["title"], "font_pt": 15, "bold": True,
+    for ti, tl in enumerate(title_lines):
+        ops.append({"op": "add_text", "id": "diagram-title" if ti == 0 else f"diagram-title-{ti}",
+                    "x": canvas_w / 2.0, "y": 32.0 + ti * 20.0,
+                    "text": tl, "font_pt": 15, "bold": True,
                     "fill": "#1A2B3C", "anchor": "middle", "font_family": font_fam})
 
     # 区室框（自动统一所有区室左右宽度，形成整齐分层膜结构）
@@ -982,7 +1040,12 @@ def _build_diagram_ops(spec):
         if not c_nodes:
             continue
         x0 = min(b[0] for b in c_nodes) - 26
-        y0 = min(b[1] for b in c_nodes) - 28
+        c_top_ids = set(c.get("node_ids") or [])
+        if not c_top_ids and c.get("lanes"):
+            min_ln = min(c["lanes"])
+            c_top_ids = {m["id"] for m in lanes.get(min_ln, [])}
+        top_pad = 46.0 if (c_top_ids & cx_members) else 28.0
+        y0 = min(b[1] for b in c_nodes) - top_pad
         x1 = max(b[0] + b[2] for b in c_nodes) + 26
         y1 = max(b[1] + b[3] for b in c_nodes) + 18
         comp_boxes.append((ci, c, x0, y0, x1, y1))
@@ -1188,8 +1251,13 @@ def _build_diagram_ops(spec):
                 gy2 = (b2[1] + b2[3] + 18.0 + 8.0 * k_slot) if going_up else (b2[1] - 18.0 - 8.0 * k_slot)
                 wpts += [(corridor_x, gy2), (cx2, gy2), (cx2, ty)]
             op_e["waypoints"] = wpts
-            # 标签放在外侧走廊垂直段中点，并钳制水平位置防越界
-            vy_mid = (wpts[1][1] + wpts[-2][1]) / 2.0 + (k_slot * 26.0 - 10.0)
+            # 标签放在外侧走廊垂直段上，自动避让各泳道节点中心 y（防与同侧其他水平连线重叠）
+            y_lo_v, y_hi_v = sorted((wpts[1][1], wpts[-2][1]))
+            vy_mid = (y_lo_v + y_hi_v) / 2.0 + (k_slot * 26.0 - 10.0)
+            lane_cys = [(yb[0] + yb[1]) / 2.0 for yb in lane_y_bounds.values()]
+            if any(abs(vy_mid - lcy) < 18.0 for lcy in lane_cys):
+                cands = [y_lo_v + (y_hi_v - y_lo_v) * f for f in (0.72, 0.28, 0.82, 0.18, 0.5)]
+                vy_mid = max(cands, key=lambda yv: min((abs(yv - lcy) for lcy in lane_cys), default=99.0))
             lbl_fpt = max(9.5, fpt - 1.5)
             half_lw = (_est_text_w(e.get("label", ""), lbl_fpt) + 8.0) / 2.0
             lx_clamped = min(canvas_w - 14.0 - half_lw, max(14.0 + half_lw, corridor_x))
@@ -1201,39 +1269,30 @@ def _build_diagram_ops(spec):
 
     # 底部语义图例（居中排布）与来源/图注行
     if want_legend:
-        ly = canvas_h - (40.0 if caption_txt else 22.0)
-        label_map = {
-            ("activate", False): "Activation / Direct",
-            ("activate", True): "Indirect / Transport",
-            ("inhibit", False): "Inhibition (T-bar)",
-            ("tbar", False): "Inhibition (T-bar)",
-            ("inhibit", True): "Indirect Inhibition",
-            ("both", False): "Bidirectional",
-            ("line", False): "Association",
-        }
-        items = [(st, dsh, label_map.get((st, dsh), f"{st}" + (" (dashed)" if dsh else "")))
-                 for st, dsh in used_styles[:4]]
-        total_lw = sum(44 + _est_text_w(txt, 10) + 24 for _, _, txt in items) - 24
-        lx = max(32.0, (canvas_w - total_lw) / 2.0)
-        for st, dsh, txt in items:
+        ly = canvas_h - caption_h - 18.0
+        lx = max(32.0, (canvas_w - leg_total_w_tb) / 2.0)
+        for st, dsh, txt in leg_items_tb:
             ops.append({"op": "add_arrow" if st != "line" else "add_line",
                         "x1": lx, "y1": ly, "x2": lx + 34, "y2": ly,
                         "style": st, "dashed": dsh, "width": 1.6})
             ops.append({"op": "add_text", "x": lx + 42, "y": ly + 4, "text": txt,
                         "font_pt": 10, "fill": "#334455", "font_family": font_fam})
             lx += 44 + _est_text_w(txt, 10) + 24
-    if caption_txt:
-        ops.append({"op": "add_text", "id": "diagram-caption", "x": canvas_w / 2.0, "y": canvas_h - 12.0,
-                    "text": str(caption_txt), "font_pt": 9.2, "fill": "#5A6B7C",
+    for ci_l, cl in enumerate(cap_lines):
+        cy_l = canvas_h - caption_h + 13.0 + ci_l * 14.5
+        ops.append({"op": "add_text", "id": "diagram-caption" if ci_l == 0 else f"diagram-caption-{ci_l}",
+                    "x": canvas_w / 2.0, "y": cy_l,
+                    "text": cl, "font_pt": 9.2, "fill": "#5A6B7C",
                     "anchor": "middle", "font_family": font_fam})
 
     provenance = {
-        "generated_by": "sci-figure-studio svg_edit --diagram v2",
+        "generated_by": "sci-figure-studio svg_edit --diagram v3 (TB)",
         "case_id": spec.get("case_id"),
         "title": spec.get("title"),
+        "direction": "TB",
         "source": spec.get("source"),
         "entities": [{"id": n["id"], "label": n.get("label") or n.get("name"),
-                      "sublabel": n.get("sublabel"), "lane": n.get("lane", 0),
+                      "sublabel": n.get("sublabel") or n.get("subtitle"), "lane": n.get("lane", 0),
                       "source_ref": n.get("source_ref")} for n in nodes],
         "relations": [{"from": e["from"], "to": e["to"],
                        "type": e.get("style") or e.get("type") or "activate",
@@ -1251,8 +1310,7 @@ def _write_blank_svg(out_svg, w, h, meta_str=None):
     Path(out_svg).write_text(
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}">'
         f'<rect id="canvas-bg" x="0" y="0" width="{w}" height="{h}" fill="#FFFFFF" stroke="none"/>'
-        f'<rect id="canvas-border" x="1" y="1" width="{w - 2}" height="{h - 2}" fill="none" '
-        f'stroke="#E0E6ED" stroke-width="1"/>{meta}</svg>',
+        f'{meta}</svg>',
         encoding="utf-8",
     )
 
@@ -1264,6 +1322,8 @@ def main():
     ap.add_argument("--diagram", help="机制图/流程图紧凑 JSON 自动排版模式（自动生成区室/节点/T-bar/图例/溯源）")
     ap.add_argument("--out-svg")
     ap.add_argument("--out-pdf")
+    ap.add_argument("--out-png", help="投稿级高分辨率 PNG 导出路径（默认 300 DPI，同步执行 png_edge 审计）")
+    ap.add_argument("--png-dpi", type=int, default=300)
     ap.add_argument("--preview")
     ap.add_argument("--dpi", type=int, default=100)
     ap.add_argument("--report")
@@ -1313,20 +1373,44 @@ def main():
         except Exception as e:
             geo = {"ok": None, "error": f"{type(e).__name__}: {e}"}
         editable = verify_svg_editable(out_svg)
+        png_res, png_edge = None, None
+        if args.out_png:
+            png_res = rasterize_any(out_svg, args.out_png, dpi=args.png_dpi)
+            if png_res and png_res.get("ok") and Path(args.out_png).exists():
+                png_edge = png_edge_check(args.out_png)
         preview = rasterize_any(out_svg, args.preview, dpi=args.dpi) if args.preview else None
         verify_pdf = args.verify_pdf or spec.get("source_pdf")
         entity_audit = verify_entities_against_pdf(prov.get("entities", []), verify_pdf) if verify_pdf else None
         prov["canvas"] = {"w": w, "h": h}
+        prov["reproducibility"] = {
+            "spec_file": Path(args.diagram).name,
+            "spec_sha256": sha256_of(args.diagram),
+            "command": f"python3 svg_edit.py --diagram {Path(args.diagram).name} --out-svg {out_svg.name}"
+                       + (f" --out-pdf {Path(args.out_pdf).name}" if args.out_pdf else "")
+                       + (f" --out-png {Path(args.out_png).name} --png-dpi {args.png_dpi}" if args.out_png else ""),
+        }
+        prov["export_params"] = {
+            "canvas_px": [w, h], "svg_fonttype": "none",
+            "png_dpi": args.png_dpi if args.out_png else None,
+            "preview_dpi": args.dpi if args.preview else None,
+            "colorspace": (png_edge or {}).get("mode") or "RGB",
+            "svg_bytes": out_svg.stat().st_size if out_svg.exists() else None,
+            "pdf_bytes": Path(args.out_pdf).stat().st_size if args.out_pdf and Path(args.out_pdf).exists() else None,
+            "png_bytes": Path(args.out_png).stat().st_size if args.out_png and Path(args.out_png).exists() else None,
+        }
         prov["self_check"] = {"editable_svg": editable, "svg_geometry": geo, "pdf": pdf_res}
+        if png_edge is not None:
+            prov["self_check"]["png_edge"] = png_edge
         if entity_audit is not None:
             prov["self_check"]["entity_grounding_audit"] = entity_audit
         dump_json(prov, prov_path)
         rep = {"mode": "diagram", "out_svg": str(out_svg), "out_pdf": args.out_pdf,
-               "provenance": str(prov_path), "canvas": [w, h], "n_ops": len(ops),
-               "editable_svg": editable, "svg_geometry": geo, "preview": preview,
-               "entity_grounding_audit": entity_audit,
+               "out_png": args.out_png, "provenance": str(prov_path), "canvas": [w, h], "n_ops": len(ops),
+               "editable_svg": editable, "svg_geometry": geo, "png": png_res, "png_edge": png_edge,
+               "preview": preview, "entity_grounding_audit": entity_audit,
                "change_log": log_all,
                "ok": bool(geo.get("ok")) and bool(editable.get("ok"))
+               and not (png_edge or {}).get("clipping_suspect")
                and all(e.get("status") != "failed" for e in log_all)}
         print(json.dumps(rep, ensure_ascii=False, indent=2, default=str))
         if args.report:
@@ -1339,12 +1423,14 @@ def main():
             ap.error("--blank 需配合 --out-svg")
         w, h = [int(v) for v in args.blank.lower().split("x")]
         out_svg = Path(args.out_svg)
-        _write_blank_svg(out_svg, w, h)
+        prov_path = out_svg.with_suffix(".provenance.json")
+        _write_blank_svg(out_svg, w, h, meta_str=f"mode=blank; provenance={prov_path.name}")
         ops = json.loads(Path(args.ops).read_text(encoding="utf-8")) if args.ops else []
         if isinstance(ops, dict):
             ops = ops.get("ops", [])
         _, log_svg = apply_ops(str(out_svg), ops)
         log_all = [{"applied_to": "svg", **e} for e in log_svg]
+        pdf_res = None
         if args.out_pdf:
             pdf_res = svg_to_pdf_any(out_svg, args.out_pdf)
             log_all.append({"applied_to": "pdf", "op": "svg_to_pdf",
@@ -1357,10 +1443,24 @@ def main():
         except Exception as e:
             geo = {"ok": None, "error": f"{type(e).__name__}: {e}"}
         editable = verify_svg_editable(out_svg)
+        png_res, png_edge = None, None
+        if args.out_png:
+            png_res = rasterize_any(out_svg, args.out_png, dpi=args.png_dpi)
+            if png_res and png_res.get("ok") and Path(args.out_png).exists():
+                png_edge = png_edge_check(args.out_png)
         preview = rasterize_any(out_svg, args.preview, dpi=args.dpi) if args.preview else None
+        prov_blank = {
+            "generated_by": "sci-figure-studio svg_edit --blank",
+            "canvas": {"w": w, "h": h}, "ops_file": args.ops,
+            "out_svg": str(out_svg), "out_pdf": args.out_pdf, "out_png": args.out_png,
+            "change_log": log_all,
+            "self_check": {"editable_svg": editable, "svg_geometry": geo, "pdf": pdf_res, "png_edge": png_edge},
+        }
+        dump_json(prov_blank, prov_path)
         rep = {"input": "blank", "out_svg": str(out_svg), "out_pdf": args.out_pdf,
+               "out_png": args.out_png, "provenance": str(prov_path),
                "n_ops": len(ops), "change_log": log_all, "editable_svg": editable,
-               "svg_geometry": geo, "preview": preview,
+               "svg_geometry": geo, "png": png_res, "png_edge": png_edge, "preview": preview,
                "ok": bool(geo.get("ok")) and all(e.get("status") != "failed" for e in log_all)}
         print(json.dumps(rep, ensure_ascii=False, indent=2, default=str))
         if args.report:
@@ -1466,6 +1566,14 @@ def main():
             out_svg.write_text(svg_txt.replace("</svg>", meta + "</svg>", 1), encoding="utf-8")
     except Exception:
         pass
+    png_res, png_edge = None, None
+    if args.out_png:
+        if preview_src and Path(preview_src).exists():
+            png_res = pdf_to_png(preview_src, args.out_png, dpi=args.png_dpi, page=args.page)
+        else:
+            png_res = rasterize_any(out_svg, args.out_png, dpi=args.png_dpi)
+        if png_res and png_res.get("ok") and Path(args.out_png).exists():
+            png_edge = png_edge_check(args.out_png)
     preview = None
     if args.preview:
         if preview_src and Path(preview_src).exists():
@@ -1486,20 +1594,38 @@ def main():
         "source_sha256": sha256_of(src) if src.exists() else None,
         "page": args.page,
         "ops_file": str(args.ops),
+        "reproducibility": {
+            "ops_sha256": sha256_of(args.ops) if Path(args.ops).exists() else None,
+            "command": f"python3 svg_edit.py --input {src.name} --page {args.page} --ops {Path(args.ops).name} --out-svg {out_svg.name}"
+                       + (f" --out-pdf {Path(args.out_pdf).name}" if args.out_pdf else "")
+                       + (f" --out-png {Path(args.out_png).name} --png-dpi {args.png_dpi}" if args.out_png else ""),
+        },
+        "export_params": {
+            "svg_fonttype": "none",
+            "png_dpi": args.png_dpi if args.out_png else None,
+            "preview_dpi": args.dpi if args.preview else None,
+            "colorspace": (png_edge or {}).get("mode") or "RGB",
+            "svg_bytes": out_svg.stat().st_size if out_svg.exists() else None,
+            "pdf_bytes": Path(args.out_pdf).stat().st_size if args.out_pdf and Path(args.out_pdf).exists() else None,
+            "png_bytes": Path(args.out_png).stat().st_size if args.out_png and Path(args.out_png).exists() else None,
+        },
         "out_svg": str(out_svg),
         "out_pdf": args.out_pdf,
+        "out_png": args.out_png,
         "change_log": log_all,
         "edit_diff_audit": edit_diff,
-        "self_check": {"editable_svg": editable, "svg_geometry": geo, "preview": preview, "edit_diff_audit": edit_diff},
+        "self_check": {"editable_svg": editable, "svg_geometry": geo, "png_edge": png_edge,
+                       "preview": preview, "edit_diff_audit": edit_diff},
     }
     dump_json(prov_obj, prov_path)
     report = {"input": str(src), "out_svg": str(out_svg),
-              "out_pdf": args.out_pdf, "provenance": str(prov_path),
+              "out_pdf": args.out_pdf, "out_png": args.out_png, "provenance": str(prov_path),
               "n_ops": len(ops), "page": args.page,
               "editable_svg": editable, "edit_diff_audit": edit_diff,
-              "change_log": log_all,
+              "change_log": log_all, "png": png_res, "png_edge": png_edge,
               "preview": preview, "svg_geometry": geo,
-              "ok": bool(geo.get("ok")) and all(e.get("status") != "failed" for e in log_all)}
+              "ok": bool(geo.get("ok")) and not (png_edge or {}).get("clipping_suspect")
+              and all(e.get("status") != "failed" for e in log_all)}
     print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
     if args.report:
         dump_json(report, args.report)
