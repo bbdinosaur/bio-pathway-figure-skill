@@ -1,9 +1,9 @@
 {
-  "_note": "EXAMPLE / 示例：合成数据最小调用样例，仅演示 GA-Skill v9 接口，非任何正式案例答案",
+  "_note": "EXAMPLE / 示例：合成数据最小调用样例，仅演示 GA-Skill v16.2 接口，非任何正式案例答案",
   "title": "Example: Compound X inhibits biofilm matrix assembly (synthetic)",
   "subtitle": "Synthetic interface demonstration only — hero-2x2 layout, icons, bar chart with error bars & significance",
   "layout": "hero-2x2",
-  "version": "GA-Skill v9 · EXAMPLE",
+  "version": "GA-Skill v16.2 · EXAMPLE",
   "sources": "Synthetic example dataset; not a real publication",
   "panel_links": [
     {"from": "P1", "to": "P2", "label": "tests"},

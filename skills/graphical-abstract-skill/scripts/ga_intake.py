@@ -133,8 +133,16 @@ def _parse_num(s: str) -> float | None:
         return None
 
 
+_SUMMARY_ROW_RE = re.compile(
+    r"^(?:mean|average|avg|sd|std|stdev|sem|se|median|iqr|min|max|sum|total|count|n|"
+    r"p[\s._-]?val(?:ue)?s?|padj|p[\s._-]?adj|fdr|q[\s._-]?val(?:ue)?s?|"
+    r"t[\s._-]?test|anova|sig(?:nificance)?)$",
+    re.IGNORECASE,
+)
+
+
 def _summarize_block(rows: list[list[str]]) -> dict:
-    """Summarize a single contiguous table block (auto-skipping 1-cell banners & merging 2-row headers)."""
+    """Summarize a single contiguous table block (auto-skipping 1-cell banners, summary rows & 2-row headers)."""
     if len(rows) < 2:
         return {}
     banner = ""
@@ -181,7 +189,26 @@ def _summarize_block(rows: list[list[str]]) -> dict:
             if len(body) < 2:
                 return {}
 
-    num_cols, cat_cols = [], []
+    # Separate trailing/embedded statistical summary rows (Mean, SD, SEM, p-value) so they never corrupt replicate stats
+    reported_summary: dict[str, dict] = {}
+    clean_body = []
+    for r in body:
+        first_c = next((c.strip() for c in r[:2] if c.strip()), "")
+        if first_c and _SUMMARY_ROW_RE.match(first_c):
+            row_map = {}
+            for ci in range(1, min(len(r), len(hdr))):
+                if r[ci] != "":
+                    nm = hdr[ci] or f"col_{ci + 1}"
+                    fv = _parse_num(r[ci])
+                    row_map[nm] = round(fv, 6) if fv is not None else r[ci][:40]
+            if row_map:
+                reported_summary[first_c] = row_map
+            continue
+        clean_body.append(r)
+    if len(clean_body) >= 2:
+        body = clean_body
+
+    num_cols, group_cols, id_cols = [], [], []
     for ci, raw_name in enumerate(hdr[:24]):
         name = raw_name or f"col_{ci + 1}"
         vals = [r[ci] for r in body if ci < len(r) and r[ci] != ""]
@@ -193,12 +220,18 @@ def _summarize_block(rows: list[list[str]]) -> dict:
         else:
             uniq = list(dict.fromkeys(vals))
             if 2 <= len(uniq) <= 16:
-                cat_cols.append((ci, name, uniq))
+                if len(uniq) < len(vals):
+                    group_cols.append((ci, name, uniq))
+                else:
+                    id_cols.append((ci, name, uniq))
 
     out = {}
     if banner:
         out["banner"] = banner[:120]
+    if reported_summary:
+        out["reported_summary_rows"] = reported_summary
 
+    cat_cols = group_cols or id_cols
     # Detect wide-format replicate columns (e.g. Vehicle_1..3, Rep1..5; consecutive indices avoid Day 0/7/14)
     rep_groups_raw: dict[str, list[tuple[int, int]]] = {}
     for ci, name, _ in num_cols:
@@ -232,10 +265,10 @@ def _summarize_block(rows: list[list[str]]) -> dict:
         if rg_out:
             out["wide_replicate_stats"] = rg_out
 
-    if cat_cols and num_cols:
+    if group_cols and num_cols:
         # Support 2-factor biological designs (e.g. Genotype x Treatment) cleanly
-        if len(cat_cols) >= 2:
-            c0, c1 = cat_cols[0], cat_cols[1]
+        if len(group_cols) >= 2:
+            c0, c1 = group_cols[0], group_cols[1]
             combos = list(dict.fromkeys(
                 f"{r[c0[0]]} | {r[c1[0]]}"
                 for r in body
@@ -260,7 +293,7 @@ def _summarize_block(rows: list[list[str]]) -> dict:
                     out["grouped_by"] = gname
                     out["group_stats"] = grouped
         if "group_stats" not in out:
-            gci, gname, gunique = cat_cols[0]
+            gci, gname, gunique = group_cols[0]
             grouped = {}
             for gv in gunique:
                 gdict = {}
@@ -280,6 +313,8 @@ def _summarize_block(rows: list[list[str]]) -> dict:
                 out["group_stats"] = grouped
     elif num_cols:
         out["col_stats"] = {nname: _num_summary(fv) for _, nname, fv in num_cols[:8]}
+        if id_cols:
+            out["row_labels"] = id_cols[0][2][:16]
     return out
 
 
@@ -318,9 +353,9 @@ def table_preview(p: Path, max_rows: int = 4, bound_ch: int = 180):
         out_str = " | ".join(r[:bound_ch] for r in rows_txt)
         tail = f" ...(+{len(non_empty)-max_rows-1} rows)" if len(non_empty) > max_rows + 1 else ""
         info = {"rows": len(non_empty), "head": out_str[: bound_ch * (max_rows + 1)] + tail}
-        if 2 <= len(non_empty) <= 501:
+        if 2 <= len(non_empty) <= 2005:
             delim = "\t" if p.suffix.lower() == ".tsv" else ","
-            parsed = [list(csv.reader([ln], delimiter=delim))[0] if ln.strip() else [] for ln in raw_lines[:510]]
+            parsed = [list(csv.reader([ln], delimiter=delim))[0] if ln.strip() else [] for ln in raw_lines[:2010]]
             info.update(_summarize_rows(parsed))
         return info
     except Exception:
@@ -508,17 +543,55 @@ def _compact_table_index(tdata: dict) -> dict:
     return ent
 
 
+def _is_target_sheet(sname: str, target_figs: list[int]) -> bool:
+    if not target_figs:
+        return False
+    low = sname.lower()
+    for fn in target_figs:
+        if re.search(rf"(?:fig(?:ure)?\.?\s*0*{fn}\b|\b0*{fn}[a-h]\b)", low):
+            return True
+    return False
+
+
 def _fit_stdout_budget(out: dict, max_bytes: int, saved_path: str | None = None) -> str:
-    """Guarantee bounded Turn-1 stdout (<= max_bytes) without EVER dropping case/PDF/SVG."""
+    """Guarantee valid bounded Turn-1 stdout (<= max_bytes) without EVER dropping case/PDF/SVG."""
     txt = json.dumps(out, ensure_ascii=False, indent=1)
     if len(txt.encode("utf-8")) <= max_bytes:
         return txt
     slim = json.loads(json.dumps(out))
+    target_figs = slim.get("_target_figures_detected") or []
     compacted_files = []
-    # Pass 1: compact verbose XLSX sheets into concise sheet indices
+    # Pass 0.5: if target figures detected, compact ONLY non-target XLSX sheets first
+    if target_figs:
+        for ent in slim.get("input_files", []):
+            if isinstance(ent.get("sheets"), dict):
+                keep_s, comp_s = {}, {}
+                for sname, sdata in ent["sheets"].items():
+                    if _is_target_sheet(sname, target_figs):
+                        keep_s[sname] = sdata
+                    else:
+                        comp_s[sname] = sdata
+                if keep_s and comp_s:
+                    ent["sheets"] = keep_s
+                    ent["other_sheets_index"] = _compact_sheet_index(comp_s)
+                    compacted_files.append(ent.get("f", ""))
+        if compacted_files:
+            slim["_table_hint"] = (
+                "Non-target spreadsheet sheets compacted; target-figure sheets kept expanded. "
+                "Use `ga_intake.py --table <path> --sheet <name>` for any other sheet."
+            )
+            if saved_path:
+                slim["_full_intake_saved"] = saved_path
+        txt = json.dumps(slim, ensure_ascii=False, indent=1)
+        if len(txt.encode("utf-8")) <= max_bytes:
+            return txt
+    # Pass 1: compact all remaining verbose XLSX sheets into concise sheet indices
     for ent in slim.get("input_files", []):
         if isinstance(ent.get("sheets"), dict):
-            ent["sheets_index"] = _compact_sheet_index(ent.pop("sheets"))
+            prev_idx = ent.pop("other_sheets_index", {})
+            merged_idx = _compact_sheet_index(ent.pop("sheets"))
+            merged_idx.update(prev_idx)
+            ent["sheets_index"] = merged_idx
             compacted_files.append(ent.get("f", ""))
     if compacted_files:
         slim["_table_hint"] = (
@@ -551,17 +624,25 @@ def _fit_stdout_budget(out: dict, max_bytes: int, saved_path: str | None = None)
     txt = json.dumps(slim, ensure_ascii=False, separators=(",", ":"))
     if len(txt.encode("utf-8")) <= max_bytes:
         return txt
-    # Pass 4: hard cap captions & deep excerpts
+    # Pass 4: gracefully trim secondary fields while ALWAYS emitting valid JSON
     for ent in slim.get("input_files", []):
         if isinstance(ent.get("pdf"), dict):
             ent["pdf"].pop("captions", None)
             if isinstance(ent["pdf"].get("target_figure_deep"), list):
                 for df in ent["pdf"]["target_figure_deep"]:
-                    if isinstance(df.get("caption"), str) and len(df["caption"]) > 1200:
-                        df["caption"] = df["caption"][:1200] + "..."
-                    if isinstance(df.get("body_mentions"), list):
-                        df["body_mentions"] = df["body_mentions"][:1]
-    return json.dumps(slim, ensure_ascii=False, separators=(",", ":"))[:max_bytes]
+                    if isinstance(df.get("full_caption"), dict) and len(df["full_caption"].get("text", "")) > 1000:
+                        df["full_caption"]["text"] = df["full_caption"]["text"][:1000] + "..."
+                    if isinstance(df.get("citing_excerpts"), list):
+                        df["citing_excerpts"] = df["citing_excerpts"][:1]
+        if isinstance(ent.get("sheets_index"), dict) and len(ent["sheets_index"]) > 12:
+            keys_keep = list(ent["sheets_index"].keys())[:12]
+            ent["sheets_index"] = {k: ent["sheets_index"][k] for k in keys_keep}
+            ent["sheets_truncated"] = True
+    txt = json.dumps(slim, ensure_ascii=False, separators=(",", ":"))
+    if len(txt.encode("utf-8")) <= max_bytes:
+        return txt
+    slim["input_files"] = [{"f": e.get("f"), "kb": e.get("kb"), "kind": e.get("kind")} for e in slim.get("input_files", [])[:30]]
+    return json.dumps(slim, ensure_ascii=False, separators=(",", ":"))
 
 
 def xlsx_preview(p: Path):
@@ -833,7 +914,7 @@ def main():
                 for sname, srows in matched.items():
                     s_info = {"rows": len(srows), "head": [r[:16] for r in srows[:8]]}
                     if len(srows) >= 2:
-                        s_info.update(_summarize_rows(srows[:510]))
+                        s_info.update(_summarize_rows(srows[:2005]))
                     res_s[sname] = s_info
                 print(json.dumps({"file": str(tp), "sheets": res_s}, ensure_ascii=False, indent=1))
             else:

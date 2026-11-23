@@ -1200,17 +1200,21 @@ def render_chart(b, x, y, w, h, fs=12):
                     for gi in range(nx - 1):
                         gx = px + slot * (gi + 1) - pw_p / 2.0
                         cand_xs.append(max(px + 2.0, min(px + gw - pw_p - 2.0, gx)))
+                    # Dense horizontal scan catches wide open gaps above shorter bars
+                    avail_w = max(0.0, gw - pw_p - 4.0)
+                    for ki in range(1, 12):
+                        cand_xs.append(px + 2.0 + avail_w * (ki / 12.0))
                     cand_ys = [max(py + 1.0, ry - ph_p - 2.0)]
                     if ry + ph_p + 3.0 <= py + gh - 1.0:
                         cand_ys.append(ry + 2.5)
                     best_box, best_pen = None, 1e18
                     for py_c in cand_ys:
-                        for px_c in cand_xs:
+                        for idx_c, px_c in enumerate(cand_xs):
                             bx0, by0, bx1, by1 = px_c, py_c, px_c + pw_p, py_c + ph_p
-                            pen = 0.0
+                            pen = idx_c * 0.01  # slight tie-break preference for right/inter-group slots
                             for rx0, ry0, rx1, ry1 in bar_rects:
-                                ovx = max(0.0, min(bx1, rx1) - max(bx0, rx0))
-                                ovy = max(0.0, min(by1, ry1) - max(by0, ry0))
+                                ovx = max(0.0, min(bx1 + 2.0, rx1) - max(bx0 - 2.0, rx0))
+                                ovy = max(0.0, min(by1 + 1.5, ry1) - max(by0 - 1.5, ry0))
                                 pen += ovx * ovy
                             for rx0, ry0, rx1, ry1 in placed_ref_pills:
                                 ovx = max(0.0, min(bx1 + 2, rx1 + 2) - max(bx0 - 2, rx0 - 2))
@@ -1261,30 +1265,28 @@ def render_chart(b, x, y, w, h, fs=12):
             else:
                 sx2 = px + slot * (g2 + 0.5)
             s_lo, s_hi = min(sx1, sx2), max(sx1, sx2)
-            if "y" in sg:
-                by = sy(float(sg["y"]))
-            else:
-                # Compute true data peak across spanned groups (bars + err + replicate dots)
-                i_lo, i_hi = max(0, int(math.floor(min(g1, g2)))), int(math.ceil(max(g1, g2)))
-                span_peaks = []
-                for s in series:
-                    sv = s.get("values", [])
-                    se = s.get("err") or []
-                    sp_l = s.get("points") or []
-                    n_sp = max(len(sv), len(sp_l))
-                    for ii in range(i_lo, min(n_sp, i_hi + 1)):
-                        cands = []
-                        if ii < len(sv) and sv[ii] is not None:
-                            cands.append(_f(sv[ii]) + (_f(se[ii]) if ii < len(se) else 0.0))
-                        if ii < len(sp_l) and isinstance(sp_l[ii], list):
-                            cands.extend(_f(pv) for pv in sp_l[ii] if pv is not None)
-                        if cands:
-                            span_peaks.append(max(cands))
-                base_y = sy(max(span_peaks)) if span_peaks else (py + 24)
-                by = base_y - (24.0 if b.get("value_labels") else 14.0)
-                while any(not (s_hi < o_lo - 4 or s_lo > o_hi + 4) and abs(by - o_y) < 17.0
-                          for o_lo, o_hi, o_y in placed_brackets):
-                    by -= 18.0
+            # Compute true data peak across spanned groups (bars + err + replicate dots)
+            i_lo, i_hi = max(0, int(math.floor(min(g1, g2)))), int(math.ceil(max(g1, g2)))
+            span_peaks = []
+            for s in series:
+                sv = s.get("values", [])
+                se = s.get("err") or []
+                sp_l = s.get("points") or []
+                n_sp = max(len(sv), len(sp_l))
+                for ii in range(i_lo, min(n_sp, i_hi + 1)):
+                    cands = []
+                    if ii < len(sv) and sv[ii] is not None:
+                        cands.append(_f(sv[ii]) + (_f(se[ii]) if ii < len(se) else 0.0))
+                    if ii < len(sp_l) and isinstance(sp_l[ii], list):
+                        cands.extend(_f(pv) for pv in sp_l[ii] if pv is not None)
+                    if cands:
+                        span_peaks.append(max(cands))
+            base_y = sy(max(span_peaks)) if span_peaks else (py + 24)
+            clear_y = base_y - (24.0 if b.get("value_labels") else 14.0)
+            by = min(sy(float(sg["y"])), clear_y) if "y" in sg else clear_y
+            while any(not (s_hi < o_lo - 4 or s_lo > o_hi + 4) and abs(by - o_y) < 17.0
+                      for o_lo, o_hi, o_y in placed_brackets):
+                by -= 18.0
             by = max(py + 12, min(py + gh - 12, by))
             placed_brackets.append((s_lo, s_hi, by))
             out.append(line(sx1, by + 5, sx1, by, INK2, 1.1))

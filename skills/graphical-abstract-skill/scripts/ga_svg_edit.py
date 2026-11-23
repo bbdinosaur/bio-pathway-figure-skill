@@ -107,8 +107,14 @@ def _norm_color(c: str) -> str:
     return s
 
 
+def _norm_ws_dash(s: str) -> str:
+    """Normalize Unicode minus/en-dash/nbsp for tolerant fallback matching in Illustrator/Prism SVGs."""
+    return (s.replace("\u2212", "-").replace("\u2013", "-").replace("\u2014", "-")
+             .replace("\u00a0", " "))
+
+
 def _replace_el_text(el, old_s: str, new_s: str) -> bool:
-    """Replace text cleanly on plain <text> or multi-<tspan> elements."""
+    """Replace text cleanly on plain <text> or multi-<tspan> elements (with Unicode dash/nbsp fallback)."""
     for node in el.iter():
         if node.text and old_s in node.text:
             node.text = node.text.replace(old_s, new_s, 1)
@@ -116,6 +122,25 @@ def _replace_el_text(el, old_s: str, new_s: str) -> bool:
     full = _full_text(el)
     if old_s in full:
         replaced = full.replace(old_s, new_s, 1)
+        tspans = [c for c in el if _strip(c.tag) == "tspan"]
+        if tspans:
+            tspans[0].text = replaced
+            for extra in tspans[1:]:
+                extra.text = ""
+                extra.tail = ""
+        else:
+            el.text = replaced
+        return True
+    # Normalized dash/nbsp fallback
+    old_n = _norm_ws_dash(old_s)
+    if old_n in _norm_ws_dash(full):
+        for node in el.iter():
+            if node.text and old_n in _norm_ws_dash(node.text):
+                idx = _norm_ws_dash(node.text).index(old_n)
+                node.text = node.text[:idx] + new_s + node.text[idx + len(old_n):]
+                return True
+        idx = _norm_ws_dash(full).index(old_n)
+        replaced = full[:idx] + new_s + full[idx + len(old_n):]
         tspans = [c for c in el if _strip(c.tag) == "tspan"]
         if tspans:
             tspans[0].text = replaced
@@ -462,10 +487,22 @@ def _add_overlay(root, spec: dict, vb: tuple[float, float, float, float]) -> lis
     return added
 
 
-def apply_edits(root, edits: list[dict], vb: tuple[float, float, float, float]) -> tuple[list[str], list[str]]:
+def apply_edits(root, edits: list[dict], vb: tuple[float, float, float, float],
+                deleted_ids_out: set | None = None) -> tuple[list[str], list[str]]:
     changes, errors = [], []
     text_els = [el for el in root.iter() if _strip(el.tag) == "text"]
     id_map = {el.get("id"): el for el in root.iter() if el.get("id")}
+    label_map = {}
+    for el in root.iter():
+        il = el.get("{http://www.inkscape.org/namespaces/inkscape}label")
+        if il and il not in label_map:
+            label_map[il] = el
+
+    def _resolve(key):
+        if not key:
+            return None
+        ks = str(key)
+        return id_map.get(ks) if ks in id_map else label_map.get(ks)
 
     for ei, op in enumerate(edits):
         kind = op.get("op", "replace_text")
@@ -474,16 +511,10 @@ def apply_edits(root, edits: list[dict], vb: tuple[float, float, float, float]) 
             new_s = str(op.get("new", ""))
             allow_all = bool(op.get("all", False))
             use_re = bool(op.get("regex", False))
-            if op.get("id") and op["id"] in id_map:
-                pool = [id_map[op["id"]]]
+            if op.get("id") and _resolve(op["id"]) is not None:
+                pool = [_resolve(op["id"])]
             elif op.get("layer"):
-                lq = str(op["layer"])
-                lroot = id_map.get(lq)
-                if lroot is None:
-                    for g_el in root.iter():
-                        if _strip(g_el.tag) == "g" and g_el.get("{http://www.inkscape.org/namespaces/inkscape}label") == lq:
-                            lroot = g_el
-                            break
+                lroot = _resolve(op["layer"])
                 if lroot is None:
                     errors.append(f"edit[{ei}]: layer '{op['layer']}' not found")
                     continue
@@ -496,6 +527,9 @@ def apply_edits(root, edits: list[dict], vb: tuple[float, float, float, float]) 
             else:
                 exact = [el for el in pool if _full_text(el).strip() == old_s]
                 hits = exact or [el for el in pool if old_s in _full_text(el)]
+                if not hits:
+                    old_n = _norm_ws_dash(old_s)
+                    hits = [el for el in pool if old_n in _norm_ws_dash(_full_text(el))]
             if not hits:
                 errors.append(f"edit[{ei}]: text not found: '{old_s}'")
                 continue
@@ -546,8 +580,8 @@ def apply_edits(root, edits: list[dict], vb: tuple[float, float, float, float]) 
 
         elif kind == "set_attr":
             target = None
-            if op.get("id") and op["id"] in id_map:
-                target = id_map[op["id"]]
+            if op.get("id") and _resolve(op["id"]) is not None:
+                target = _resolve(op["id"])
             elif op.get("index") is not None:
                 idx = int(op["index"])
                 if 0 <= idx < len(text_els):
@@ -568,7 +602,7 @@ def apply_edits(root, edits: list[dict], vb: tuple[float, float, float, float]) 
             old_c = _norm_color(str(op.get("old", "")))
             new_c = str(op.get("new", ""))
             attrs = op.get("attrs") or ["fill", "stroke"]
-            scope_root = id_map.get(op["layer"]) if op.get("layer") else root
+            scope_root = _resolve(op["layer"]) if op.get("layer") else root
             if scope_root is None:
                 errors.append(f"edit[{ei}]: layer '{op.get('layer')}' not found")
                 continue
@@ -597,7 +631,7 @@ def apply_edits(root, edits: list[dict], vb: tuple[float, float, float, float]) 
                 changes.append(f"replace_color ({cnt}x): '{op.get('old')}' -> '{new_c}'")
 
         elif kind == "translate":
-            target = id_map.get(op.get("id")) if op.get("id") else None
+            target = _resolve(op.get("id")) if op.get("id") else None
             if target is None:
                 errors.append(f"edit[{ei}]: translate id '{op.get('id')}' not found")
                 continue
@@ -608,7 +642,7 @@ def apply_edits(root, edits: list[dict], vb: tuple[float, float, float, float]) 
             changes.append(f"translate {op.get('id')}: dx={dx:g}, dy={dy:g}")
 
         elif kind == "hide":
-            target = id_map.get(op.get("id")) if op.get("id") else None
+            target = _resolve(op.get("id")) if op.get("id") else None
             if target is None:
                 errors.append(f"edit[{ei}]: hide id '{op.get('id')}' not found")
                 continue
@@ -616,7 +650,7 @@ def apply_edits(root, edits: list[dict], vb: tuple[float, float, float, float]) 
             changes.append(f"hide {op.get('id')}")
 
         elif kind == "delete":
-            target = id_map.get(op.get("id")) if op.get("id") else None
+            target = _resolve(op.get("id")) if op.get("id") else None
             if target is None:
                 errors.append(f"edit[{ei}]: delete id '{op.get('id')}' not found")
                 continue
@@ -624,8 +658,13 @@ def apply_edits(root, edits: list[dict], vb: tuple[float, float, float, float]) 
             if parent is None:
                 errors.append(f"edit[{ei}]: parent not found for delete '{op.get('id')}'")
                 continue
+            if deleted_ids_out is not None:
+                for sub in target.iter():
+                    if sub.get("id"):
+                        deleted_ids_out.add(sub.get("id"))
             parent.remove(target)
-            id_map.pop(op.get("id"), None)
+            if target.get("id"):
+                id_map.pop(target.get("id"), None)
             changes.append(f"delete {op.get('id')}")
 
         elif kind == "scale_rect":
@@ -782,27 +821,31 @@ def main():
     if a.edits:
         edits = json.loads(Path(a.edits).read_text(encoding="utf-8"))
         if isinstance(edits, dict):
-            edits = edits.get("edits", [edits])
+            edits = edits.get("edits") or edits.get("operations") or edits.get("ops") or [edits]
     elif a.old is not None and a.new is not None:
         edits = [{"op": "replace_text", "old": a.old, "new": a.new, "all": a.all}]
     else:
         print(json.dumps({"error": "specify --inspect, --edits FILE, or --old/--new"}))
         return 1
 
-    changes, errors = apply_edits(root, edits, vb)
+    deleted_ids: set[str] = set()
+    changes, errors = apply_edits(root, edits, vb, deleted_ids_out=deleted_ids)
     if errors and not changes:
         print(json.dumps({"replaced": 0, "changes": changes, "errors": errors}, ensure_ascii=False))
         return 2 if any("ambiguous" in e for e in errors) else 1
 
-    out_path = Path(a.out) if a.out else svg_path
+    if a.out:
+        out_path = Path(a.out)
+    elif str(svg_path.resolve()).startswith("/input/") and Path("/app/work").is_dir():
+        out_path = Path("/app/work") / svg_path.name
+    else:
+        out_path = svg_path
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tree.write(out_path, encoding="unicode", xml_declaration=False)
     out_raw = out_path.read_text(encoding="utf-8")
     out_sha = hashlib.sha256(out_raw.encode("utf-8")).hexdigest()[:16]
     dom_after = sum(1 for _ in root.iter())
     layers_after = [el.get("id") for el in root.iter() if _strip(el.tag) == "g" and el.get("id")]
-    deleted_ids = {str(op.get("id")) for op in edits
-                   if isinstance(op, dict) and str(op.get("op", "")).lower() == "delete" and op.get("id")}
     preserved = all(ly in layers_after for ly in layers_before if ly not in deleted_ids)
     edit_rep = {
         "source_svg": str(svg_path.name),

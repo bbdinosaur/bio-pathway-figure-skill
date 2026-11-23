@@ -135,5 +135,5 @@ def parse_svg_viewbox(svg_text: str, default=(0.0, 0.0, float(W), float(H))) -> 
     return (0.0, 0.0, float(w), float(h))
 
 
-VERSION = "GA-Skill v16.1"
+VERSION = "GA-Skill v16.2"
 ROLE_ACCENTS = [ROLE[k]["accent"] for k in ("question", "method", "results", "conclusion")]

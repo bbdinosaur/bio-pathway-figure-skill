@@ -63,9 +63,14 @@ def _extract_inventory(brief_path: Path) -> dict | None:
         return None
     panels_inv, entities, relations, encodings = [], [], [], []
 
+    _CHART_TYPES = {
+        "chart", "bar", "hbar", "stacked", "line", "dot", "box", "scatter",
+        "volcano", "paired", "slope", "before_after", "heatmap", "survival", "km",
+    }
+
     def _walk(pid, blocks):
         for bl in blocks:
-            bt = bl.get("type")
+            bt = str(bl.get("type", "")).lower()
             if bt == "row":
                 _walk(pid, bl.get("blocks", []))
             elif bt == "mechanism":
@@ -90,12 +95,16 @@ def _extract_inventory(brief_path: Path) -> dict | None:
                         "kind": ed.get("kind", "activate"),
                         "label": ed.get("label", ""),
                     })
-            elif bt == "chart":
-                kind = bl.get("kind", "bar")
+            elif bt in _CHART_TYPES:
+                kind = bl.get("kind", "bar" if bt == "chart" else bt)
                 ch_map = {
                     "bar": "bar_height", "hbar": "bar_length", "stacked": "stacked_segment_height",
                     "line": "y_position+slope", "dot": "y_position", "box": "box_whisker_quartiles+replicates",
-                    "scatter": "x_y_coordinates", "heatmap": "sequential_or_diverging_color_ramp",
+                    "paired": "paired_before_after_trajectory", "slope": "paired_before_after_trajectory",
+                    "before_after": "paired_before_after_trajectory",
+                    "scatter": "x_y_coordinates", "volcano": "log2FC_x_neglog10p_y_threshold_color",
+                    "survival": "kaplan_meier_step_survival", "km": "kaplan_meier_step_survival",
+                    "heatmap": "sequential_or_diverging_color_ramp",
                 }
                 series = bl.get("series", [])
                 encodings.append({
@@ -109,6 +118,14 @@ def _extract_inventory(brief_path: Path) -> dict | None:
                     "has_error_bars": any(bool(s.get("err")) for s in series),
                     "has_replicates": any(bool(s.get("points")) for s in series),
                     "has_sig_brackets": bool(bl.get("sig")),
+                    "note": bl.get("note", ""),
+                })
+            elif bt == "svg":
+                encodings.append({
+                    "panel": pid,
+                    "chart_kind": "custom_svg_schematic",
+                    "title": bl.get("title", ""),
+                    "channel": "vector_schematic",
                     "note": bl.get("note", ""),
                 })
 
@@ -145,16 +162,21 @@ def _auto_provenance(brief_path: Path) -> tuple[dict, dict]:
     if root_src:
         smap["figure_sources"] = root_src
 
+    _CHART_TYPES = {
+        "chart", "bar", "hbar", "stacked", "line", "dot", "box", "scatter",
+        "volcano", "paired", "slope", "before_after", "heatmap", "survival", "km",
+    }
+
     def _walk(pid, blocks, p_src):
         ci = 0
         for bl in blocks:
-            bt = bl.get("type")
+            bt = str(bl.get("type", "")).lower()
             if bt == "row":
                 _walk(pid, bl.get("blocks", []), p_src)
-            elif bt == "chart":
+            elif bt in _CHART_TYPES:
                 ci += 1
                 key = f"{pid}.chart{ci}" if ci > 1 else f"{pid}.chart"
-                parts = [bl.get("kind", "bar")]
+                parts = [bl.get("kind", "bar" if bt == "chart" else bt)]
                 if bl.get("title"):
                     parts.append(str(bl["title"]))
                 if bl.get("ylabel"):
@@ -169,8 +191,8 @@ def _auto_provenance(brief_path: Path) -> tuple[dict, dict]:
                 elif p_src:
                     smap.setdefault(key, p_src)
                 dmap[key] = "; ".join(parts)
-            elif bt == "mechanism" and bl.get("source"):
-                smap[f"{pid}.mechanism"] = str(bl["source"])
+            elif bt in ("mechanism", "svg") and bl.get("source"):
+                smap[f"{pid}.{bt}"] = str(bl["source"])
 
     for idx, p in enumerate(br.get("panels") or br.get("panel") or []):
         pid = p.get("id", f"P{idx+1}")
@@ -402,13 +424,15 @@ def build_result(case_path: Path, out_path: Path, outdir: Path | None = None,
             return result["uncertainty"]
         if any(k in fl for k in ("limit", "partial")):
             return result["limits"]
-        if any(k in fl for k in ("summary", "takeaway", "abstract")):
+        if any(k in fl for k in ("summary", "takeaway", "abstract", "caption", "description")):
             if rep.get("notes"):
                 return rep["notes"]
-            bp = work / "brief.json"
-            if bp.exists():
+            if bp_use.exists():
                 try:
-                    return json.loads(bp.read_text(encoding="utf-8")).get("title")
+                    br_t = json.loads(bp_use.read_text(encoding="utf-8"))
+                    ttl = str(br_t.get("title", "")).strip()
+                    sub = str(br_t.get("subtitle", "")).strip()
+                    return f"{ttl} — {sub}" if (ttl and sub) else (ttl or None)
                 except Exception:
                     pass
         return None
