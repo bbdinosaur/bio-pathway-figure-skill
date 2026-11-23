@@ -1,0 +1,4 @@
+[
+  {"op": "set_text_by_id", "id": "label-EGFR", "text": "EGFR (ERBB1)"},
+  {"op": "replace_label", "find": "MAPK core module", "replace": "RAF-ERK signaling core"}
+]

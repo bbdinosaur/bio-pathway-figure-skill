@@ -1,0 +1,76 @@
+{
+  "_note": "EXAMPLE / 示例：合成数据最小调用样例，仅演示 GA-Skill v9 接口，非任何正式案例答案",
+  "title": "Example: Compound X inhibits biofilm matrix assembly (synthetic)",
+  "subtitle": "Synthetic interface demonstration only — hero-2x2 layout, icons, bar chart with error bars & significance",
+  "layout": "hero-2x2",
+  "version": "GA-Skill v9 · EXAMPLE",
+  "sources": "Synthetic example dataset; not a real publication",
+  "panel_links": [
+    {"from": "P1", "to": "P2", "label": "tests"},
+    {"from": "P2", "to": "P3", "label": "quantifies"},
+    {"from": "P3", "to": "P4", "label": "implies"}
+  ],
+  "panels": [
+    {
+      "id": "P1",
+      "role": "question",
+      "title": "Research Question",
+      "icon": "warning",
+      "blocks": [
+        {"type": "callout", "icon": "microbe", "title": "Biofilm tolerance gap",
+         "body": "Bacterial biofilms resist standard dosing via dense EPS matrices."},
+        {"type": "text", "items": [
+          "Does Compound X disrupt EPS assembly without killing host cells?",
+          "Is inhibition dose-dependent across 10-100 uM?"
+        ]}
+      ]
+    },
+    {
+      "id": "P2",
+      "role": "method",
+      "title": "Experimental Workflow",
+      "icon": "flask",
+      "blocks": [
+        {"type": "flow", "numbered": true, "steps": [
+          {"text": "Culture biofilms for 24 h under 0, 10, 50, or 100 uM Compound X",
+           "sub": "Microplate & confocal imaging arms (n = 6 wells/dose)", "icon": "microbe"},
+          {"text": "Quantify total biomass by crystal violet absorbance (OD590)",
+           "sub": "Normalize to untreated vehicle control", "icon": "microscope"},
+          {"text": "Measure host epithelial viability in parallel cytotoxicity assay",
+           "sub": "Confirm >90% host survival at effective dose", "icon": "cell"}
+        ]}
+      ]
+    },
+    {
+      "id": "P3",
+      "role": "results",
+      "title": "Dose-Dependent Biomass Reduction",
+      "icon": "chart",
+      "blocks": [
+        {"type": "chart", "kind": "bar", "ylabel": "Biofilm biomass (OD590)",
+         "xlabel": "Compound X concentration",
+         "xlabels": ["0 uM", "10 uM", "50 uM", "100 uM"],
+         "series": [
+           {"name": "Biofilm OD590", "values": [1.00, 0.74, 0.42, 0.28], "err": [0.09, 0.08, 0.06, 0.04]}
+         ],
+         "value_labels": true,
+         "sig": [{"x1": 0, "x2": 3, "label": "p < 0.001", "y": 1.14}],
+         "note": "Synthetic example: mean ± SD, n = 6 per group"}
+      ]
+    },
+    {
+      "id": "P4",
+      "role": "conclusion",
+      "title": "Takeaway",
+      "icon": "check",
+      "blocks": [
+        {"type": "kpi", "layout": "row", "items": [
+          {"value": "-72%", "label": "biomass at 100 uM"},
+          {"value": ">92%", "label": "host cell viability"}
+        ]},
+        {"type": "callout", "icon": "shield", "title": "Non-toxic anti-biofilm window",
+         "body": "Compound X suppresses matrix biomass while preserving host viability (synthetic demo)."}
+      ]
+    }
+  ]
+}

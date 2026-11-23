@@ -1,0 +1,125 @@
+{
+  "_comment": "Synthetic demonstration template only — illustrates theme='journal' multi-panel biology figure API; NOT a real test case or result.",
+  "theme": "journal",
+  "title": "Example | Synthetic Multi-Panel Biological Figure Template",
+  "subtitle": "Demonstrates journal theme, lowercase badges (a-d), membrane mechanism, boxplot+replicates & log-scale dose-response",
+  "sources": "Synthetic example template (API demonstration)",
+  "version": "GA-Skill v14 · Example",
+  "layout": "hero-2x2",
+  "panels": [
+    {
+      "id": "P1",
+      "badge": "a",
+      "role": "question",
+      "title": "Perturbation Design (Example)",
+      "source": "Synthetic Methods Template",
+      "blocks": [
+        {
+          "type": "bullets",
+          "heading": "Synthetic Cohort",
+          "items": [
+            "WT vs Knockout cohorts (n = 5/arm)",
+            "Dose-response assay across 0.01-100 uM"
+          ]
+        },
+        {
+          "type": "callout",
+          "icon": "drug",
+          "title": "Synthetic Hypothesis",
+          "text": "Target inhibition depends on intact receptor signaling."
+        }
+      ]
+    },
+    {
+      "id": "P2",
+      "badge": "b",
+      "role": "method",
+      "title": "Spatial Signaling Schematic (Example)",
+      "source": "Synthetic Mechanism Template",
+      "blocks": [
+        {
+          "type": "mechanism",
+          "stages": ["1. Engagement", "2. Cascade", "3. Output"],
+          "zones": [
+            {"label": "Plasma Membrane", "nodes": ["R"], "color": "#EFF6FF", "stroke": "#3B82F6"},
+            {"label": "Cytoplasm", "nodes": ["K"], "color": "#ECFDF5", "stroke": "#10B981"},
+            {"label": "Nucleus", "nodes": ["G"], "color": "#F5F3FF", "stroke": "#8B5CF6"}
+          ],
+          "nodes": [
+            {"id": "D", "label": "Inhibitor", "sub": "small molecule", "icon": "drug", "shape": "pill"},
+            {"id": "R", "label": "Receptor", "sub": "surface target", "icon": "receptor"},
+            {"id": "K", "label": "Kinase", "sub": "phosphorylation", "icon": "protein"},
+            {"id": "G", "label": "Target Gene", "sub": "transcription", "icon": "dna"}
+          ],
+          "edges": [
+            {"from": "D", "to": "R", "kind": "inhibit", "label": "blocks"},
+            {"from": "R", "to": "K", "kind": "activate", "label": "activates"},
+            {"from": "K", "to": "G", "kind": "activate", "label": "induces"}
+          ],
+          "legend": [
+            {"kind": "activate", "label": "Activation"},
+            {"kind": "inhibit", "label": "Inhibition"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "P3",
+      "badge": "c",
+      "role": "results",
+      "title": "Quantitative Assays (Example)",
+      "source": "Synthetic Source Data Template",
+      "blocks": [
+        {
+          "type": "row",
+          "weights": [0.5, 0.5],
+          "blocks": [
+            {
+              "type": "chart",
+              "kind": "box",
+              "title": "Replicate Boxplot (Example)",
+              "ylabel": "Response (%)",
+              "xlabel": "Genotype",
+              "xlabels": ["WT", "KO"],
+              "value_labels": true,
+              "value_suffix": "%",
+              "series": [
+                {"name": "Vehicle", "points": [[12.1, 13.0, 11.4, 14.2, 12.6], [12.4, 13.2, 11.8, 13.9, 12.8]]},
+                {"name": "Treated", "points": [[4.8, 5.2, 4.3, 5.9, 5.1], [11.9, 12.5, 11.2, 13.1, 12.0]]}
+              ],
+              "sig": [{"x1": 0, "x2": 0, "s1": 0, "s2": 1, "label": "p < 0.001"}],
+              "note": "Synthetic demo (n = 5/arm)"
+            },
+            {
+              "type": "chart",
+              "kind": "scatter",
+              "title": "Log-X Dose-Response (Example)",
+              "xlog": true,
+              "connect": true,
+              "ylabel": "Viability (%)",
+              "xlabel": "Concentration (uM)",
+              "series": [
+                {"name": "WT", "x": [0.01, 0.1, 1, 10, 100], "y": [98, 92, 52, 18, 8], "err": [3, 4, 5, 3, 2]},
+                {"name": "KO", "x": [0.01, 0.1, 1, 10, 100], "y": [99, 97, 94, 88, 82], "err": [2, 3, 3, 4, 4]}
+              ],
+              "reflines": [{"x": 1.0, "label": "IC50 ~ 1 uM"}],
+              "note": "Synthetic demo; mean +/- SD"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "P4",
+      "badge": "d",
+      "role": "conclusion",
+      "title": "Key Summary (Example)",
+      "source": "Synthetic Summary",
+      "blocks": [
+        {"type": "kpi", "value": "-59%", "label": "synthetic response reduction in WT"},
+        {"type": "kpi", "value": "~1 uM", "label": "illustrative IC50 potency"},
+        {"type": "bullets", "items": ["Synthetic template for Path A journal figures"]}
+      ]
+    }
+  ]
+}

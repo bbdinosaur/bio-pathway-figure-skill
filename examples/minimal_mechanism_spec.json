@@ -1,0 +1,31 @@
+{
+  "_example_notice": "Synthetic illustrative example — NOT a formal benchmark case or answer.",
+  "mode": "mechanism",
+  "title": "Illustrative Example: RTK-MAPK Signaling Axis with Feedback",
+  "caption": "Solid: direct; dashed: inferred. Synthetic example for interface demonstration only.",
+  "compartments": [
+    {"id": "ext", "label": "Extracellular", "kind": "exterior"},
+    {"id": "mb", "label": "Plasma membrane", "kind": "membrane"},
+    {"id": "cyt", "label": "Cytosol", "kind": "cytosol"},
+    {"id": "nuc", "label": "Nucleus", "kind": "nucleus"}
+  ],
+  "groups": [
+    {"id": "g1", "label": "MAPK core module", "members": ["RAF1", "MAPK1"], "source": "Example Doc §2.1"}
+  ],
+  "nodes": [
+    {"id": "EGF", "label": "EGF", "kind": "protein", "compartment": "ext", "source": "Example Fig.1"},
+    {"id": "EGFR", "label": "EGFR", "alias": "ERBB1", "kind": "receptor", "compartment": "mb", "mods": ["P"], "source": "Example Fig.1"},
+    {"id": "RAF1", "label": "RAF1", "kind": "protein", "compartment": "cyt", "value": 2.4, "source": "Example Table 1"},
+    {"id": "MAPK1", "label": "MAPK1", "alias": "ERK2", "kind": "protein", "compartment": "cyt", "mods": ["P"], "value": 4.1, "source": "Example Table 1"},
+    {"id": "MYC", "label": "MYC", "kind": "gene", "compartment": "nuc", "source": "Example Fig.2"}
+  ],
+  "edges": [
+    {"from": "EGF", "to": "EGFR", "type": "binding", "source": "Example Fig.1"},
+    {"from": "EGFR", "to": "RAF1", "type": "activation", "weight": 0.9, "source": "Example Fig.1"},
+    {"from": "RAF1", "to": "MAPK1", "type": "phosphorylation", "label": "pT/Y", "weight": 0.85, "source": "Example §2.2"},
+    {"from": "MAPK1", "to": "MYC", "type": "transcription", "evidence": "inferred", "source": "Example §3.1"},
+    {"from": "MAPK1", "to": "EGFR", "type": "inhibition", "route": "feedback", "label": "T669-fb", "source": "Example §3.2"}
+  ],
+  "data_map": {"palette": "blues", "min": 0, "max": 5, "caption": "log2 FC (Example Table 1)", "source": "Example Table 1"},
+  "width_map": {"min": 0.2, "max": 1.0, "caption": "Interaction confidence (Example §2)", "source": "Example §2"}
+}

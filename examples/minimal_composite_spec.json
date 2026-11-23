@@ -1,0 +1,45 @@
+{
+  "_example_notice": "Synthetic illustrative example — NOT a formal benchmark case or answer.",
+  "mode": "composite",
+  "title": "Illustrative Example: Multi-Panel Mechanism & Quantitative Validation",
+  "layout": {"cols": 2},
+  "panels": [
+    {
+      "id": "A",
+      "spec": {
+        "mode": "mechanism",
+        "title": "Core signaling module",
+        "compartments": [
+          {"id": "mb", "label": "Plasma membrane", "kind": "membrane"},
+          {"id": "cyt", "label": "Cytosol", "kind": "cytosol"},
+          {"id": "nuc", "label": "Nucleus", "kind": "nucleus"}
+        ],
+        "nodes": [
+          {"id": "EGFR", "label": "EGFR", "kind": "receptor", "compartment": "mb", "mods": ["P"], "source": "Example §1"},
+          {"id": "MAPK1", "label": "MAPK1", "kind": "protein", "compartment": "cyt", "mods": ["P"], "source": "Example §1"},
+          {"id": "MYC", "label": "MYC", "kind": "gene", "compartment": "nuc", "source": "Example §2"}
+        ],
+        "edges": [
+          {"from": "EGFR", "to": "MAPK1", "type": "activation", "source": "Example §1"},
+          {"from": "MAPK1", "to": "MYC", "type": "transcription", "source": "Example §2"}
+        ]
+      }
+    },
+    {
+      "id": "B",
+      "spec": {
+        "mode": "chart",
+        "title": "Synthetic fold-change validation",
+        "chart": {
+          "kind": "bar",
+          "y_label": "log2 fold-change",
+          "bars": [
+            {"label": "EGFR", "value": 2.4, "err": 0.3, "sig": "**", "source": "Example Table 1 r1"},
+            {"label": "MAPK1", "value": 4.1, "err": 0.4, "sig": "***", "source": "Example Table 1 r2"},
+            {"label": "MYC", "value": 3.2, "err": 0.35, "sig": "***", "source": "Example Table 1 r3"}
+          ]
+        }
+      }
+    }
+  ]
+}

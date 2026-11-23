@@ -1,0 +1,2 @@
+https://github.com/bbdinosaur/bio-pathway-figure-skill/tree/main/skills/sci-figure-studio
+SKILL.md

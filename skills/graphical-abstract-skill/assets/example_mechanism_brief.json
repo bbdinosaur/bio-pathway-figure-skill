@@ -1,0 +1,94 @@
+{
+  "_note": "EXAMPLE / 示例：合成生物学机制图与定量结果联用示例，仅演示 GA-Skill v9 接口，非任何正式案例答案",
+  "title": "Example: Metabolite axis reprograms immune signaling (synthetic)",
+  "subtitle": "Synthetic mechanism demonstration — compartments, activation/inhibition arrows, skip-edge & KPI",
+  "layout": "hero-2x2",
+  "version": "GA-Skill v9 · EXAMPLE-MECH",
+  "sources": "Synthetic mechanism example; not a real publication",
+  "panel_links": [
+    {"from": "P1", "to": "P2", "label": "mechanism"},
+    {"from": "P2", "to": "P3", "label": "readout"},
+    {"from": "P3", "to": "P4", "label": "impact"}
+  ],
+  "panels": [
+    {
+      "id": "P1",
+      "role": "question",
+      "title": "Unknowns",
+      "icon": "target",
+      "blocks": [
+        {"type": "callout", "icon": "microbe", "title": "Microbiome-immune link",
+         "body": "Dietary metabolites reshape mucosal T-cell balance, yet causal hubs remain unclear."},
+        {"type": "text", "items": [
+          "Which microbial metabolite suppresses pro-inflammatory Th17 signaling?",
+          "Does HDAC inhibition drive Treg expansion in vivo?"
+        ]}
+      ]
+    },
+    {
+      "id": "P2",
+      "role": "mechanism",
+      "title": "Signaling Pathway & Compartments",
+      "icon": "cell",
+      "blocks": [
+        {"type": "mechanism", "direction": "LR",
+         "zones": [
+           {"label": "Gut Lumen", "nodes": ["diet", "mic"], "color": "#E0F2FE", "stroke": "#38BDF8"},
+           {"label": "Epithelium / Lamina Propria", "nodes": ["but", "treg", "th17"], "color": "#ECFDF5", "stroke": "#34D399"},
+           {"label": "Host Outcome", "nodes": ["col"], "color": "#FEF3C7", "stroke": "#F59E0B"}
+         ],
+         "nodes": [
+           {"id": "diet", "label": "High-fiber diet", "icon": "molecule", "shape": "pill"},
+           {"id": "mic",  "label": "Commensal flora", "sub": "Fermentation", "icon": "microbe"},
+           {"id": "but",  "label": "Butyrate", "sub": "SCFA up", "icon": "molecule"},
+           {"id": "treg", "label": "Treg pool", "sub": "Foxp3+ up", "icon": "shield"},
+           {"id": "th17", "label": "Th17 axis", "sub": "IL-17A down", "icon": "warning"},
+           {"id": "col",  "label": "Colitis score", "sub": "Reduced", "icon": "check"}
+         ],
+         "edges": [
+           {"from": "diet", "to": "mic",  "label": "substrate", "kind": "activate"},
+           {"from": "mic",  "to": "but",  "kind": "activate"},
+           {"from": "but",  "to": "treg", "label": "HDAC", "kind": "activate"},
+           {"from": "but",  "to": "th17", "label": "blocks", "kind": "inhibit"},
+           {"from": "treg", "to": "col",  "label": "IL-10", "kind": "inhibit"},
+           {"from": "th17", "to": "col",  "kind": "activate"}
+         ],
+         "legend": [
+           {"kind": "activate", "label": "Activation / Production"},
+           {"kind": "inhibit", "label": "Inhibition / Suppression"}
+         ]}
+      ]
+    },
+    {
+      "id": "P3",
+      "role": "results",
+      "title": "Immune Population Shift",
+      "icon": "chart",
+      "blocks": [
+        {"type": "chart", "kind": "bar", "ylabel": "Colonic CD4+ fraction (%)",
+         "xlabels": ["Control diet", "High-fiber diet"],
+         "series": [
+           {"name": "Foxp3+ Treg", "values": [12.4, 21.8], "err": [1.5, 2.1]},
+           {"name": "IL-17A+ Th17", "values": [9.1, 4.7], "err": [1.1, 0.9]}
+         ],
+         "value_labels": true,
+         "note": "Synthetic example: mean ± SD, n = 8 per arm"}
+      ]
+    },
+    {
+      "id": "P4",
+      "role": "conclusion",
+      "title": "Conclusion",
+      "icon": "shield",
+      "blocks": [
+        {"type": "kpi", "items": [
+          {"value": "1.76x", "label": "colonic Treg expansion vs control"},
+          {"value": "-48%", "label": "reduction in pro-inflammatory Th17"}
+        ]},
+        {"type": "text", "items": [
+          "Microbial butyrate provides a tractable dietary lever for mucosal immunity (synthetic)."
+        ]}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,112 @@
+{
+  "schema_version": "1.0",
+  "description": "Reusable journal export presets, colorblind-safe semantic palettes, and relationship grammar loaded by build_figure.py and export_check.py.",
+  "journal_presets": {
+    "nature_single": {
+      "label": "Nature / Nature Portfolio Single-Column",
+      "width_mm": 89,
+      "dpi": 300,
+      "print_dpi": 600,
+      "font_family": "DejaVu Sans",
+      "min_font_pt": 5.0,
+      "panel_label_pt": 11.0,
+      "color_space": "RGB",
+      "formats": ["svg", "pdf", "png"]
+    },
+    "nature_double": {
+      "label": "Nature / Nature Portfolio Double-Column",
+      "width_mm": 180,
+      "dpi": 300,
+      "print_dpi": 600,
+      "font_family": "DejaVu Sans",
+      "min_font_pt": 5.0,
+      "panel_label_pt": 12.0,
+      "color_space": "RGB",
+      "formats": ["svg", "pdf", "png"]
+    },
+    "cell_double": {
+      "label": "Cell Press Full-Page Width",
+      "width_mm": 174,
+      "dpi": 300,
+      "print_dpi": 600,
+      "font_family": "DejaVu Sans",
+      "min_font_pt": 6.0,
+      "panel_label_pt": 12.0,
+      "color_space": "RGB",
+      "formats": ["svg", "pdf", "png"]
+    },
+    "science_double": {
+      "label": "Science 3-Column Width",
+      "width_mm": 183,
+      "dpi": 300,
+      "print_dpi": 600,
+      "font_family": "DejaVu Sans",
+      "min_font_pt": 5.5,
+      "panel_label_pt": 12.0,
+      "color_space": "RGB",
+      "formats": ["svg", "pdf", "png"]
+    },
+    "pnas_double": {
+      "label": "PNAS Two-Column Width",
+      "width_mm": 178,
+      "dpi": 300,
+      "print_dpi": 600,
+      "font_family": "DejaVu Sans",
+      "min_font_pt": 6.0,
+      "panel_label_pt": 12.0,
+      "color_space": "RGB",
+      "formats": ["svg", "pdf", "png"]
+    },
+    "grant_figure": {
+      "label": "Grant Proposal / NSFC / NIH Full-Width Schematic",
+      "width_mm": 165,
+      "dpi": 300,
+      "print_dpi": 300,
+      "font_family": "DejaVu Sans",
+      "min_font_pt": 6.5,
+      "panel_label_pt": 12.0,
+      "color_space": "RGB",
+      "formats": ["svg", "pdf", "png"]
+    },
+    "slide_16_9": {
+      "label": "Presentation Slide (16:9 Widescreen)",
+      "width_mm": 254,
+      "dpi": 200,
+      "print_dpi": 200,
+      "font_family": "DejaVu Sans",
+      "min_font_pt": 8.0,
+      "panel_label_pt": 14.0,
+      "color_space": "RGB",
+      "formats": ["svg", "pdf", "png"]
+    }
+  },
+  "palettes": {
+    "okabe_ito_series": [
+      "#0072B2",
+      "#D55E00",
+      "#009E73",
+      "#CC79A7",
+      "#E69F00",
+      "#56B4E9",
+      "#8C8C8C"
+    ],
+    "semantic_roles": {
+      "stimulus_ligand": {"fill": "#FDEBD0", "stroke": "#B9770E"},
+      "kinase_activator": {"fill": "#EAF2FB", "stroke": "#2E5E8C"},
+      "inhibitor_repressor": {"fill": "#FADBD8", "stroke": "#B03A2E"},
+      "effector_output": {"fill": "#D5F5E3", "stroke": "#1E8449"},
+      "complex_tf": {"fill": "#E8DAEF", "stroke": "#6C3483"},
+      "highlight_hub": {"fill": "#0072B2", "stroke": "#10243B"}
+    }
+  },
+  "relation_grammar": {
+    "activates": {"line": "solid", "head": "filled_arrow", "meaning": "Activation / phosphorylation / upregulation"},
+    "catalyzes": {"line": "solid", "head": "filled_arrow", "meaning": "Enzymatic catalysis / conversion"},
+    "inhibits": {"line": "solid", "head": "tbar", "meaning": "Direct inhibition / repression / blockade"},
+    "inhibits_dashed": {"line": "dashed", "head": "tbar", "meaning": "Indirect or putative inhibition"},
+    "translocates": {"line": "dashed", "head": "open_arrow", "meaning": "Translocation / trafficking / nuclear entry"},
+    "binds": {"line": "solid", "head": "double_arrow", "meaning": "Physical binding / complex formation"},
+    "flows": {"line": "solid", "head": "filled_arrow", "meaning": "Experimental workflow / sequential step"},
+    "assoc": {"line": "dotted", "head": "none", "meaning": "Statistical or structural association"}
+  }
+}

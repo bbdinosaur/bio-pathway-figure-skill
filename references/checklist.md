@@ -1,62 +1,66 @@
-# Pre-submit checklist & result.json template
+# Pre-Submit Checklist, Edit Ops & Output Contract Template
 
-## Multiple deliverables in one case
-If the workorder asks for a mechanism figure AND data panels, render each with its own
-`--spec`/`--basename` (fig03, fig_chart, ...). Put the main mechanism SVG in
-`editable_source` and list every export under `export_artifact`; cover all figures in
-one `content_map` (prefix element names with the basename).
+## Multiple Deliverables in One Case
+When a workorder requests BOTH a mechanism diagram and quantitative chart(s), either:
+- Combine them into a single multi-panel figure (`"mode": "composite"`), OR
+- Pass `--spec mech.json --spec2 chart.json --basename2 fig_chart` (or repeatable `--extra name:spec.json`)
+  to `run_case.py` — all SVG/PNG/PDF exports and prefixed `content_map` entries are assembled automatically.
 
-## Before finishing a case, ALL of these must hold
-1. `check_figure.py <out>.svg` → `n_violations: 0` (or violations listed in exceptions with reason).
-2. You visually inspected the PNG: no text overlap, no clipped/overflowing elements,
-   arrows attach to node borders, compartment positions match the mechanism.
-3. Every edge type used appears in the legend (automatic — verify legend rendered).
-4. Every node/edge in spec carries a `source` string pointing into the case material.
-5. Direction sanity pass: upstream→downstream, receptor in membrane, feedback routed
-   around, dashed = uncertainty. Wrong topology = wrong scientific claim.
-6. Exports exist: `.svg` (editable source) + `.png` + `.pdf` at requested dpi.
-7. If the case asked to EDIT an existing SVG: `edit_svg.py` produced `.edit-record.json`
-   with before/after for every change; untouched regions byte-identical.
+## Source-Preserving SVG Edit Ops (`edit_svg.py` / `run_case.py --edit-svg`)
+Only matched fragments change; all untouched SVG bytes remain byte-identical. Supported ops:
+- `{"op": "set_text_by_id", "id": "label-EGFR", "text": "EGFR (ERBB1)"}` (preserves `<tspan>`)
+- `{"op": "set_style_by_id", "id": "shape-EGFR", "prop": "fill", "value": "#fef3c7"}` (CSS `style` or XML attr)
+- `{"op": "set_attr_by_id", "id": "shape-EGFR", "attr": "stroke-width", "value": "2.4"}`
+- `{"op": "translate_by_id", "id": "label-EGFR", "dx": 10, "dy": -5}`
+- `{"op": "hide_by_id", "id": "badge-1"}` / `{"op": "remove_by_id", "id": "badge-1"}`
+- `{"op": "replace_label", "find": "OldName", "replace": "NewName", "all": false}` (text nodes only)
+- `{"op": "replace_text", "find": "raw", "replace": "new", "all": false}`
+- `{"op": "add_text", "x": 40, "y": 24, "text": "Note", "size": 12, "id": "note-1", "layer_id": "layer-annotations"}`
+- `{"op": "insert_in_layer", "layer_id": "layer-annotations", "svg": "<circle .../>"}`
 
-## result.json (exact fields, plus case_id)
+Every run emits `<out>.edit-record.json` with `before`/`after` values and `preservation.unchanged_line_ratio`.
+
+## Pre-Finish Gate (ALL must hold)
+1. Triple audit passes: IR geometry + `edge_through_node` (`n_violations: 0`), raw-SVG audit (`svg_audit.n_violations: 0`), and real PNG `pixel_audit.ok: true` (heuristic advisories remain non-fatal with `status: "ok"` once valid SVG/PNG/PDF and required contract fields exist, and are recorded honestly in `compliance_checks` and `exceptions`/`exceptions_and_limitations`; only missing/corrupted core exports or critical spec parse errors set `status: "partial"`/`"failed"`).
+2. In text-only runtimes, do NOT read binary PNGs; verify `run_case.py`'s automated `pixel_audit` + `visual_inspection` summary. (When vision is available locally, also inspect `<basename>.preview.png`.)
+3. Every node, edge, group, and chart data series in `content_map` cites its exact source location.
+4. Editable `.svg` + `.png` (300 DPI) + `.pdf` + `.edit-record.json` exist inside `/app/output/` and pass magic-byte checks.
+5. `run_case.py` reports `valid: true`, `problems: []`, and zero placeholder warnings.
+
+## Example `/app/output/result.json` (Illustrative Format Example Only)
 ```json
 {
-  "case_id": "<from /input/case.json>",
-  "status": "ok | partial | failed",
-  "editable_source": {"path": "/app/work/fig.svg", "format": "svg",
-                      "canvas_wh": [1300, 850], "layers_named": true},
+  "case_id": "EXAMPLE-CASE-01",
+  "status": "ok",
+  "editable_source": {
+    "path": "/app/output/fig.svg",
+    "format": "svg",
+    "canvas_wh": [1420, 720],
+    "layers_named": true
+  },
   "export_artifact": [
     {"path": "/app/output/fig.png", "format": "png", "dpi": 300},
     {"path": "/app/output/fig.pdf", "format": "pdf", "dpi": 300}
   ],
   "content_map": [
-    {"element": "EGFR", "kind": "node", "relation": "receptor in membrane",
-     "source": "case material §3.1 p4", "notes": "spans membrane band"},
-    {"element": "RAF1->MAP2K1", "kind": "edge", "relation": "phosphorylation P-S218/S222",
-     "source": "case material §3.3 fig4B"}
+    {"element": "EGFR", "kind": "node", "relation": "receptor in mb; mods=P",
+     "source": "Materials §3.1 p.4"},
+    {"element": "RAF1->MAP2K1", "kind": "edge", "relation": "phosphorylation (P-S218/S222)",
+     "source": "Materials §3.3 Fig.4B"}
   ],
   "compliance_checks": {
-    "geometry": {"n_violations": 0, "tool": "check_figure.py", "scale": "regular"},
-    "legend_consistency": "auto-generated from used styles; verified visually",
-    "export_checks": [{"file": "fig.png", "format": "png", "dpi": 300, "ok": true}],
-    "visual_inspection": "inspected PNG: no overlap/clipping; arrows attach on borders"
+    "geometry": {"n_violations": 0, "scale": "regular", "svg_audit": {"n_violations": 0, "layers_named": true}},
+    "legend_consistency": "auto-generated directly from rendered styles and verified",
+    "export_checks": [
+      {"file": "/app/output/fig.svg", "ok": true, "bytes": 18420},
+      {"file": "/app/output/fig.png", "ok": true, "bytes": 245100},
+      {"file": "/app/output/fig.pdf", "ok": true, "bytes": 42800}
+    ],
+    "visual_inspection": "Inspected fig.preview.png: zero overlap/clipping, receptors span bilayer, all legend glyphs match edges/nodes/mods."
   },
   "exceptions": [
-    {"issue": "interaction X described without direction in material",
-     "handling": "drawn dashed as other-type; not invented"}
+    {"issue": "Interaction X reported without direct binding assay",
+     "handling": "Drawn dashed as indirect/reported and noted in caption."}
   ]
 }
 ```
-Validate before finishing: `python3 result_contract.py --check /app/output/result.json`
-(exit 0 = structurally valid + referenced files exist).
-
-## Honesty rules
-- Never fabricate: entities, edges, numbers, IDs, page/section numbers, or "verified" claims.
-- `status:"partial"` + precise `exceptions` is always better than a confident wrong figure.
-- If material contradicts itself, draw the version you can cite and record the conflict.
-- Do not claim benchmark scores or compare against hidden whiteboards.
-
-## Budget discipline (64 requests / 900 s / 16384 tok per response)
-- ~6–8 requests per case: read material (1–2) → write spec (1) → run engine (1) →
-  inspect PNG (1) → fix+rerun (0–2) → result.json (1).
-- If the first render has violations, fix the spec (data model) — do not hand-edit SVG.

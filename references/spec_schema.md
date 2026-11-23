@@ -1,67 +1,101 @@
-# Mechanism spec schema (`spec.json`)
+# Specification Schema (`spec.json`)
 
-`make_figure.py` consumes one JSON file. Unknown keys are ignored; missing keys use defaults.
+`make_figure.py` and `run_case.py` consume one JSON spec supporting three modes: `"mechanism"`,
+`"chart"`, and `"composite"`. Unknown keys are ignored; omitted fields use sensible defaults.
 
+## 1. Mechanism Mode (`"mode": "mechanism"`)
 ```json
 {
-  "mode": "mechanism",                  // or "chart"
-  "title": "short declarative title",
-  "caption": "evidence + source note (auto-wrapped)",
-  "compartments": [                      // order = vertical order top->bottom
-    {"id":"ext","label":"Extracellular space","kind":"exterior"},
-    {"id":"mb","label":"Plasma membrane","kind":"membrane"},
-    {"id":"cyt","label":"Cytosol","kind":"cytosol"},
-    {"id":"nuc","label":"Nucleus","kind":"nucleus"}
-  ],                                     // kinds: exterior|membrane|cytosol|nucleus|organelle|custom
+  "mode": "mechanism",
+  "title": "Short declarative mechanism title",
+  "caption": "Evidence & data encoding note (auto-wrapped).",
+  "compartments": [
+    {"id": "ext", "label": "Extracellular", "kind": "exterior"},
+    {"id": "mb",  "label": "Plasma membrane", "kind": "membrane"},
+    {"id": "cyt", "label": "Cytosol", "kind": "cytosol"},
+    {"id": "nuc", "label": "Nucleus", "kind": "nucleus"}
+  ],
+  "groups": [
+    {"id": "mapk", "label": "MAPK cascade", "members": ["RAF1", "MAP2K1", "MAPK1"],
+     "style": "dashed", "source": "Materials §3.3"}
+  ],
   "nodes": [
-    {"id":"EGFR","label":"EGFR","kind":"receptor","compartment":"mb",
-     "mods":["P"],                        // corner tags: P, Ub, Ac, GTP
-     "alias":"ERBB1 (old name)",          // small italic alias above node
-     "x":300,"y":200,"w":120,"h":46,      // optional explicit placement overrides auto layout
-     "fill":"#e3ecfb",                    // optional data-encoded fill (document in data_map)
-     "source":"Materials §3.1"}           // provenance string, lands in content_map
-  ],                                      // node kinds: receptor|protein|gene|complex|metabolite|cell|dna|other
+    {"id": "EGFR", "label": "EGFR", "kind": "receptor", "compartment": "mb",
+     "mods": ["P"], "alias": "ERBB1", "sublabel": "RTK",
+     "value": 8.4, "source": "Materials §3.1 p.4"}
+  ],
   "edges": [
-    {"from":"EGFR","to":"GRB2","type":"recruitment",
-     "label":"pY1045",                    // printed on the edge
-     "evidence":"direct",                 // appended as [direct]
-     "dashed":true,                       // indirect / reported only
-     "route":"feedback",                  // orthogonal loop above both nodes
-     "source":"§3.2"}
-  ],                                      // types: activation|inhibition|binding|phosphorylation|
-                                          // ubiquitination|transport|translocation|recruitment|
-                                          // expression|other  (see arrow_semantics.md)
-  "data_map": {"palette":"blues","min":"low expr.","max":"high expr.",
-               "caption":"Node fill encodes RNA expression (TPM, Table S2)."},
-  "legend": true                          // false hides legend panel entirely
+    {"from": "EGFR", "to": "GRB2", "type": "recruitment", "label": "pY1045",
+     "evidence": "direct", "dashed": false, "route": "direct",
+     "source": "Materials §3.2 Fig.2A"}
+  ],
+  "data_map": {"palette": "blues", "min": "0", "max": "10",
+               "caption": "Node fill encodes log2 TPM (Table S2).",
+               "source": "Table S2"},
+  "width_map": {"min": 0.2, "max": 1.0, "caption": "Edge width encodes confidence.", "source": "Table S3"},
+  "size_map": {"min": 0.0, "max": 1.0, "caption": "Node height encodes score."},
+  "layout": {"auto_arc": true, "tighten_bands": true, "auto_tier": true,
+             "evidence_auto_style": false},
+  "legend": true
 }
 ```
 
-## Auto-layout rules
-- Nodes are grouped by `compartment`, centered as a row inside the band, ordered as declared.
-- Receptors in a `membrane` compartment automatically span the full band height (transmembrane).
-- Inter-compartment row width = widest compartment; all rows centered; gap adapts so edge
-  labels never sit on node boxes. Very wide cascades (≥6 nodes, >1700px) switch to a
-  2-row serpentine automatically.
-- A straight SAME-ROW edge that would pass BEHIND an intermediate node can be auto-routed
-  as a short arc above the row on its own staggered height rail — enable with
-  `"layout":{"auto_arc":true}`. Cross-compartment edges always stay straight.
-- `route:"feedback"` routes above both nodes; use for inhibitory feedback loops.
-- Optional size encoding: `"size_map":{"min":..,"max":..}` scales node height by each
-  node's numeric `value` (0.72x–1.28x); describe it in `data_map.size_caption`.
-- Optional band tightening: `"layout":{"tighten_bands":true}` shrinks compartment bands
-  to their node extent (+padding; explicit y0/y1 are always respected).
-- Both layout flags default OFF (classic straight-line look); enable when the workorder
-  asks for denser or more disambiguated layouts.
+### Key options
+- **Compartment kinds**: `exterior`, `membrane` (auto lipid bilayer interrupted by receptors),
+  `cytosol`, `nucleus`, `organelle` (mitochondria/ER/Golgi), `custom`.
+- **Node kinds**: `receptor` (spans membrane band), `protein`, `gene` (italicized), `complex`
+  (double border), `metabolite` (hexagon), `drug` (rose hexagon), `process` / `phenotype`
+  (rounded pill), `cell` (ellipse), `dna`, `other`.
+- **Node fields**: `mods` (`["P","Ub","Ac","GTP","Me","SUMO"]`), `alias` (small italic above),
+  `sublabel` (second line inside node), `subunits` (`["PIK3CA","PIK3R1"]` rendered as subunit pills inside complexes),
+  `row` / `tier` (explicit integer sub-row inside a
+  compartment; auto-tiered when wide), `value` (numeric value mapped automatically to `data_map`
+  fill color with WCAG contrast text and/or `size_map` node height), optional explicit `x`/`y`/`w`/`h`.
+- **Edge fields**: `type` (see `arrow_semantics.md`), `label`, `evidence` (appended as `[direct]`),
+  `dashed` (indirect/reported), `dotted` (weak), `weight` / `confidence` (numeric value mapped
+  to stroke width via `width_map` with automatic legend swatches), `route`: `"direct"` (default;
+  auto obstacle-avoiding on same-row & cross-row), `"arc"` (staggered top rail), `"feedback"`
+  (same-row top rail or obstacle-free outer right-margin rail for cross-compartment feedback).
+- **Palettes**: `blues`, `fold` (blue-white-red diverging), `viridis`, `reds`, `qual` (colorblind-safe).
 
-## Chart mode (`"mode":"chart"`)
+## 2. Chart Mode (`"mode": "chart"`)
+Supports **9 quantitative plot types** via `chart.kind` (auto-inferred from data keys) and direct
+zero-transcription-error **`from_table`** binding (`{"file": "/input/data.csv|.tsv|.xlsx", "sheet"?: ..., "filter"?: {"col":..., "eq":...}, "label_col":..., "value_col"|"x_col"|"series_cols"|"value_cols":..., "sort_by"?:..., "top_n"?:...}`):
+- **Vertical bar (`kind: "bar"`)**: `bars: [{label, value, err?, group?, points?: [r1,r2,...], italic?, source?}]`,
+  `stars: [{pair: [i, j], text: "**"}]`, `x_label`, `y_label`, `y_note`.
+- **Grouped multi-series bar (`kind: "grouped_bar"`)**: `categories: ["MYC", "CCND1", ...]`,
+  `series: [{name, values: [...], errs?: [...], points?: [[...], ...], color?, source?}]`,
+  `italic_x?: bool`, `x_label`, `y_label`, `y_note`.
+- **Stacked / 100% composition bar (`kind: "stacked_bar"`)**: `categories: [...]`,
+  `series: [{name, values: [...], color?, source?}]`, `normalize?: true` (100% proportions).
+- **Horizontal / diverging bar (`kind: "hbar"` or `horizontal: true`)**: same `bars` schema (supports positive & diverging `+/-` NES/log2FC).
+- **Line / time-course (`kind: "line"`)**: `series: [{name, x: [...], y: [...], err?: [...], dashed?: bool, source?}]`
+  (numeric or categorical X; automatically draws translucent `±SD` confidence ribbons when `err` is provided),
+  `hlines: [{y: 1.0, label?: "baseline"}]`, `x_label`, `y_label`, `y_note`.
+- **Scatter / auto-volcano (`kind: "scatter"` or `"volcano"`)**: `points: [{x, y, group?: "Up"|"Down"|"NS", label?, size?, source?}]`,
+  optional `x_thresh`/`y_thresh` (auto-classifies Up/Down/NS with legend counts and dashed threshold guides),
+  `hlines`, `vlines`, `x_label`, `y_label`, `y_note`.
+- **Heatmap (`kind: "heatmap"`)**: `rows: [...]`, `cols: [...]`, `values: [[...]]`, `palette: "fold"`,
+  `cbar_label`, `italic_rows: true`, `annotate: true`, `y_note`.
+- **Pathway enrichment bubble dotplot (`kind: "dotplot"`)**: `items: [{label, x, size, color, source?}]`,
+  `x_label`, `color_label`, `size_label`, `palette: "reds"` (dual colorbar + gene-count size legend).
+- **Box-and-whisker + replicate strip (`kind: "box"`)**: `groups: [{label, values: [...], color?, source?}]`,
+  `sig_brackets: [{a: 0, b: 1, label: "***"}]`, `y_label`, `y_note`.
+
+All chart numbers MUST be copied verbatim from source tables/data files and cited in `y_note`/`source`.
+
+## 3. Composite Multi-Panel Mode (`"mode": "composite"`)
 ```json
-{"mode":"chart","title":"...",
- "chart":{"x_label":"Gene","y_label":"Fold change",
-          "y_note":"n=3, SEM, t-test (Table 1)",
-          "bars":[{"label":"MYC","value":4.2,"err":0.4,"group":"stimulated"}],
-          "stars":[{"pair":[0,3],"text":"**"}]}}
+{
+  "mode": "composite",
+  "title": "Overall multi-panel figure title",
+  "caption": "(A) Mechanism summary. (B) Expression validation.",
+  "layout": {"cols": 2, "panel_gap": 24},
+  "panels": [
+    {"id": "A", "spec": {"mode": "mechanism", "...": "..."}},
+    {"id": "B", "spec": {"mode": "chart", "...": "..."}}
+  ]
+}
 ```
-Bars are colored by `group`; value labels, SEM error bars, significance brackets and a
-group legend are drawn automatically; y ticks are snapped to nice steps.
-Every numeric value in `bars` MUST come from the case material (table/text), cited in `y_note`.
+Each panel receives a bold `A`/`B`/`C` badge and its own `<g id="panel-A" transform="translate(...)">`
+layer group in the editable SVG.

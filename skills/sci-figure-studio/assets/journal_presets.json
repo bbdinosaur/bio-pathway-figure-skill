@@ -1,0 +1,12 @@
+{
+  "journal_single": {"width_mm": 89, "font_pt": 8.0, "panel_h_mm": 55, "dpi": 300, "desc": "通用期刊单栏（Nature/Science/PLOS 单栏）"},
+  "journal_double": {"width_mm": 183, "font_pt": 8.0, "panel_h_mm": 55, "dpi": 300, "desc": "通用期刊双栏通栏"},
+  "nature_single":  {"width_mm": 89, "font_pt": 7.5, "panel_h_mm": 54, "dpi": 300, "desc": "Nature 单栏 (89 mm, 7-8 pt)"},
+  "nature_double":  {"width_mm": 183, "font_pt": 8.0, "panel_h_mm": 56, "dpi": 300, "desc": "Nature 双栏 (183 mm, 8 pt)"},
+  "science_single": {"width_mm": 57, "font_pt": 7.0, "panel_h_mm": 48, "dpi": 300, "desc": "Science 单栏 (57 mm, 7 pt)"},
+  "science_double": {"width_mm": 120, "font_pt": 8.0, "panel_h_mm": 55, "dpi": 300, "desc": "Science 双栏 (120 mm, 8 pt)"},
+  "cell_single":    {"width_mm": 85, "font_pt": 8.0, "panel_h_mm": 55, "dpi": 300, "desc": "Cell 单栏 (85 mm, 8 pt)"},
+  "cell_double":    {"width_mm": 174, "font_pt": 8.0, "panel_h_mm": 58, "dpi": 300, "desc": "Cell 双栏 (174 mm, 8 pt)"},
+  "thesis":         {"width_mm": 140, "font_pt": 10.5, "panel_h_mm": 70, "dpi": 300, "desc": "学位论文正文插图"},
+  "ppt_16x9":       {"width_mm": 254, "font_pt": 14.0, "panel_h_mm": 95, "dpi": 200, "desc": "16:9 汇报幻灯片大图"}
+}

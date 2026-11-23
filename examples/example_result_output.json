@@ -1,0 +1,31 @@
+{
+  "_example_notice": "Illustrative example output for minimal_mechanism_spec.json — NOT a formal benchmark result.",
+  "case_id": "EXAMPLE-SYNTHETIC-01",
+  "status": "ok",
+  "editable_source": {
+    "path": "/tmp/example_out/example_fig.svg",
+    "format": "svg",
+    "layers_named": true,
+    "canvas_wh": [1280, 760]
+  },
+  "export_artifact": [
+    {"path": "/tmp/example_out/example_fig.pdf", "format": "pdf", "dpi": 300},
+    {"path": "/tmp/example_out/example_fig.png", "format": "png", "dpi": 300}
+  ],
+  "content_map": [
+    {"element": "EGF", "entity_id": "EGF", "kind": "node", "symbol_style": "roman_protein", "compartment": "ext", "relation": "protein in ext", "source": "Example Fig.1"},
+    {"element": "EGFR", "entity_id": "EGFR", "kind": "node", "symbol_style": "roman_receptor", "compartment": "mb", "relation": "receptor in mb (alias: ERBB1); mods=P", "source": "Example Fig.1"},
+    {"element": "RAF1 -> MAPK1", "kind": "edge", "relation": "phosphorylation", "source": "Example §2.2"}
+  ],
+  "compliance_checks": {
+    "skill_metadata": {"skill": "bio-pathway-figure", "version": "v24", "schema_version": "2.4"},
+    "delivery_integrity": {"svg_ok": true, "png_ok": true, "pdf_ok": true, "critical_spec_error": false, "heuristic_advisories": 0},
+    "geometry": {"n_violations": 0, "scale": "regular", "pixel_audit": {"ok": true, "border_clipped": false}},
+    "bio_audit": {"n_issues": 0, "issues": []},
+    "legend_consistency": {"all_consistent": true},
+    "source_preserving_edit": {"mode": "roundtrip_editability_check", "roundtrip_byte_identical": true, "source_preserved": true},
+    "traceability_summary": {"source_coverage_ratio": 1.0, "roundtrip_editable": true, "all_audits_passed": true},
+    "exceptions_and_limitations": []
+  },
+  "exceptions": []
+}

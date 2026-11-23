@@ -1,4 +1,4 @@
-"""Geometry helpers: node boundary anchors, marker polygons, perp vectors."""
+"""Geometry helpers: node boundary anchors, port offsets, marker polygons, text bboxes."""
 from __future__ import annotations
 import math
 
@@ -9,43 +9,68 @@ def norm(dx, dy):
 def perp(dx, dy):
     return -dy, dx
 
-def boundary_point(node, tx, ty):
-    """Point on node border along ray center->(tx,ty)."""
+def boundary_point(node, tx, ty, port_offset=0.0):
+    """Point on node border along ray center->(tx,ty).
+    Optional port_offset slides the anchor strictly ALONG the contacted border edge
+    (clamped inside the edge) so parallel edges stay 100% attached to the node boundary."""
     cx, cy = node["cx"], node["cy"]
     hw, hh = node["w"] / 2.0, node["h"] / 2.0
     dx, dy = tx - cx, ty - cy
     if dx == 0 and dy == 0:
         return cx + hw, cy
-    if node.get("shape") == "ellipse":
-        t = 1.0 / math.sqrt((dx / hw) ** 2 + (dy / hh) ** 2)
+    shape = node.get("shape", "rect")
+    if shape == "ellipse":
+        ang = math.atan2(dy, dx)
+        if port_offset:
+            ang += max(-0.45, min(0.45, port_offset / max(hw, hh, 20.0)))
+        return cx + hw * math.cos(ang), cy + hh * math.sin(ang)
+    ts = abs(hw / dx) if dx else float("inf")
+    tt = abs(hh / dy) if dy else float("inf")
+    if ts < tt:
+        # hits left or right vertical edge
+        px = cx + (hw if dx > 0 else -hw)
+        py = cy + dy * ts
+        if port_offset:
+            py = max(cy - hh + 6.0, min(cy + hh - 6.0, py + port_offset))
+        return px, py
     else:
-        ts = abs(hw / dx) if dx else float("inf")
-        tt = abs(hh / dy) if dy else float("inf")
-        t = min(ts, tt)
-    return cx + dx * t, cy + dy * t
+        # hits top or bottom horizontal edge
+        px = cx + dx * tt
+        py = cy + (hh if dy > 0 else -hh)
+        if port_offset:
+            px = max(cx - hw + 8.0, min(cx + hw - 8.0, px + port_offset))
+        return px, py
 
-MARKER_LEN = {"arrow": 14, "open": 14, "bar": 2, "circle": 6, "diamond": 9}
+MARKER_LEN = {"arrow": 13, "open": 13, "bar": 2.5, "circle": 15, "open_dot": 9, "diamond": 9, "cross": 7}
 
-def arrow_poly(tip, dirv, length=14, half=5.5):
+def arrow_poly(tip, dirv, length=13, half=5.2):
     bx, by = tip[0] - dirv[0] * length, tip[1] - dirv[1] * length
     nx, ny = perp(*dirv)
     return [[tip[0], tip[1]], [bx + nx * half, by + ny * half], [bx - nx * half, by - ny * half]]
 
-def diamond_poly(tip, dirv, r=5.5):
+def diamond_poly(tip, dirv, r=5.2):
     cx, cy = tip[0] - dirv[0] * r, tip[1] - dirv[1] * r
     nx, ny = perp(*dirv)
     return [[cx + nx * r, cy + ny * r], [cx + dirv[0] * r, cy + dirv[1] * r],
             [cx - nx * r, cy - ny * r], [cx - dirv[0] * r, cy - dirv[1] * r]]
 
 def text_bbox(x, y, s, size, anchor="middle"):
-    w = 0.62 * size * max(1, len(str(s)))
+    lines = str(s).split("\n")
+    w = 0.0
+    for ln in lines:
+        lw = 0.0
+        for ch in ln:
+            lw += size * (1.0 if ord(ch) > 0x2E80 else 0.62)
+        w = max(w, lw)
+    w = max(w, size * 0.6)
+    h = size * (1.24 if len(lines) == 1 else (1.25 * len(lines)))
     if anchor == "start":
         x0 = x
     elif anchor == "end":
         x0 = x - w
     else:
         x0 = x - w / 2.0
-    return [x0, y - size * 0.62, x0 + w, y + size * 0.62]
+    return [x0, y - h / 2.0, x0 + w, y + h / 2.0]
 
 def bbox_of(prim):
     op = prim["op"]
@@ -59,13 +84,17 @@ def bbox_of(prim):
         return [prim["cx"] - rx, prim["cy"] - ry, prim["cx"] + rx, prim["cy"] + ry]
     if op in ("polyline", "polygon", "poly"):
         pts = prim["pts"]
+        if not pts:
+            return None
         xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
         return [min(xs), min(ys), max(xs), max(ys)]
     if op == "text":
         if prim.get("rotate"):
-            w = text_bbox(0, 0, prim["s"], prim.get("size", 15))[2]
-            return [prim["x"] - prim.get("size", 15), prim["y"] - w / 2,
-                    prim["x"] + prim.get("size", 15), prim["y"] + w / 2]
+            tb = text_bbox(0, 0, prim["s"], prim.get("size", 15))
+            w = tb[2] - tb[0]
+            h = tb[3] - tb[1]
+            return [prim["x"] - h / 2.0, prim["y"] - w / 2.0,
+                    prim["x"] + h / 2.0, prim["y"] + w / 2.0]
         return text_bbox(prim["x"], prim["y"], prim["s"], prim.get("size", 15),
                          prim.get("anchor", "middle"))
     return None

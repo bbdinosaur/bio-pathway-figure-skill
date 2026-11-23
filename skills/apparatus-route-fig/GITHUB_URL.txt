@@ -1,0 +1,2 @@
+https://github.com/bbdinosaur/bio-pathway-figure-skill/tree/main/skills/apparatus-route-fig
+SKILL.md

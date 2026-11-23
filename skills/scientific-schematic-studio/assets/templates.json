@@ -1,0 +1,91 @@
+{
+  "schema_version": "1.0",
+  "note": "Reusable structural templates (EXAMPLE skeletons only; replace all placeholder labels/values exclusively with primary input materials).",
+  "templates": {
+    "signaling_pathway_tb": {
+      "description": "Top-to-bottom cellular signaling cascade with extracellular ligand, membrane receptor, cytosolic kinase/inhibitor, nuclear translocation, and nested subcellular compartments.",
+      "preset": "nature_double",
+      "panel_skeleton": {
+        "id": "p1",
+        "type": "schematic",
+        "direction": "TB",
+        "nodes": [
+          {"id": "L", "label": "<Ligand>", "sublabel": "<dose>", "shape": "ellipse", "fill": "#FDEBD0", "rank": 0},
+          {"id": "R", "label": "<Receptor>", "shape": "complex", "fill": "#EAF2FB", "rank": 1},
+          {"id": "K", "label": "<Kinase>", "shape": "round", "fill": "#0072B2", "rank": 2},
+          {"id": "I", "label": "<Inhibitor>", "shape": "hexagon", "fill": "#FADBD8", "rank": 2},
+          {"id": "T", "label": "<Target Gene>", "shape": "gene", "fill": "#D5F5E3", "rank": 3}
+        ],
+        "edges": [
+          {"from": "L", "to": "R", "kind": "binds", "label": "binds"},
+          {"from": "R", "to": "K", "kind": "activates", "label": "activates"},
+          {"from": "I", "to": "K", "kind": "inhibits", "label": "inhibits"},
+          {"from": "K", "to": "T", "kind": "translocates", "label": "nuclear entry"}
+        ],
+        "groups": [
+          {"id": "cyto", "label": "Cytoplasm", "members": ["K", "I", "T"], "dash": true, "membrane": true},
+          {"id": "nuc", "label": "Nucleus", "members": ["T"], "dash": true}
+        ]
+      }
+    },
+    "experimental_workflow_lr": {
+      "description": "Left-to-right multi-stage experimental protocol with grouped phases and QC decision gate.",
+      "preset": "nature_double",
+      "panel_skeleton": {
+        "id": "p1",
+        "type": "schematic",
+        "direction": "LR",
+        "nodes": [
+          {"id": "S1", "label": "<Sample Prep>", "shape": "round", "fill": "#FDEBD0", "rank": 0},
+          {"id": "S2", "label": "<Assay>", "shape": "round", "fill": "#EAF2FB", "rank": 1},
+          {"id": "QC", "label": "<QC Gate>", "shape": "diamond", "fill": "#E8DAEF", "rank": 2},
+          {"id": "S3", "label": "<Readout>", "shape": "stadium", "fill": "#D5F5E3", "rank": 3}
+        ],
+        "edges": [
+          {"from": "S1", "to": "S2", "kind": "flows"},
+          {"from": "S2", "to": "QC", "kind": "flows"},
+          {"from": "QC", "to": "S3", "kind": "flows", "label": "pass"}
+        ]
+      }
+    },
+    "mechanism_plus_source_data_grid": {
+      "description": "Two-row multi-panel figure: full-width schematic in row 0 plus side-by-side source-data-bound quantitative charts in row 1.",
+      "preset": "nature_double",
+      "panels_skeleton": [
+        {"id": "p1", "row": 0, "type": "schematic", "direction": "LR", "title": "<Mechanism>"},
+        {"id": "p2", "row": 1, "width_weight": 1.0, "type": "chart", "height_mm": 54,
+         "chart": {"kind": "bar", "data_file": "<source_data.xlsx>", "sheet_name": "<Sheet>", "agg": "mean_sd", "show_points": true}},
+        {"id": "p3", "row": 1, "width_weight": 1.0, "type": "chart", "height_mm": 54,
+         "chart": {"kind": "line", "data_file": "<source_data.xlsx>", "sheet_name": "<Sheet2>"}}
+      ]
+    },
+    "mutual_feedback_regulatory_tb": {
+      "description": "Regulatory hub with extracellular/cytosolic small-molecule perturbation, nuclear mutual feedback loop (A <-> B), downstream gene effectors, and separated non-member compartments.",
+      "preset": "nature_double",
+      "panel_skeleton": {
+        "id": "p1",
+        "type": "schematic",
+        "direction": "TB",
+        "nodes": [
+          {"id": "S", "label": "<Upstream Signal>", "shape": "ellipse", "fill": "#FDEBD0", "rank": 0},
+          {"id": "D", "label": "<Small Molecule>", "sublabel": "<conc>", "shape": "hexagon", "fill": "#FADBD8", "rank": 1},
+          {"id": "H", "label": "<Master Regulator>", "shape": "round", "fill": "#0072B2", "rank": 1},
+          {"id": "F", "label": "<Negative Regulator>", "shape": "hexagon", "fill": "#FADBD8", "rank": 2},
+          {"id": "E1", "label": "<Target Gene 1>", "shape": "gene", "fill": "#D5F5E3", "rank": 2},
+          {"id": "E2", "label": "<Target Gene 2>", "shape": "gene", "fill": "#D5F5E3", "rank": 2}
+        ],
+        "edges": [
+          {"from": "S", "to": "H", "kind": "activates"},
+          {"from": "D", "to": "F", "kind": "inhibits", "label": "blocks"},
+          {"from": "H", "to": "F", "kind": "activates"},
+          {"from": "F", "to": "H", "kind": "inhibits"},
+          {"from": "H", "to": "E1", "kind": "activates"},
+          {"from": "H", "to": "E2", "kind": "activates"}
+        ],
+        "groups": [
+          {"id": "nuc", "label": "Nucleus", "members": ["H", "F", "E1", "E2"], "membrane": true}
+        ]
+      }
+    }
+  }
+}

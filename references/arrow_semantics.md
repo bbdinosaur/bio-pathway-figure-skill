@@ -1,41 +1,55 @@
-# Interaction semantics — how wording maps to arrows
+# Interaction Semantics, Node Shapes & Evidence Encoding
 
-Every edge type has a distinct color AND endpoint marker, so the map stays legible in
-grayscale print and the legend can be generated from actual usage.
+Every interaction type has a distinct **color + endpoint marker (+ optional start glyph)** so the
+pathway remains unambiguous in grayscale print and the legend is generated directly from usage.
 
-| Input wording | `type` | Endpoint | Color | Notes |
+## Edge Taxonomy (`edges[].type`)
+
+| Biological wording | `type` | Endpoint & start glyph | Color | Default style |
 |---|---|---|---|---|
-| activates, promotes, stimulates, drives, enhances | `activation` | filled triangle ▶ | blue #1d4ed8 | default direct arrow |
-| recruits, docks, scaffolds | `recruitment` | filled triangle ▶ | blue | use when the verb is recruitment |
-| inhibits, suppresses, blocks, represses, dephosphorylates(inactivating) | `inhibition` | bar-headed ⊣ | red #dc2626 | NEVER draw as pointed arrow |
-| binds, associates with, forms complex with | `binding` | diamond ◇ both ends | purple #7c3aed | no direction implied |
-| phosphorylates | `phosphorylation` | filled circle ● at target | amber #b45309 | label residue e.g. `P-Y1045` |
-| ubiquitinates | `ubiquitination` | filled circle ● | brown #92400e | label `Ub` |
-| imports/exports, shuttles | `transport` | open triangle ▷ | teal #0f766e | cross-compartment |
-| translocates (cytosol→nucleus etc.) | `translocation` | open triangle ▷ | teal | edge must cross the compartment boundary |
-| expresses, induces transcription of | `expression` | open triangle ▷ | slate #475569 | source usually a gene node |
-| unclear / not stated | `other` | filled triangle | dark gray | mark `dashed:true` + note in exceptions |
+| activates, promotes, stimulates, drives | `activation` | filled triangle `▶` | `#1d4ed8` blue | solid |
+| recruits, docks, scaffolds | `recruitment` | start dot `○` + filled `▶` | `#0284c7` cyan | solid |
+| inhibits, suppresses, blocks, represses | `inhibition` | flat T-bar `⊣` | `#dc2626` red | solid (NEVER arrow) |
+| binds, associates, dimerizes, complexes | `binding` | diamond `◇` both ends | `#7c3aed` purple | solid (undirected) |
+| phosphorylates | `phosphorylation` | badge circle `℗` (`P`) | `#b45309` amber | solid; optional site label e.g. `pT/Y` |
+| ubiquitinates | `ubiquitination` | badge circle (`Ub`) | `#92400e` brown | solid |
+| acetylates, methylates, SUMOylates, cleaves | `modification` | badge circle (`M`) | `#a21caf` magenta | solid; label mod |
+| imports, exports, shuttles | `transport` | open triangle `▷` | `#0f766e` dark teal | solid |
+| translocates (across compartment border) | `translocation` | start dot `○` + open `▷` | `#0d9488` teal | solid |
+| expresses (protein/mRNA level) | `expression` | open triangle `▷` | `#475569` slate | solid |
+| induces transcription of gene target | `transcription` | promoter bar `|` + open `▷` | `#4f46e5` indigo | solid (target `kind:"gene"`) |
+| degrades, targets to proteasome/lysosome | `degradation` | cross `×` | `#991b1b` dark red | dashed by default |
+| direction unknown / correlative association | `undirected` | hollow circles `○—○` both ends | `#64748b` slate | dashed (NEVER false arrow) |
+| unclear / unspecified mechanism | `other` | filled triangle `▶` | `#334155` charcoal | set `dashed:true` + exception |
 
-## Direction rules (topology is semantics)
-1. Upstream → downstream: ligand → receptor → adaptor → kinase cascade → transcription factor → gene.
-2. Receptors sit IN the membrane band; ligands above it; signal flows toward the nucleus.
-3. An edge must not contradict the compartment model (e.g. a cytosolic kinase directly
-   hitting a ligand in the extracellular space is suspect — re-read the source).
-4. Feedback loops: use `route:"feedback"` and, if only reported indirectly, `dashed:true`.
-5. Never invent an edge. If the material says "may/possibly/putatively", draw it dashed
-   and say so in the caption and `content_map`.
+## Node Kinds (`nodes[].kind`)
 
-## Evidence & uncertainty encoding
-- Solid = stated as direct in the material; add `"evidence":"direct"` only when the source
-  says so (label becomes `[direct]`).
-- `dashed:true` = indirect, inferred, or reported-only; explain in the caption.
-- Optional auto-styling (spec `"layout":{"evidence_auto_style":true}`): edges with
-  `evidence` of reported/inferred/indirect/putative render dashed automatically, and
-  `weak` renders dotted; the legend gains the matching samples. Legend entries derive
-  from actual usage, so legend ≡ map always holds.
-- Conflict between two sources: draw both edges with labels naming the source of each,
-  and record the conflict in `exceptions` of result.json.
+| Kind | Visual encoding | Typical biological entities |
+|---|---|---|
+| `receptor` | Green rounded rect spanning membrane lipid bilayer | EGFR, FZD4, LRP5/6, TLR4, GPCR |
+| `protein` | Blue rounded rect, roman bold | Kinases, adaptors, transcription factors |
+| `gene` | Amber rounded rect, **italic bold** | *MYC*, *CCND1*, *DUSP6*, target loci |
+| `complex` | Purple **double-bordered** rect | Destruction complex, mTORC1, PRC2 |
+| `metabolite` | Emerald hexagon | ATP, cAMP, lactate, lipid ligands |
+| `drug` | Rose hexagon | Small-molecule inhibitors, agonists |
+| `process` / `phenotype` | Green rounded pill | Proliferation, apoptosis, EMT |
+| `cell` | Soft-red ellipse | T cell, macrophage, tumor cell |
+| `dna` | Slate rect | Enhancer, promoter, chromatin locus |
 
-## Mod tags on nodes
-`"mods":["P","Ub"]` draw corner tags (P amber, Ub brown, Ac purple, GTP teal). Use them
-instead of duplicating state inside the label; keep labels short (names, not sentences).
+## Post-Translational Modification (PTM) Corner Badges (`nodes[].mods`)
+`P` (amber, Phosphorylation), `Ub` (brown, Ubiquitination), `Ac` (purple, Acetylation),
+`GTP` (teal, GTP-bound), `Me` (magenta, Methylation), `SUMO` (sky blue, SUMOylation).
+Any badge used on a node is automatically added to the `Modifications` section of the legend.
+
+## Direction, Feedback & Uncertainty Rules
+1. **Upstream → downstream**: signal flows top-to-bottom across compartments (exterior → membrane
+   → cytosol → organelle/nucleus) and left-to-right within tiers.
+2. **Feedback loops**: set `"route": "feedback"`. Same-row feedback routes along a clean staggered
+   top channel; cross-compartment feedback automatically takes an obstacle-free right-margin outer
+   rail without cutting through any intermediate node.
+3. **Evidence strength**: solid = direct experimental evidence; `dashed: true` = indirect,
+   inferred, or literature-reported; `dotted: true` = weak evidence. With
+   `"layout": {"evidence_auto_style": true}`, `evidence` of `reported|inferred|indirect|putative`
+   auto-dashes and `weak` auto-dots, with matching legend entries.
+4. **Source conflicts**: draw both edges labeled with their respective sources and record the
+   discrepancy in `exceptions`.
