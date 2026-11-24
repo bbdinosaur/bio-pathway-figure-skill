@@ -111,7 +111,7 @@ def to_mpl(prims, W, H, dpi, png=None, pdf=None, preview_png=None, preview_dpi=1
                     linespacing=1.22, path_effects=pe_arg, zorder=max(z, 9))
     eff_dpi = int(dpi)
     if png:
-        eff_dpi = min(int(dpi), max(150, int(9600 * base_dpi / max(1.0, float(max(W, H))))))
+        eff_dpi = min(int(dpi), max(150, int(5200 * base_dpi / max(1.0, float(max(W, H))))))
         fig.savefig(png, dpi=eff_dpi, format="png", facecolor="white")
     if preview_png:
         fig.savefig(preview_png, dpi=preview_dpi, format="png", facecolor="white")

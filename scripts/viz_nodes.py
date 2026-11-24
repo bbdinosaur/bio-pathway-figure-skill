@@ -125,7 +125,7 @@ def draw_nodes(placed, prims, spec=None):
                           "anchor": "middle", "fill": ink, "weight": "bold", "italic": italic,
                           "halo": use_halo, "role": "node_label", "layer": "layer-nodes",
                           "_id": f"label-{n['id']}"})
-            sub_ink = "#e2e8f0" if ink == "#ffffff" else "#475569"
+            sub_ink = "#f1f5f9" if ink == "#ffffff" else ("#1e293b" if auto_fill else "#475569")
             prims.append({"op": "text", "x": n["cx"], "y": lbl_y + sub_shift, "s": sub_eff, "size": 10.0,
                           "anchor": "middle", "fill": sub_ink,
                           "italic": sub_italic, "halo": False, "role": "node_label",

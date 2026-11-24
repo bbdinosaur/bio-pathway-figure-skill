@@ -45,17 +45,37 @@ def _inline_css_for_mupdf(svg_text: str) -> str:
         return tag[:idx] + f' style="{css_inline}"' + tag[idx:]
     return re.sub(r'<(?:\w+:)?(?:rect|circle|ellipse|path|polygon|polyline|line|text|tspan|g)\b[^>]*\bclass=["\'][^"\']+["\'][^>]*/?>', _apply_cls, svg_text)
 
+def _stamp_png_dpi(svg_txt: str, png_path: Path):
+    """Set truthful physical pHYs DPI metadata on rasterized SVG PNGs (width_px / (svg_w / 96))."""
+    try:
+        from PIL import Image
+        wm = re.search(r'\bwidth=["\']([0-9.]+)', svg_txt)
+        vb = re.search(r'\bviewBox=["\']\s*[0-9.-]+[\s,]+[0-9.-]+[\s,]+([0-9.]+)', svg_txt)
+        svg_w = float(wm.group(1)) if wm else (float(vb.group(1)) if vb else 0.0)
+        if svg_w <= 10.0:
+            return
+        with Image.open(png_path) as im:
+            pw = im.size[0]
+            dpi_val = int(round(pw / (svg_w / 96.0)))
+            if 72 <= dpi_val <= 600:
+                cur = im.info.get("dpi")
+                if not cur or abs(float(cur[0]) - dpi_val) > 5:
+                    im.save(png_path, dpi=(dpi_val, dpi_val))
+    except Exception:
+        pass
+
 def render(svg, png, width):
     svg_p = Path(svg)
     if not svg_p.exists():
         return None
+    svg_txt = svg_p.read_text(encoding="utf-8", errors="replace")
     try:
         import cairosvg  # type: ignore
         cairosvg.svg2png(url=str(svg_p), write_to=str(png), output_width=width)
+        _stamp_png_dpi(svg_txt, Path(png))
         return "cairosvg"
     except Exception:
         pass
-    svg_txt = svg_p.read_text(encoding="utf-8", errors="replace")
     has_css = "<style" in svg_txt
     if has_css:
         for tool, args in (
@@ -66,6 +86,7 @@ def render(svg, png, width):
                 try:
                     subprocess.run(args, check=True, capture_output=True, timeout=30)
                     if Path(png).exists() and Path(png).stat().st_size > 1000:
+                        _stamp_png_dpi(svg_txt, Path(png))
                         return tool
                 except Exception:
                     continue
@@ -86,6 +107,7 @@ def render(svg, png, width):
             pix.save(str(png))
             pdf.close()
             if Path(png).exists() and Path(png).stat().st_size > 1000:
+                _stamp_png_dpi(svg_txt, Path(png))
                 return mod
         except Exception:
             continue
@@ -101,6 +123,7 @@ def render(svg, png, width):
             try:
                 subprocess.run(args, check=True, capture_output=True, timeout=30)
                 if Path(png).exists() and Path(png).stat().st_size > 1000:
+                    _stamp_png_dpi(svg_txt, Path(png))
                     return tool + (" (low fidelity: prefer cairosvg/rsvg-convert)"
                                    if tool == "convert" else "")
             except Exception:

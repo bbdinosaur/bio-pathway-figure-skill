@@ -52,9 +52,13 @@ def _auto_assign_rows(group, edges, gap, allow_auto_tier=True):
             break
     max_d = max(depth.values()) if depth else 0
     total_w = sum(node_size(n)[0] for n in group) + gap * max(0, len(group) - 1)
-    if max_d >= 1 and max_d <= 3 and (total_w > 1180 or (len(group) >= 6 and max_d >= 2)):
-        # Collapse into 2-3 clean vertical signaling tiers
-        rows = [min(depth[n["id"]], 2) for n in group]
+    if max_d >= 1 and max_d <= 6 and (total_w > 1100 or (len(group) >= 5 and max_d >= 2)):
+        # Collapse multi-step signaling cascades cleanly into 2-4 vertical tiers
+        max_tier = 3 if max_d >= 3 else 2
+        if max_d > max_tier:
+            rows = [min(max_tier, int(round(depth[n["id"]] * max_tier / max_d))) for n in group]
+        else:
+            rows = [min(depth[n["id"]], max_tier) for n in group]
         if len(set(rows)) >= 2:
             return rows
     if total_w > 1350 and len(group) >= 6:

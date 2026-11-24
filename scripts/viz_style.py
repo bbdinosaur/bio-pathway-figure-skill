@@ -13,11 +13,16 @@ def _mix(a, b, t):
     return "#%02x%02x%02x" % tuple(round(a[i] + (b[i] - a[i]) * t) for i in range(3))
 
 def contrast_text(hex_col):
-    """Return high-contrast ink (#ffffff or #0f172a) using WCAG relative luminance."""
+    """Return high-contrast ink (#ffffff or #0f172a) using true WCAG 2.1 sRGB luminance."""
     try:
-        r, g, b = [v / 255.0 for v in _hx(hex_col)]
+        def _lin(u):
+            return (u / 12.92) if u <= 0.04045 else (((u + 0.055) / 1.055) ** 2.4)
+        r, g, b = [_lin(v / 255.0) for v in _hx(hex_col)]
         lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
-        return "#ffffff" if lum < 0.48 else "#0f172a"
+        # Compare WCAG contrast ratio vs white (L=1) and dark slate (L≈0.008)
+        cr_white = 1.05 / (lum + 0.05)
+        cr_dark = (lum + 0.05) / 0.058
+        return "#ffffff" if cr_white >= cr_dark else "#0f172a"
     except Exception:
         return "#0f172a"
 
@@ -26,13 +31,33 @@ PALETTES = {
     "blues":    ["#f7fbff", "#deebf7", "#c6dbef", "#9ecae1", "#6baed6", "#4292c6", "#2171b5"],
     "viridis":  ["#440154", "#3b528b", "#21918c", "#5ec962", "#fde725"],
     "reds":     ["#fff5f0", "#fee0d2", "#fcbba1", "#fc9272", "#fb6a4a", "#de2d26", "#a50f15"],
+    "greens":   ["#f7fcf5", "#e5f5e0", "#c7e9c0", "#a1d99b", "#74c476", "#31a354", "#006d2c"],
+    "oranges":  ["#fff5eb", "#fee6ce", "#fdd0a2", "#fdae6b", "#fd8d3c", "#e6550d", "#a63603"],
+    "purples":  ["#fcfbfd", "#efedf5", "#dadaeb", "#bcbddc", "#9e9ac8", "#756bb1", "#54278f"],
+    "ylorrd":   ["#ffffcc", "#ffeda0", "#fed976", "#feb24c", "#fd8d3c", "#f03b20", "#bd0026"],
+    "plasma":   ["#0d0887", "#6a00a8", "#b12a90", "#e16462", "#fca636", "#f0f921"],
     # Colorblind-safe Nature / Okabe-Ito inspired qualitative palette
     "qual":     ["#2563eb", "#0d9488", "#d97706", "#7c3aed", "#dc2626", "#059669", "#db2777", "#475569"],
 }
+PALETTE_ALIASES = {
+    "rdbu": "fold", "rd_bu": "fold", "redblue": "fold", "red_blue": "fold",
+    "coolwarm": "fold", "bwr": "fold", "diverging": "fold", "seismic": "fold",
+    "rdylbu": "fold", "bluered": "fold", "blue_red": "fold", "log2fc": "fold",
+    "zscore": "fold", "z_score": "fold", "heat": "ylorrd", "hot": "ylorrd",
+    "blue": "blues", "red": "reds", "green": "greens", "orange": "oranges", "purple": "purples",
+}
 
 def ramp(name, t):
-    """Map t in [0,1] to a palette color."""
-    stops = PALETTES.get(name, PALETTES["blues"])
+    """Map t in [0,1] to a palette color with case-insensitive & *_r reverse support."""
+    key = str(name or "blues").strip().lower()
+    rev = False
+    if key.endswith("_r") and len(key) > 2:
+        rev = True
+        key = key[:-2]
+    key = PALETTE_ALIASES.get(key, key)
+    stops = PALETTES.get(key, PALETTES["blues"])
+    if rev:
+        stops = list(reversed(stops))
     t = min(1.0, max(0.0, float(t)))
     n = len(stops) - 1
     i = min(int(t * n), n - 1)

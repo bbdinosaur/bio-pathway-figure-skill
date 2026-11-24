@@ -182,11 +182,17 @@ def build_composite(spec, scale_name="regular"):
     tlines_est = _wrap(title, est_w - 80, 22.0) if title else []
     top_y = (76.0 if len(tlines_est) >= 2 else 56.0) if title else 24.0
 
-    built = []
-    for idx, pdef in enumerate(panels):
+    def _build_one(idx, pdef, span_target_w=None):
         pid = str(pdef.get("id") or chr(65 + idx))
-        pspec = pdef.get("spec") or pdef
+        pspec = dict(pdef.get("spec") or pdef)
+        if pdef.get("title") and not pspec.get("title"):
+            pspec["title"] = pdef["title"]
         if pspec.get("mode") == "chart":
+            ch_raw = pspec.get("chart")
+            if span_target_w and isinstance(ch_raw, dict) and not ch_raw.get("width"):
+                ch_kind = str(ch_raw.get("kind") or "").lower()
+                if ch_kind not in ("heatmap", "matrix", "expression_heatmap", "heatmap_chart"):
+                    pspec = {**pspec, "chart": {**ch_raw, "width": int(span_target_w)}}
             sub_prims, pw, ph, placed, used = build_chart(pspec, scale_name)
             routed = []
         else:
@@ -204,8 +210,31 @@ def build_composite(spec, scale_name="regular"):
                  "role": "text", "layer": "layer-chrome", "_id": f"panel-badge-{pid}"}
         sub_prims = list(sub_prims) + [badge]
         span = max(1, min(cols, int(pdef.get("span") or pdef.get("colspan") or 1)))
-        built.append({"id": pid, "prims": sub_prims, "W": pw, "H": ph, "span": span,
-                      "placed": placed, "used": used, "routed": routed, "spec": pspec})
+        return {"id": pid, "prims": sub_prims, "W": pw, "H": ph, "span": span,
+                "placed": placed, "used": used, "routed": routed, "spec": pspec}
+
+    # Pass 1: build non-spanning panels first to learn natural multi-column grid width
+    built_map = {}
+    est_col_w = [0.0] * cols
+    cur_c = 0
+    for idx, pdef in enumerate(panels):
+        sp = max(1, min(cols, int(pdef.get("span") or pdef.get("colspan") or 1)))
+        if sp == 1:
+            b = _build_one(idx, pdef)
+            built_map[idx] = b
+            est_col_w[cur_c % cols] = max(est_col_w[cur_c % cols], b["W"])
+            cur_c += 1
+        else:
+            cur_c = 0
+    est_grid_w = sum(est_col_w) + gap * max(0, cols - 1) if any(est_col_w) else 0.0
+    span_w = min(int(est_grid_w), 1440) if est_grid_w >= 1000 else None
+
+    built = []
+    for idx, pdef in enumerate(panels):
+        if idx in built_map:
+            built.append(built_map[idx])
+        else:
+            built.append(_build_one(idx, pdef, span_target_w=span_w))
 
     # Row-packing grid layout with full-width span support (e.g., Panel A span=2 above B + C)
     rows_grid = []

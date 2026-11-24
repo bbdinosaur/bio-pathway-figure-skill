@@ -17,7 +17,7 @@ Only matched fragments are rewritten; all untouched regions remain byte-identica
 Emits before/after values and preservation ratio in .edit-record.json.
 """
 from __future__ import annotations
-import sys, json, re, argparse
+import sys, json, re, argparse, difflib
 from html import unescape as html_unescape
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -85,32 +85,47 @@ def apply_edits(svg, edits):
                                "status": "ok", "count": 1})
         elif op == "replace_label":
             find, rep = str(e["find"]), esc(e["replace"])
+            find_esc = esc(find)
             hit = [0]
             limit = 0 if e.get("all") else 1
             def _sub_node(m):
                 if limit and hit[0] >= limit:
                     return m.group(0)
                 inner = m.group(2)
-                if find in inner:
+                target = find if (find in inner) else (find_esc if (find_esc != find and find_esc in inner) else None)
+                if target is not None:
                     hit[0] += 1
-                    new_inner = inner.replace(find, rep) if e.get("all") else inner.replace(find, rep, 1)
+                    new_inner = inner.replace(target, rep) if e.get("all") else inner.replace(target, rep, 1)
                     return m.group(1) + new_inner + m.group(3)
                 return m.group(0)
             pat = re.compile(r'(>)([^<]+)(<)')
             svg = pat.sub(_sub_node, svg)
             if hit[0] == 0:
-                # Fallback: text split across nested <tspan> elements inside a <text>
+                # Fallback: text split across nested <tspan> elements (multi-line OR kerning-split)
                 tpat = re.compile(r'(<(?:\w+:)?text\b[^>]*>)(.*?)(</(?:\w+:)?text>)', re.S)
                 raw_rep = str(e["replace"])
+                find_norm = " ".join(find.split())
+                find_tight = "".join(find.split())
                 def _sub_tspan_text(tm):
                     if limit and hit[0] >= limit:
                         return tm.group(0)
                     inner = tm.group(2)
-                    plain = " ".join(html_unescape(re.sub(r"<[^>]+>", " ", inner)).split())
-                    find_norm = " ".join(find.split())
-                    if find_norm in plain:
+                    plain_sp = " ".join(html_unescape(re.sub(r"<[^>]+>", " ", inner)).split())
+                    plain_tg = " ".join(html_unescape(re.sub(r"<[^>]+>", "", inner)).split())
+                    matched_mode = None
+                    if find_norm in plain_sp:
+                        matched_mode = "sp"
+                    elif find_norm in plain_tg:
+                        matched_mode = "tg"
+                    elif find_tight and find_tight in "".join(plain_tg.split()):
+                        matched_mode = "tight"
+                    if matched_mode:
                         hit[0] += 1
-                        new_plain = plain.replace(find_norm, raw_rep) if e.get("all") else plain.replace(find_norm, raw_rep, 1)
+                        base_plain = plain_sp if matched_mode == "sp" else plain_tg
+                        if matched_mode == "tight":
+                            new_plain = raw_rep
+                        else:
+                            new_plain = base_plain.replace(find_norm, raw_rep) if e.get("all") else base_plain.replace(find_norm, raw_rep, 1)
                         ts_all = list(re.finditer(r'(<(?:\w+:)?tspan\b[^>]*>)(.*?)(</(?:\w+:)?tspan>)', inner, re.S))
                         if ts_all:
                             lines = new_plain.split("\n")
@@ -137,9 +152,9 @@ def apply_edits(svg, edits):
             )
             m = pat.search(svg)
             if not m:
-                # Fallback: id placed on parent <g id="..."> wrapping a <text>
+                # Fallback: id placed on parent <g id="..."> directly wrapping a <text> (never cross </g>!)
                 gpat = re.compile(
-                    r'(<(?:\w+:)?g\b[^>]*' + _id_pat(e["id"]) + r'[^>]*>.*?'
+                    r'(<(?:\w+:)?g\b[^>]*' + _id_pat(e["id"]) + r'[^>]*>(?:(?!</(?:\w+:)?g>).)*?'
                     r'(?P<open><(?:\w+:)?text\b[^>]*>)(?P<inner>.*?)(?P<close></(?:\w+:)?text>))',
                     re.S
                 )
@@ -226,7 +241,7 @@ def apply_edits(svg, edits):
                 record.append({"op": op, "class": cls, "prop": prop, "status": "not_found"})
                 continue
             body = cm.group(2)
-            ppat = re.compile(r'((?:^|;\s*)' + re.escape(prop) + r'\s*:\s*)([^;}]*)')
+            ppat = re.compile(r'((?:^|;)\s*' + re.escape(prop) + r'\s*:\s*)([^;}]*)')
             pm = ppat.search(body)
             if pm:
                 before = pm.group(2).strip()
@@ -344,6 +359,34 @@ def apply_edits(svg, edits):
                 record.append({"op": op, "layer_id": lid, "status": "ok"})
         else:
             record.append({"op": str(op), "status": "unknown_op"})
+    # Enrich any not_found record with closest SVG IDs / labels / CSS classes for instant 1-shot recovery
+    if any(r.get("status") == "not_found" for r in record):
+        all_ids = sorted(set(re.findall(r'\bid=["\']([^"\']+)["\']', svg)))
+        all_texts = sorted(set(
+            " ".join(html_unescape(re.sub(r"<[^>]+>", " ", m.group(1))).split())
+            for m in re.finditer(r'<(?:\w+:)?text\b[^>]*>(.*?)</(?:\w+:)?text>', svg, re.S)
+            if m.group(1).strip()
+        ))
+        all_cls = sorted(set(re.findall(r'\.([A-Za-z_][\w-]*)', "\n".join(re.findall(r'<style[^>]*>(.*?)</style>', svg, re.S | re.I)))))
+        for r in record:
+            if r.get("status") != "not_found":
+                continue
+            if r.get("find"):
+                sug = difflib.get_close_matches(str(r["find"]), all_texts, n=3, cutoff=0.4)
+                if not sug:
+                    q_lo = str(r["find"]).lower()
+                    sug = [t for t in all_texts if q_lo in t.lower()][:3]
+                if sug:
+                    r["suggestions"] = sug
+            elif r.get("id") or r.get("layer_id"):
+                q = str(r.get("id") or r.get("layer_id"))
+                sug = difflib.get_close_matches(q, all_ids, n=4, cutoff=0.4)
+                if sug:
+                    r["suggestions"] = sug
+            elif r.get("class"):
+                sug = difflib.get_close_matches(str(r["class"]).lstrip("."), all_cls, n=3, cutoff=0.4)
+                if sug:
+                    r["suggestions"] = sug
     return svg, record
 
 def preservation_stats(src, out):

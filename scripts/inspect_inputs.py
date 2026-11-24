@@ -13,20 +13,23 @@ import argparse, csv, json, re, shutil, subprocess, sys, zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-def _preview_csv(path: Path, delim: str, max_rows: int = 18, max_scan: int = 5000):
+def _preview_csv(path: Path, delim: str, max_rows: int = 45, max_scan: int = 5000):
     try:
         cols, data = [], []
         n_total = 0
-        with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as fh:
-            rdr = csv.reader(fh, delimiter=delim)
-            for ri, row in enumerate(rdr):
-                if ri == 0:
-                    cols = row
-                else:
-                    n_total += 1
-                    if len(data) < max_scan:
-                        data.append(row)
-        take = len(data) if n_total <= 25 else max_rows
+        raw_lines = path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+        first_ln = next((ln for ln in raw_lines if ln.strip()), "")
+        if delim == "," and first_ln.count(";") >= 2 and first_ln.count(",") == 0:
+            delim = ";"
+        rdr = csv.reader(raw_lines, delimiter=delim)
+        for ri, row in enumerate(rdr):
+            if ri == 0:
+                cols = [c.strip() for c in row]
+            else:
+                n_total += 1
+                if len(data) < max_scan:
+                    data.append(row)
+        take = len(data) if n_total <= 70 else max_rows
         num_stats, cat_prev = _table_stats(cols, data)
         res_t = {
             "n_rows": n_total,
@@ -66,8 +69,17 @@ def _table_stats(cols, data):
             cat_prev[str(cname)] = {"n_unique": len(seen_c), "sample": cats}
     return num_stats, cat_prev
 
+def _xlsx_col_idx(ref: str) -> int | None:
+    m = re.match(r"([A-Za-z]+)", str(ref or ""))
+    if not m:
+        return None
+    idx = 0
+    for ch in m.group(1).upper():
+        idx = idx * 26 + (ord(ch) - ord("A") + 1)
+    return idx - 1
+
 def _read_xlsx_stdlib(path: Path, max_scan: int = 5000):
-    """Pure-stdlib XLSX reader (sharedStrings + sheet XML) when openpyxl/pandas unavailable."""
+    """Pure-stdlib XLSX reader (sharedStrings + sparse-cell column alignment) when openpyxl unavailable."""
     out = {}
     with zipfile.ZipFile(path) as zf:
         shared = []
@@ -98,28 +110,35 @@ def _read_xlsx_stdlib(path: Path, max_scan: int = 5000):
                 for c in row_el:
                     if c.tag.split("}")[-1] != "c":
                         continue
+                    c_idx = _xlsx_col_idx(c.attrib.get("r"))
+                    if c_idx is not None and c_idx > len(vals):
+                        vals.extend([""] * (c_idx - len(vals)))
                     ct = c.attrib.get("t")
                     v_el = next((ch for ch in c if ch.tag.split("}")[-1] == "v"), None)
                     is_el = next((ch for ch in c if ch.tag.split("}")[-1] == "is"), None)
                     if ct == "s" and v_el is not None and v_el.text is not None:
                         idx_s = int(v_el.text)
-                        vals.append(shared[idx_s] if 0 <= idx_s < len(shared) else "")
+                        val = shared[idx_s] if 0 <= idx_s < len(shared) else ""
                     elif ct == "inlineStr" and is_el is not None:
-                        vals.append("".join(is_el.itertext()))
+                        val = "".join(is_el.itertext())
                     elif v_el is not None and v_el.text is not None:
                         try:
                             fv = float(v_el.text)
-                            vals.append(int(fv) if fv.is_integer() else fv)
+                            val = int(fv) if fv.is_integer() else fv
                         except Exception:
-                            vals.append(v_el.text)
+                            val = v_el.text
                     else:
-                        vals.append("")
+                        val = ""
+                    if c_idx is not None and c_idx < len(vals):
+                        vals[c_idx] = val
+                    else:
+                        vals.append(val)
                 if any(str(v) != "" for v in vals):
                     rows.append(vals)
             out[sheet_names.get(nm, Path(nm).stem)] = rows
     return out
 
-def _preview_xlsx(path: Path, max_rows: int = 18, max_scan: int = 5000):
+def _preview_xlsx(path: Path, max_rows: int = 45, max_scan: int = 5000):
     sheets_raw = None
     try:
         import openpyxl
@@ -157,7 +176,7 @@ def _preview_xlsx(path: Path, max_rows: int = 18, max_scan: int = 5000):
     for name, rows in sheets_raw.items():
         cols = rows[0] if rows else []
         data = rows[1:]
-        take = len(data) if len(data) <= 25 else max_rows
+        take = len(data) if len(data) <= 70 else max_rows
         num_stats, cat_prev = _table_stats(cols, data)
         sh_obj = {
             "n_rows": len(data),
@@ -273,10 +292,11 @@ def _extract_pdf_pages(path: Path):
     return None, None
 
 def _extract_target_refs(blob: str) -> list[str]:
-    """Extract target Figure/Table numbers referenced in task.md / workorder (e.g. figure03 -> '3')."""
+    """Extract target Figure/Table numbers (EN & ZH) referenced in task.md / workorder (e.g. figure03, 图3 -> '3')."""
     refs = []
-    for m in re.finditer(r"\b(?:fig(?:ure)?\.?\s*0*(\d+)|table\s*s?0*(\d+))\b", blob or "", re.I):
-        num = m.group(1) or m.group(2)
+    pat = r"(?:\b(?:fig(?:ure)?\.?\s*0*(\d+)|table\s*s?0*(\d+))\b|(?:附图|图|表\s*S?)\s*0*(\d+))"
+    for m in re.finditer(pat, blob or "", re.I):
+        num = m.group(1) or m.group(2) or m.group(3)
         if num and num not in refs:
             refs.append(num)
     return refs[:8]
@@ -299,11 +319,13 @@ def _preview_pdf(path: Path, max_chars: int, dump_dir: Path | None = None, targe
     t_chars = 0
     mech_snips = []
     mech_chars = 0
-    t_pat = (re.compile(r"\b(?:Fig(?:ure)?\.?|Table\s*S?)\s*0*(?:" + "|".join(re.escape(r) for r in target_refs) + r")[A-Za-z]?\b", re.I)
+    t_pat = (re.compile(r"(?:\b(?:Fig(?:ure)?\.?|Table\s*S?)|(?:附图|图|表\s*S?))\s*0*(?:" + "|".join(re.escape(r) for r in target_refs) + r")[A-Za-z]?(?:\b|(?=\D|$))", re.I)
              if target_refs else None)
-    cap_pat = re.compile(r"\b(?:Fig(?:ure)?\.?\s*\d+[A-Za-z]?|Table\s*S?\d+|Extended\s+Data\s+Fig(?:ure)?\.?\s*\d+)\b", re.I)
-    cap_start_pat = re.compile(r"(?:^|\n)\s*((?:Fig(?:ure)?\.?\s*\d+|Table\s*S?\d+|Extended\s+Data\s+Fig(?:ure)?\.?\s*\d+)\s*[\.:\|\-\u2013\u2014][^\n]{15,})", re.I)
+    cap_pat = re.compile(r"(?:\b(?:Fig(?:ure)?\.?\s*\d+[A-Za-z]?|Table\s*S?\d+|Extended\s+Data\s+Fig(?:ure)?\.?\s*\d+)\b|(?:附图|图|表\s*S?)\s*\d+[A-Za-z]?)", re.I)
+    cap_start_pat = re.compile(r"(?:^|\n)\s*((?:(?:Fig(?:ure)?\.?\s*\d+|Table\s*S?\d+|Extended\s+Data\s+Fig(?:ure)?\.?\s*\d+)\s*[\.:\|\-\u2013\u2014]|(?:附图|图|表\s*S?)\s*\d+\s*[\.:\|\-\u2013\u2014：])[^\n]{10,})", re.I)
     mech_pat = re.compile(r"(?:^|\n)\s*(?:[0-9]+\.?\s+)?(?:Results|Discussion|Mechanism|Working\s+model|Proposed\s+model|Pathway|Signaling|Conclusions?)\b[^\n]*", re.I)
+    ref_pat = re.compile(r"(?:^|\n)\s*(?:References|Bibliography|Acknowledgements?|Author\s+Contributions|参考文献)\s*(?:\n|$)", re.I)
+    in_refs = False
     total_doc_chars = 0
     for i, t in enumerate(pages_txt):
         pno = i + 1
@@ -341,7 +363,17 @@ def _preview_pdf(path: Path, max_chars: int, dump_dir: Path | None = None, targe
                     captions.append(cwin)
                     cap_chars += len(cwin)
         full_buf.append(f"=== PAGE {pno} ===\n{t}")
-        if total_chars < max_chars and t:
+        if pno >= 3 and not in_refs:
+            rm = ref_pat.search(t)
+            if rm:
+                t_body = t[:rm.start()].strip()
+                in_refs = True
+                if total_chars < max_chars and t_body:
+                    take = t_body[:max(0, max_chars - total_chars)]
+                    buf.append(f"=== PAGE {pno} (pre-References) ===\n{take}")
+                    total_chars += len(take)
+                continue
+        if total_chars < max_chars and t and not in_refs:
             take = t[:max(0, max_chars - total_chars)]
             buf.append(f"=== PAGE {pno} ===\n{take}")
             total_chars += len(take)
@@ -466,6 +498,11 @@ def inspect_dir(root: Path, max_pdf_chars: int = 28000, dump_dir: Path | None = 
             summary["other_texts"][rel] = f"[inspect error: {e}]"
 
     stems = sorted(set(re.findall(r"\b(figure\d+[a-z]?|fig_?\d+[a-z]?|pathway_?[a-z0-9_]*)\b", blob, re.I)))
+    in_stems = {p.stem.lower() for p in files}
+    for m_fn in re.finditer(r"\b([A-Za-z][\w-]{2,40})\.(?:svg|png|pdf)\b", blob):
+        st = m_fn.group(1)
+        if st.lower() not in in_stems and st not in stems:
+            stems.append(st)
     case = summary.get("case") or {}
     ex_svgs = [str(root / k) for k in summary["svgs"]]
     d_tabs = [str(root / k) for k in summary["tables"]]
@@ -516,57 +553,55 @@ def _init_output_contract(summary: dict, out_path: Path):
     out_path.write_text(json.dumps(skel, ensure_ascii=False, indent=1), encoding="utf-8")
     return str(out_path)
 
-def _fit_stdout_budget(summary: dict, max_bytes: int = 48000) -> str:
-    """Keep stdout <= max_bytes while SACREDLY protecting task_md, workorders, target_ref_snippets, captions & PDF excerpt."""
+def _fit_stdout_budget(summary: dict, max_bytes: int = 52000) -> str:
+    """Keep stdout <= max_bytes while PROTECTING task_md, workorders, target_ref_snippets, captions, tables & PDF excerpt."""
     txt = json.dumps(summary, ensure_ascii=False, indent=1)
     if len(txt.encode("utf-8")) <= max_bytes:
         return txt
-    # Pass 1: trim long other_texts first
+    # Pass 1: trim long other_texts & compact large page_index lists first
     for k, v in list((summary.get("other_texts") or {}).items()):
         if isinstance(v, str) and len(v) > 2000:
             summary["other_texts"][k] = v[:2000] + "...[trimmed]"
+    for pv in (summary.get("pdfs") or {}).values():
+        if isinstance(pv, dict) and isinstance(pv.get("page_index"), list) and len(pv["page_index"]) > 28:
+            pv["page_index"] = [s[:64] for s in pv["page_index"][:28]]
     txt = json.dumps(summary, ensure_ascii=False, indent=1)
     if len(txt.encode("utf-8")) <= max_bytes:
         return txt
-    # Pass 2: trim raw table preview rows BEFORE touching PDF paper text (charts use from_table + columns/stats!)
-    for row_cap in (10, 5):
+    # Pass 2: trim large SVG shape lists (keep >=50 shapes + ALL texts, layers & css_classes) & secondary snippets
+    for sv in (summary.get("svgs") or {}).values():
+        if isinstance(sv, dict) and isinstance(sv.get("shape_ids"), list) and len(sv["shape_ids"]) > 50:
+            sv["shape_ids"] = sv["shape_ids"][:50]
+            sv["shape_ids_truncated"] = True
+    for pv in (summary.get("pdfs") or {}).values():
+        if isinstance(pv, dict) and isinstance(pv.get("beyond_cutoff_fig_snippets"), list):
+            pv["beyond_cutoff_fig_snippets"] = pv["beyond_cutoff_fig_snippets"][:5]
+    txt = json.dumps(summary, ensure_ascii=False, indent=1)
+    if len(txt.encode("utf-8")) <= max_bytes:
+        return txt
+    # Pass 3: gently trim PDF text_excerpt (target_ref_snippets, figure_captions, mechanism_section_snippets & full tables stay intact!)
+    for limit in (24000, 20000, 16000, 12000):
+        for pv in (summary.get("pdfs") or {}).values():
+            if isinstance(pv, dict) and isinstance(pv.get("text_excerpt"), str) and len(pv["text_excerpt"]) > limit:
+                pv["text_excerpt"] = pv["text_excerpt"][:limit] + "\n...[trimmed for stdout; full text in full_text_file]"
+                pv["truncated"] = True
+        txt = json.dumps(summary, ensure_ascii=False, indent=1)
+        if len(txt.encode("utf-8")) <= max_bytes:
+            return txt
+    # Pass 4 (extreme last resort only): trim very large table previews while preserving >=20 rows (NEVER slash to 5!)
+    for row_cap in (30, 20):
         for tv in (summary.get("tables") or {}).values():
             if isinstance(tv, dict):
                 if isinstance(tv.get("head"), list) and len(tv["head"]) > row_cap:
                     tv["head"] = tv["head"][:row_cap]
                     tv["truncated"] = True
+                    tv["table_truncation_hint"] = "Read full table directly or bind via chart.from_table"
                 else:
                     for sh in tv.values():
                         if isinstance(sh, dict) and isinstance(sh.get("head"), list) and len(sh["head"]) > row_cap:
                             sh["head"] = sh["head"][:row_cap]
                             sh["truncated"] = True
-        txt = json.dumps(summary, ensure_ascii=False, indent=1)
-        if len(txt.encode("utf-8")) <= max_bytes:
-            return txt
-    # Pass 3: trim large SVG shape lists (preserving >=40 shapes + ALL texts, layers & css_classes)
-    for sv in (summary.get("svgs") or {}).values():
-        if isinstance(sv, dict) and isinstance(sv.get("shape_ids"), list) and len(sv["shape_ids"]) > 40:
-            sv["shape_ids"] = sv["shape_ids"][:40]
-            sv["shape_ids_truncated"] = True
-    txt = json.dumps(summary, ensure_ascii=False, indent=1)
-    if len(txt.encode("utf-8")) <= max_bytes:
-        return txt
-    # Pass 4: compact page_index previews & secondary beyond-cutoff snippets before touching primary text_excerpt
-    for pv in (summary.get("pdfs") or {}).values():
-        if isinstance(pv, dict):
-            if isinstance(pv.get("page_index"), list):
-                pv["page_index"] = [s[:64] for s in pv["page_index"][:25]]
-            if isinstance(pv.get("beyond_cutoff_fig_snippets"), list):
-                pv["beyond_cutoff_fig_snippets"] = pv["beyond_cutoff_fig_snippets"][:4]
-    txt = json.dumps(summary, ensure_ascii=False, indent=1)
-    if len(txt.encode("utf-8")) <= max_bytes:
-        return txt
-    # Pass 5 (last resort only): gently trim PDF text_excerpt while keeping rich core text
-    for limit in (26000, 22000, 18000, 14000, 10000):
-        for pv in (summary.get("pdfs") or {}).values():
-            if isinstance(pv, dict) and isinstance(pv.get("text_excerpt"), str) and len(pv["text_excerpt"]) > limit:
-                pv["text_excerpt"] = pv["text_excerpt"][:limit] + "\n...[trimmed for stdout; full text in full_text_file]"
-                pv["truncated"] = True
+                            sh["table_truncation_hint"] = "Read full table directly or bind via chart.from_table"
         txt = json.dumps(summary, ensure_ascii=False, indent=1)
         if len(txt.encode("utf-8")) <= max_bytes:
             return txt
@@ -576,7 +611,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("input_dir", nargs="?", default="/input")
     ap.add_argument("--max-pdf-chars", type=int, default=28000)
-    ap.add_argument("--max-stdout-bytes", type=int, default=48000)
+    ap.add_argument("--max-stdout-bytes", type=int, default=52000)
     ap.add_argument("--dump-dir", default=None, help="optional dir to dump full page-indexed PDF text")
     ap.add_argument("--init-output", default=None,
                     help="if set (e.g. /app/output/result.json), immediately write a valid partial skeleton")

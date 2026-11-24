@@ -20,6 +20,10 @@ def _opt_float(v):
     s = str(v).strip()
     if not s or s.lower() in ("na", "nan", "none", "null", "-"):
         return None
+    if "," in s and re.fullmatch(r"[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?%?", s):
+        s = s.replace(",", "")
+    if s.endswith("%"):
+        s = s[:-1].strip()
     try:
         fv = float(s)
         return None if math.isnan(fv) else fv
@@ -195,14 +199,17 @@ def _read_table_rows(p: Path, sheet=None, max_rows: int = 50000):
         return out
     delim = "\t" if suf == ".tsv" else ","
     try:
-        with p.open("r", encoding="utf-8-sig", errors="replace", newline="") as fh:
-            rdr = csv.DictReader(fh, delimiter=delim)
-            out = []
-            for ri, row in enumerate(rdr):
-                if ri >= max_rows:
-                    break
-                out.append(row)
-            return out
+        raw_txt = p.read_text(encoding="utf-8-sig", errors="replace")
+        first_ln = next((ln for ln in raw_txt.splitlines() if ln.strip()), "")
+        if delim == "," and first_ln.count(";") >= 2 and first_ln.count(",") == 0:
+            delim = ";"
+        rdr = csv.DictReader(raw_txt.splitlines(), delimiter=delim)
+        out = []
+        for ri, row in enumerate(rdr):
+            if ri >= max_rows:
+                break
+            out.append({(k.strip() if isinstance(k, str) else k): v for k, v in row.items() if k is not None})
+        return out
     except Exception:
         return []
 
@@ -805,7 +812,7 @@ def _build_bar(spec, ch):
     lo_raw = min([0.0] + [v - e for v, e in zip(vals, errs)] + pts_all)
     hi_raw = max([0.0] + [v + e for v, e in zip(vals, errs)] + pts_all)
     hi_pad = hi_raw * (1.28 if has_sig else 1.18) if hi_raw > 0 else 1.0
-    lo_pad = (lo_raw * 1.12) if lo_raw < 0 else 0.0
+    lo_pad = (lo_raw * (1.36 if has_sig else 1.18)) if lo_raw < 0 else 0.0
     ticks, bot, top = _nice_ticks(lo_pad, hi_pad, 5)
     if lo_raw >= 0:
         bot = 0.0
@@ -852,10 +859,12 @@ def _build_bar(spec, ch):
                       "fill": col, "stroke": "#ffffff", "stroke_w": 0.6,
                       "role": "node", "layer": "layer-nodes", "_id": f"bar-{i}"})
         top_pt = by
+        bot_pt = by + bh
         if err > 0:
             ey0 = y_px(val + err)
             ey1 = y_px(val - err)
             top_pt = min(top_pt, ey0)
+            bot_pt = max(bot_pt, ey1)
             prims.append({"op": "polyline", "pts": [[cx, ey0], [cx, ey1]], "stroke": "#1e293b",
                           "stroke_w": 1.6, "role": "error_bar", "layer": "layer-edges"})
             for yy in (ey0, ey1):
@@ -869,9 +878,10 @@ def _build_bar(spec, ch):
                 px = cx + ((pi - (k_p - 1) / 2.0) * min(9.0, bw * 0.5 / max(1, k_p)))
                 py = y_px(float(pv))
                 top_pt = min(top_pt, py - 4)
+                bot_pt = max(bot_pt, py + 4)
                 prims.append({"op": "circle", "cx": px, "cy": py, "r": 3.4, "fill": "#ffffff",
                               "stroke": "#1e293b", "stroke_w": 1.3, "role": "data_point", "layer": "layer-nodes"})
-        vy = (top_pt - 12) if val >= 0 else (y_px(val - err) + 14)
+        vy = (top_pt - 12) if val >= 0 else (bot_pt + 14)
         sig_txt = str(b.get("sig") or b.get("star") or "").strip()
         prims.append({"op": "text", "x": cx, "y": vy, "s": _fmt(val), "size": 12.0,
                       "anchor": "middle", "fill": "#0f172a", "weight": "bold",

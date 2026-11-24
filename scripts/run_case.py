@@ -123,6 +123,9 @@ def _extract_table_numbers(p: Path, max_rows: int = 10000, max_chars: int = 2000
             for cell in row:
                 if isinstance(cell, (int, float)):
                     _add_val(vals, cell)
+                elif isinstance(cell, str) and any(ch.isdigit() for ch in cell):
+                    for tok in re.findall(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?", cell):
+                        _add_val(vals, tok)
         return vals
     if suf == ".pdf":
         # Fast path: reuse Step 1's dumped /app/work/extracted/<stem>.txt when available
@@ -249,6 +252,11 @@ def _verify_data_fidelity(specs, data_paths, doc_paths=None):
     }
 
 def _resolve_case(a):
+    if getattr(a, "no_case_json", False):
+        cid = str(a.case_id or "").strip()
+        if not cid:
+            raise SystemExit("ERROR: --case-id required when --no-case-json is set")
+        return cid, {}, None
     explicit_cj = bool(a.case_json)
     cpath = Path(a.case_json) if explicit_cj else (Path("/input/case.json") if Path("/input/case.json").exists() else None)
     cdata = {}
@@ -257,10 +265,15 @@ def _resolve_case(a):
             cdata = json.loads(cpath.read_text(encoding="utf-8"))
         except Exception:
             cdata = {}
-    if a.case_id and not explicit_cj and cdata and str(cdata.get("case_id") or "") != str(a.case_id):
-        # Standalone CLI run with explicit custom --case-id (e.g. README example) while /input/case.json belongs to another case
-        cpath, cdata = None, {}
-    cid = a.case_id or str(cdata.get("case_id") or "")
+    file_cid = str(cdata.get("case_id") or "").strip()
+    if a.case_id:
+        # Normalize whitespace/case differences against authoritative case.json; keep cpath so mismatches are caught!
+        if file_cid and str(a.case_id).strip().lower() == file_cid.lower():
+            cid = file_cid
+        else:
+            cid = str(a.case_id).strip()
+    else:
+        cid = file_cid
     if not cid:
         raise SystemExit("ERROR: --case-id required when /input/case.json is absent")
     return cid, cdata, (str(cpath) if cpath and cpath.exists() else None)
@@ -343,6 +356,17 @@ def _verify_pdf_file(p: Path | None) -> bool:
     except Exception:
         return False
 
+def _actual_png_dpi(p: Path, fallback: int) -> int:
+    try:
+        from PIL import Image
+        with Image.open(p) as im:
+            dp = im.info.get("dpi")
+            if dp and dp[0] > 10:
+                return int(round(float(dp[0])))
+    except Exception:
+        pass
+    return int(fallback)
+
 def _run_standalone_edit(a, work, out, cid, cdata, cpath):
     src_path = Path(a.edit_svg)
     src_text = src_path.read_text(encoding="utf-8")
@@ -373,10 +397,14 @@ def _run_standalone_edit(a, work, out, cid, cdata, cpath):
     }
     f_rec.write_text(json.dumps(edit_record, ensure_ascii=False, indent=1), encoding="utf-8")
 
-    png_tool = render_svg_png(f_svg, f_png, width=2400)
+    aud_before = svg_audit(src_text)
+    aud = svg_audit(out_svg_text)
+    new_v = max(0, aud["n_violations"] - aud_before["n_violations"])
+    svg_w = float((aud.get("canvas") or [800])[0] or 800)
+    target_w = min(4800, max(2400, int(round(svg_w * a.dpi / 96.0))))
+    png_tool = render_svg_png(f_svg, f_png, width=target_w)
     render_svg_png(f_svg, f_prev, width=1000)
     pdf_tool = render_svg_pdf(f_svg, f_pdf)
-    aud = svg_audit(out_svg_text)
     svg_ok = _verify_svg_file(f_svg)
     png_ok = _verify_png_file(f_png)
     pdf_ok = _verify_pdf_file(f_pdf)
@@ -389,10 +417,11 @@ def _run_standalone_edit(a, work, out, cid, cdata, cpath):
         "bytes": f_svg.stat().st_size if f_svg.exists() else 0, "xml_valid": xml_ok,
     }]
     if png_ok:
-        exports.append({"path": str(f_png), "format": "png", "dpi": a.dpi, "tool": png_tool or "existing"})
+        act_dpi = _actual_png_dpi(f_png, a.dpi)
+        exports.append({"path": str(f_png), "format": "png", "dpi": act_dpi, "tool": png_tool or "existing"})
         export_checks.append({
             "file": str(f_png), "format": "png", "ok": True, "bytes": f_png.stat().st_size,
-            "tool": png_tool or "existing", "png_magic_ok": True,
+            "dpi": act_dpi, "tool": png_tool or "existing", "png_magic_ok": True,
             "size_px": pix.get("size_px"), "pixel_ok": pix.get("ok"),
             "border_clipped": pix.get("border_clipped"),
         })
@@ -436,17 +465,21 @@ def _run_standalone_edit(a, work, out, cid, cdata, cpath):
                     "handling": "status=partial; delivered edited SVG + edit record"})
     if not_found:
         exc.append({"issue": f"{len(not_found)} SVG edit op(s) returned not_found",
-                    "handling": "non-fatal advisory; valid deliverables written, details in compliance_checks.source_preserving_edit.edits"})
-    if aud["n_violations"] > 0:
-        exc.append({"issue": f"SVG audit reported {aud['n_violations']} heuristic geometric advisory(s) (may include pre-existing source SVG layout)",
-                    "handling": "non-fatal advisory; valid deliverables written, details in compliance_checks.geometry"})
+                    "handling": "status=partial; see compliance_checks.source_preserving_edit.edits (with closest suggestions)"})
+    if new_v > 0:
+        exc.append({"issue": f"SVG edit introduced {new_v} new geometric violation(s) (before={aud_before['n_violations']}, after={aud['n_violations']})",
+                    "handling": "status=partial; details in compliance_checks.geometry"})
+    elif aud["n_violations"] > 0:
+        exc.append({"issue": f"Source SVG had {aud_before['n_violations']} pre-existing geometric advisory(s) (0 new introduced by edit)",
+                    "handling": "preserved untouched source geometry; details in compliance_checks.geometry"})
     if png_ok and not pix.get("ok"):
-        exc.append({"issue": "Heuristic pixel_audit flagged an advisory on rendered PNG",
-                    "handling": "non-fatal advisory; valid PNG delivered, details in compliance_checks.geometry.pixel_audit"})
+        exc.append({"issue": "pixel_audit flagged blank/clipped rendered PNG",
+                    "handling": "status=partial; details in compliance_checks.geometry.pixel_audit"})
 
     if not svg_ok:
         auto_status = "failed"
-    elif not (png_ok and pdf_ok and str(cid or "").strip() and cm):
+    elif (not (png_ok and pdf_ok and str(cid or "").strip() and cm)
+          or len(not_found) > 0 or new_v > 0 or not pix.get("ok")):
         auto_status = "partial"
     else:
         auto_status = "ok"
@@ -454,7 +487,8 @@ def _run_standalone_edit(a, work, out, cid, cdata, cpath):
     sz = pix.get("size_px")
     sz_s = f"{sz[0]}x{sz[1]}px" if isinstance(sz, list) and len(sz) == 2 else "n/a"
     vis_auto = (f"Automated SVG + pixel verification on {f_png.name} ({sz_s}, ok={pix.get('ok')}, "
-                f"border_clipped={pix.get('border_clipped')}): SVG_violations={aud['n_violations']}, "
+                f"border_clipped={pix.get('border_clipped')}): new_SVG_violations={new_v} "
+                f"(total={aud['n_violations']}, pre_existing={aud_before['n_violations']}), "
                 f"edits_applied={edit_record['n_applied']}/{edit_record['n_edits']}, "
                 f"unchanged_line_ratio={edit_record['preservation']['unchanged_line_ratio']}.")
     vis = f"{a.visual_note} | {vis_auto}" if a.visual_note else vis_auto
@@ -467,12 +501,14 @@ def _run_standalone_edit(a, work, out, cid, cdata, cpath):
         "export_artifact": exports,
         "content_map": cm,
         "compliance_checks": {
-            "skill_metadata": {"skill": "bio-pathway-figure", "version": "v24", "schema_version": "2.4"},
+            "skill_metadata": {"skill": "bio-pathway-figure", "version": "v26", "schema_version": "2.6"},
             "delivery_integrity": {
                 "svg_ok": svg_ok, "png_ok": png_ok, "pdf_ok": pdf_ok,
-                "heuristic_advisories": int(aud["n_violations"] > 0) + int(len(not_found) > 0) + int(png_ok and not pix.get("ok")),
+                "new_svg_violations": new_v,
+                "pre_existing_svg_violations": aud_before["n_violations"],
             },
-            "geometry": {"svg_audit": aud, "pixel_audit": pix, "n_violations": aud["n_violations"]},
+            "geometry": {"svg_audit": aud, "pixel_audit": pix,
+                         "n_violations": aud["n_violations"], "new_violations": new_v},
             "legend_consistency": "preserved from source SVG",
             "export_checks": export_checks,
             "source_preserving_edit": edit_record,
@@ -486,17 +522,19 @@ def _run_standalone_edit(a, work, out, cid, cdata, cpath):
     for k in (cdata.get("output_contract") or []):
         if k not in res:
             kl = str(k).lower()
-            if kl in ("artifacts", "deliverables", "files"):
+            if kl in ("artifacts", "deliverables", "deliverable", "files"):
                 res[k] = [str(f_svg), str(f_png), str(f_pdf)]
-            elif kl in ("edit_record", "change_record", "source_preserving_edit", "modifications"):
+            elif kl in ("edit_record", "change_record", "change_log", "source_preserving_edit", "modifications"):
                 res[k] = edit_record
-            elif kl in ("provenance", "sources", "element_sources"):
+            elif kl in ("provenance", "sources", "element_sources", "evidence_map", "preserved_facts"):
                 res[k] = cm
+            elif kl in ("build", "export_meta", "render_info"):
+                res[k] = {"skill": "bio-pathway-figure", "version": "v26", "export_checks": export_checks}
             elif kl in ("summary", "notes", "visual_inspection"):
                 res[k] = vis
             elif kl in ("checks", "audit", "verification"):
                 res[k] = res["compliance_checks"]
-            elif kl in ("exceptions_and_limitations", "limitations", "caveats", "exception_log"):
+            elif kl in ("exceptions_and_limitations", "limitations", "caveats", "exception_log", "uncertainty"):
                 res[k] = exc
             else:
                 res[k] = []
@@ -507,34 +545,39 @@ def _run_standalone_edit(a, work, out, cid, cdata, cpath):
         res["status"] = "partial"
         rpath.write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
         verdict = check_file(rpath, case_json=cpath)
-    adv_reasons = []
+    hard_reasons = []
+    if not verdict["valid"]:
+        hard_reasons.append("contract_problems")
+    if not exports_ok:
+        hard_reasons.append("missing_or_corrupt_exports")
     if not_found:
-        adv_reasons.append(f"{len(not_found)}_edits_not_found")
-    if aud["n_violations"] > 0:
-        adv_reasons.append(f"{aud['n_violations']}_svg_audit_advisories")
+        hard_reasons.append(f"{len(not_found)}_edits_not_found")
+    if new_v > 0:
+        hard_reasons.append(f"{new_v}_new_svg_violations")
     if png_ok and not pix.get("ok"):
-        adv_reasons.append("heuristic_pixel_advisory")
-    if verdict["valid"] and exports_ok and not adv_reasons:
+        hard_reasons.append("pixel_audit_failed")
+    if verdict["valid"] and exports_ok and not hard_reasons:
         na_edit = "COMPLETE — ALL DELIVERABLES AND /app/output/result.json ARE VALID AND VERIFIED. Output your concise scientific report now (no further tool calls needed)."
-    elif verdict["valid"] and exports_ok:
-        na_edit = f"REPAIR_OPTIONAL (max 1 pass) — valid SVG/PNG/PDF and result.json (status={res['status']}) are saved; optionally inspect/fix {', '.join(adv_reasons)} if step budget allows, then finish."
     else:
-        na_edit = f"REPAIR_REQUIRED (max 1-2 passes) — status={res['status']}; resolve hard delivery/contract problems listed above and re-run once, then finish."
-    print(json.dumps({"result": str(rpath), "status": res["status"],
-                      "valid": verdict["valid"], "n_not_found": len(not_found),
-                      "n_violations": aud["n_violations"],
-                      "xml_valid": xml_ok,
-                      "pixel_ok": pix.get("ok"), "problems": verdict["problems"],
-                      "warnings": verdict.get("warnings", []),
-                      "deliverables": [p.name for p in sorted(out.iterdir())],
-                      "next_action": na_edit},
-                     ensure_ascii=False, indent=1))
+        na_edit = f"REPAIR_REQUIRED (1 pass) — status={res['status']}; fix {', '.join(hard_reasons)} using not_found_details/suggestions and re-run run_case.py."
+    out_ed = {"result": str(rpath), "status": res["status"],
+              "valid": verdict["valid"], "n_not_found": len(not_found),
+              "n_violations": aud["n_violations"], "new_violations": new_v,
+              "xml_valid": xml_ok,
+              "pixel_ok": pix.get("ok"), "problems": verdict["problems"],
+              "warnings": verdict.get("warnings", []),
+              "deliverables": [p.name for p in sorted(out.iterdir())],
+              "next_action": na_edit}
+    if not_found:
+        out_ed["not_found_details"] = not_found[:5]
+    print(json.dumps(out_ed, ensure_ascii=False, indent=1))
     sys.exit(0 if verdict["valid"] else 1)
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--case-id", default=None, help="verbatim case_id (auto-read from /input/case.json if omitted)")
     ap.add_argument("--case-json", default=None, help="optional path to case.json (defaults to /input/case.json)")
+    ap.add_argument("--no-case-json", action="store_true", help="ignore /input/case.json (for standalone CLI examples)")
     ap.add_argument("--spec", default=None, help="primary spec.json (mechanism, chart, or composite)")
     ap.add_argument("--basename", default="fig")
     ap.add_argument("--spec2", default=None, help="optional secondary spec (e.g. chart)")
@@ -782,15 +825,20 @@ def main():
         exc.append({"issue": "Core PNG/PDF export missing or invalid (rasterizer unavailable or failed)",
                     "handling": "status=partial; delivered editable layered SVG with geometry and SVG audits"})
     elif not pix_ok:
-        exc.append({"issue": "Heuristic pixel_audit flagged an advisory on rendered PNG",
-                    "handling": "non-fatal advisory; valid PNG delivered, details in compliance_checks.geometry.pixel_audit"})
+        exc.append({"issue": "pixel_audit flagged blank/clipped rendered PNG",
+                    "handling": "status=partial; details in compliance_checks.geometry.pixel_audit"})
     if total_v > 0:
-        exc.append({"issue": f"{total_v} heuristic geometry/SVG audit advisory(s) remain",
-                    "handling": "non-fatal advisory; valid SVG/PNG/PDF delivered, details in compliance_checks.geometry"})
+        exc.append({"issue": f"{total_v} geometry/SVG audit violation(s) remain",
+                    "handling": "status=partial; details in compliance_checks.geometry"})
+    if bio_issues:
+        exc.append({"issue": f"{len(bio_issues)} biological nomenclature/topology issue(s) remain",
+                    "handling": "status=partial; details in compliance_checks.bio_audit"})
 
+    paired_edit_bad = bool(a.edit_svg and edit_record and (edit_record.get("n_not_found", 0) > 0 or not edit_record.get("xml_valid", True)))
     if not all_svgs_ok:
         auto_status = "failed"
-    elif empty_render or not (all_pngs_ok and all_pdfs_ok) or not str(cid or "").strip() or not cm:
+    elif (empty_render or not (all_pngs_ok and all_pdfs_ok) or not str(cid or "").strip() or not cm
+          or total_v > 0 or not pix_ok or bool(bio_issues) or paired_edit_bad or not leg_ok):
         auto_status = "partial"
     else:
         auto_status = "ok"
@@ -803,16 +851,6 @@ def main():
     }
     if extra_svgs:
         es_obj["additional_editable_sources"] = extra_svgs
-    def _actual_png_dpi(p: Path, fallback: int) -> int:
-        try:
-            from PIL import Image
-            with Image.open(p) as im:
-                dp = im.info.get("dpi")
-                if dp and dp[0] > 10:
-                    return int(round(float(dp[0])))
-        except Exception:
-            pass
-        return int(fallback)
 
     def _rich_export_check(p: Path):
         suf = p.suffix.lower()
@@ -866,11 +904,12 @@ def main():
         ],
         "content_map": cm,
         "compliance_checks": {
-            "skill_metadata": {"skill": "bio-pathway-figure", "version": "v24", "schema_version": "2.4"},
+            "skill_metadata": {"skill": "bio-pathway-figure", "version": "v26", "schema_version": "2.6"},
             "delivery_integrity": {
                 "svg_ok": all_svgs_ok, "png_ok": all_pngs_ok, "pdf_ok": all_pdfs_ok,
                 "critical_spec_error": empty_render,
-                "heuristic_advisories": int(total_v > 0) + int(all_pngs_ok and not pix_ok) + int(bool(a.edit_svg and edit_record and edit_record.get("n_not_found", 0) > 0)),
+                "geometry_violations": total_v,
+                "bio_issues": len(bio_issues),
             },
             "geometry": checks if len(summaries) == 1 else {b: s["checks"] for b, s in summaries},
             "bio_audit": checks.get("bio_audit") if len(summaries) == 1 else {b: s["checks"].get("bio_audit") for b, s in summaries},
@@ -917,21 +956,29 @@ def main():
     for k in (cdata.get("output_contract") or []):
         if k not in res:
             kl = str(k).lower()
-            if kl in ("artifacts", "deliverables", "files"):
+            if kl in ("artifacts", "deliverables", "deliverable", "files"):
                 res[k] = [str(p) for p in sorted(deliver.values())]
-            elif kl in ("edit_record", "change_record", "source_preserving_edit", "modifications"):
+            elif kl in ("edit_record", "change_record", "change_log", "source_preserving_edit", "modifications"):
                 res[k] = edit_record
-            elif kl in ("provenance", "sources", "element_sources"):
+            elif kl in ("provenance", "sources", "element_sources", "evidence_map", "preserved_facts"):
                 res[k] = cm
+            elif kl in ("build", "export_meta", "render_info"):
+                res[k] = {"skill": "bio-pathway-figure", "version": "v26", "export_checks": res["compliance_checks"]["export_checks"]}
             elif kl in ("summary", "notes", "visual_inspection"):
                 res[k] = res["compliance_checks"]["visual_inspection"]
             elif kl in ("checks", "audit", "verification"):
                 res[k] = res["compliance_checks"]
-            elif kl in ("exceptions_and_limitations", "limitations", "caveats", "exception_log"):
+            elif kl in ("exceptions_and_limitations", "limitations", "caveats", "exception_log", "uncertainty"):
                 res[k] = exc
             else:
                 res[k] = []
 
+    df_low = bool(dfid and dfid.get("quantitative_values_checked", 0) >= 3 and dfid.get("quantitative_match_ratio", 1.0) < 0.85)
+    if df_low and not a.status:
+        exc.append({"issue": f"Low quantitative data_fidelity ({dfid['quantitative_match_ratio']}) against input tables/docs",
+                    "handling": "status=partial; verify unmatched_sample values against source files"})
+        if res["status"] == "ok":
+            res["status"] = "partial"
     rpath = out / "result.json"
     rpath.write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
     verdict = check_file(rpath, case_json=cpath)
@@ -939,39 +986,34 @@ def main():
         res["status"] = "partial"
         rpath.write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
         verdict = check_file(rpath, case_json=cpath)
-    paired_edit_bad = bool(a.edit_svg and edit_record and (edit_record.get("n_not_found", 0) > 0 or not edit_record.get("xml_valid", True)))
-    df_low = bool(dfid and dfid.get("quantitative_values_checked", 0) >= 3 and dfid.get("quantitative_match_ratio", 1.0) < 0.85)
-    repair_reasons = []
+    hard_reasons = []
     if not verdict["valid"]:
-        repair_reasons.append("contract_problems")
+        hard_reasons.append("contract_problems")
     if not exports_ok:
-        repair_reasons.append("missing_or_corrupt_exports")
+        hard_reasons.append("missing_or_corrupt_exports")
     if total_v > 0:
-        repair_reasons.append(f"{total_v}_geometry_violations")
+        hard_reasons.append(f"{total_v}_geometry_violations")
     if empty_render:
-        repair_reasons.append("empty_chart_or_from_table_error")
+        hard_reasons.append("empty_chart_or_from_table_error")
     if bio_issues:
-        repair_reasons.append(f"{len(bio_issues)}_bio_issues")
+        hard_reasons.append(f"{len(bio_issues)}_bio_issues")
     if paired_edit_bad:
-        repair_reasons.append("paired_svg_edit_not_found_or_xml_invalid")
+        hard_reasons.append("paired_svg_edit_not_found_or_xml_invalid")
     if df_low:
-        repair_reasons.append(f"low_data_fidelity({dfid['match_ratio']})")
-    if sw_all and not empty_render:
-        repair_reasons.append(f"{len(sw_all)}_spec_warnings")
+        hard_reasons.append(f"low_data_fidelity({dfid['quantitative_match_ratio']})")
     if not leg_ok:
-        repair_reasons.append("legend_inconsistency")
+        hard_reasons.append("legend_inconsistency")
     if all_pngs_ok and not pix_ok:
-        repair_reasons.append("heuristic_pixel_advisory")
-    if verdict["valid"] and exports_ok and not repair_reasons and pix_ok:
+        hard_reasons.append("pixel_audit_failed")
+    soft_reasons = [f"{len(sw_all)}_spec_warnings"] if (sw_all and not empty_render) else []
+    if verdict["valid"] and exports_ok and not hard_reasons and not soft_reasons:
         na_draw = "COMPLETE — ALL DELIVERABLES AND /app/output/result.json ARE VALID AND VERIFIED. Output your concise scientific report now (no further tool calls needed)."
     elif verdict["valid"] and all_svgs_ok and total_v == 0 and no_rasterizer and not empty_render and not bio_issues:
         na_draw = "COMPLETE (PARTIAL — NO RASTERIZER) — Editable layered SVG and /app/output/result.json are valid; no PNG rasterizer is installed. Output your concise final report now."
-    elif verdict["valid"] and exports_ok and not empty_render and not bio_issues and total_v == 0:
-        na_draw = f"REPAIR_OPTIONAL (max 1 pass) — valid SVG/PNG/PDF and result.json (status={res['status']}) are saved; check {', '.join(repair_reasons)} once if step budget allows, then finish."
-    elif verdict["valid"] and exports_ok and not empty_render:
-        na_draw = f"REPAIR_REQUIRED (max 1-2 passes) — valid SVG/PNG/PDF and result.json (status={res['status']}) are already saved; fix {', '.join(repair_reasons)} if step budget allows, then finish."
+    elif verdict["valid"] and exports_ok and not hard_reasons:
+        na_draw = f"REPAIR_OPTIONAL (max 1 pass) — valid SVG/PNG/PDF and result.json (status={res['status']}) are saved; check {', '.join(soft_reasons)} once if easy, then finish."
     else:
-        na_draw = f"REPAIR_REQUIRED (max 1-2 passes) — status={res['status']}; fix {', '.join(repair_reasons or ['missing_exports'])}, then re-run run_case.py."
+        na_draw = f"REPAIR_REQUIRED (1 pass) — status={res['status']}; fix {', '.join(hard_reasons)}, then re-run run_case.py."
     out_summary = {
         "result": str(rpath), "status": res["status"], "valid": verdict["valid"],
         "n_violations": total_v, "pixel_ok": pix_ok, "legend_ok": leg_ok,

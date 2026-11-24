@@ -1,6 +1,6 @@
 ---
 name: "bio-pathway-figure"
-description: "Source-bound 3-step biological mechanism, pathway & quantitative figure Skill (3-6 calls, <180s): Step 1 parses PDFs (28K excerpt + page_index + target/mechanism snippets), CSV/TSV/XLSX/DOCX/workorders & SVGs (layers/CSS/IDs) and saves fallback /app/output/result.json; Step 2 authors traceable spec.json/edits.json with per-element provenance (examples inlined); Step 3 runs run_case.py (0-violation layout, 14 edge glyphs, dual encoding, 9 charts, bio_lint, Inkscape SVG + 300 DPI PNG + TrueType PDF, byte-preserving SVG edits & quality-gated result.json) — zero PNG reads."
+description: "Source-bound 3-step biological mechanism, pathway & quantitative figure Skill (3-6 calls, <180s): Step 1 parses PDFs (28K excerpt + EN/ZH figure/table page_index & snippets), CSV/TSV/XLSX/DOCX/workorders & SVGs (layers/CSS/IDs) and saves fallback /app/output/result.json; Step 2 authors traceable spec.json/edits.json (examples inlined); Step 3 runs run_case.py (0-violation layout, 14 edge glyphs, triple encoding, 9 charts, bio_lint, Inkscape SVG + 300 DPI PNG + TrueType PDF, byte-preserving SVG edits & quality-gated result.json) — zero PNG reads."
 ---
 
 # Bio-Pathway Figure Skill — 3-Step Execution Card
@@ -14,8 +14,8 @@ mkdir -p /app/work /app/output
 SK=/skills/weekly-skill; [ -f "$SK/scripts/run_case.py" ] || SK=$(dirname "$(dirname "$(find /skills /app/skills -maxdepth 3 -name run_case.py 2>/dev/null | head -n1)")")
 python3 "$SK/scripts/inspect_inputs.py" /input --init-output /app/output/result.json --dump-dir /app/work/extracted
 ```
-Prints `action_hints` (`case_id`, `suggested_basenames`, `target_figure_table_refs`, `existing_svgs`, `data_tables`, `scanned_pdfs`, `suggested_command`), `task_md`, `workorders`, tables (stats + ≤25 rows), PDF `page_index`/`target_ref_snippets`/`figure_captions`/`text_excerpt` (28K protected), and SVG `layers`/`css_classes`/`texts`/`shape_ids`, **and saves fallback `result.json`**.
-- If `truncated: true` and key Results/Figure pages lie beyond `text_excerpt`, slice them from `/app/work/extracted/<name>.txt` in **1 call** first.
+Prints `action_hints` (`case_id`, `suggested_basenames`, `target_figure_table_refs`, `existing_svgs`, `data_tables`, `scanned_pdfs`, `suggested_command`), `task_md`, `workorders`, tables (≤70 rows + stats), PDF `page_index`/`target_ref_snippets`/`figure_captions`/`text_excerpt` (pre-References), and SVG `layers`/`css_classes`/`texts`/`shape_ids`, **and writes fallback `result.json`**.
+- If a PDF/table has `truncated: true`, slice pages from `/app/work/extracted/<name>.txt` (or use `from_table`) in **1 call**.
 
 ## Step 2 — Author `/app/work/spec.json` (and/or `edits.json`) (1 call)
 Use **ONLY verified `/input` facts** (zero fabrication) covering every requested entity, edge, compartment, encoding, and deliverable:
@@ -59,8 +59,8 @@ Use **ONLY verified `/input` facts** (zero fabrication) covering every requested
 ```json
 {"mode":"chart","title":"Example volcano","chart":{"kind":"volcano","x_label":"log2FC","y_label":"-log10(padj)","x_thresh":1.0,"y_thresh":1.3,"label_top_n":10,"highlight_labels":["MYC"],"from_table":{"file":"/input/deg.csv","x_col":"log2fc","y_col":"padj","label_col":"gene"}}}
 ```
-- `kind`: `bar` (`bars` or `from_table` mean±SD), `grouped_bar` (`categories`,`series`,`sig_brackets`, or `category_col`+`group_col`+`value_col`), `stacked_bar` (`normalize:true`), `hbar` (`+/-`), `line` (`series`,`vlines`), `scatter`/`volcano` & `dotplot` (auto `-log10` on `padj`/`fdr`), `heatmap` (`rows,cols,values`, `NA`), `box` (`groups`,`sig_brackets`).
-- Composite: `{"mode":"composite","title":"...","layout":{"cols":2},"panels":[{"id":"A","span":2,"spec":{...}},{"id":"B","spec":{...}}]}`.
+- `kind`: `bar` (`bars`/`sig` or `from_table` mean±SD), `grouped_bar`, `stacked_bar` (`normalize:true`), `hbar` (`+/-`), `line` (`series`,`vlines`), `scatter`/`volcano` & `dotplot` (auto `-log10` on `padj`/`fdr`), `heatmap` (`rdbu`/`fold`/`blues`/`viridis`, `NA`), `box` (`groups`,`sig_brackets`).
+- Composite: `{"mode":"composite","title":"...","layout":{"cols":2},"panels":[{"id":"A","title":"...","span":2,"spec":{...}},{"id":"B","spec":{...}}]}`.
 
 **Byte-Preserving SVG `edits.json` (Example):**
 ```json
@@ -76,9 +76,9 @@ python3 "$SK/scripts/run_case.py" --spec /app/work/spec.json --basename figure03
 # Standalone SVG edit:
 python3 "$SK/scripts/run_case.py" --edit-svg /input/<existing.svg> --edits /app/work/edits.json --basename <name> --source-note "workorder revision"
 ```
-`run_case.py` auto-heals layout, exports Inkscape SVG + 300 DPI PNG + TrueType PDF, runs 5-layer audits (`geometry`, `svg`, `pixel`, `bio_lint`, `legend`, `data_fidelity`, `traceability`), validates `result.json`, and prints `next_action`:
+`run_case.py` auto-reads `/input/case.json`, auto-heals layout, exports Inkscape SVG + 300 DPI PNG + TrueType PDF, runs 5-layer audits (`geometry`, `svg`, `pixel`, `bio_lint`, `legend`, `data_fidelity`, `traceability`), validates `result.json`, and prints `next_action`:
 - `COMPLETE` → **FINISH** and report deliverables & citations.
-- `REPAIR_REQUIRED`/`REPAIR_OPTIONAL` → fix flagged items once and re-run Step 3 (max 1–2 passes), then finish.
+- `REPAIR_REQUIRED` → fix flagged items (`bio_issues`, `not_found_details.suggestions`, `unmatched_sample`, `problems`) and re-run Step 3 once.
 
 ## Honesty & Fallbacks
 - Missing direction / scanned PDF / conflicts: `type:"undirected"`; never fabricate; log in `--exceptions`, `--status partial`.

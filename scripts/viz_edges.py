@@ -225,8 +225,43 @@ def _route_cross_detour(n_from, n_to, boxes, skip, plot_left, plot_right, used_x
         return best_pts[0]
     return None
 
+def _segs_cross(a0, a1, b0, b1):
+    """True if open segments a0-a1 and b0-b1 properly intersect."""
+    def _ccw(p, q, r):
+        return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+    d1, d2 = _ccw(a0, a1, b0), _ccw(a0, a1, b1)
+    d3, d4 = _ccw(b0, b1, a0), _ccw(b0, b1, a1)
+    return (d1 * d2 < -1e-6) and (d3 * d4 < -1e-6)
+
+def _poly_edge_crossings(pts, routed_records):
+    if not routed_records:
+        return 0
+    cnt = 0
+    for rec in routed_records:
+        rpts = rec.get("pts") or []
+        for i in range(len(pts) - 1):
+            for j in range(len(rpts) - 1):
+                if _segs_cross(pts[i], pts[i + 1], rpts[j], rpts[j + 1]):
+                    cnt += 1
+    return cnt
+
+def _node_top_occupied(node, routed_records):
+    """True if any already-routed edge attaches near the top border of `node`."""
+    if not routed_records:
+        return False
+    y_top = node["cy"] - node["h"] / 2.0
+    x0, x1 = node["cx"] - node["w"] / 2.0 - 4.0, node["cx"] + node["w"] / 2.0 + 4.0
+    for rec in routed_records:
+        rpts = rec.get("pts") or []
+        if len(rpts) >= 2:
+            for ep in (rpts[0], rpts[-1]):
+                if x0 <= ep[0] <= x1 and abs(ep[1] - y_top) <= 6.0:
+                    return True
+    return False
+
 def route_points(n_from, n_to, route, gap, m_override=None, port_offset=0.0,
-                 rail_x=None, node_boxes=None, used_fb_ys=None, min_y=60.0):
+                 rail_x=None, node_boxes=None, used_fb_ys=None, min_y=60.0,
+                 routed_records=None):
     skip = {n_from["id"], n_to["id"]}
     boxes = node_boxes or []
     if route == "feedback_side" and rail_x is not None:
@@ -248,7 +283,7 @@ def route_points(n_from, n_to, route, gap, m_override=None, port_offset=0.0,
         else:
             sx_c = max(n_from["cx"] - n_from["w"] / 2 + 10,
                        min(n_from["cx"] + n_from["w"] / 2 - 10, n_from["cx"] + port_offset))
-            prefer_up = n_from["cy"] >= n_to["cy"]
+            prefer_up = (n_from["cy"] >= n_to["cy"]) and not _node_top_occupied(n_from, routed_records)
             yb, yc = _side_channel_y(n_from, boxes, skip, rail_x, prefer_above=prefer_up, used_ys=used_fb_ys)
             p_fc = _avoid_mod_corner([sx_c, yb], n_from)
             pts.extend([p_fc, [p_fc[0], yc], [rail_x, yc]])
@@ -258,7 +293,7 @@ def route_points(n_from, n_to, route, gap, m_override=None, port_offset=0.0,
         else:
             tx_c = max(n_to["cx"] - n_to["w"] / 2 + 10,
                        min(n_to["cx"] + n_to["w"] / 2 - 10, n_to["cx"] + port_offset))
-            prefer_up = n_to["cy"] <= n_from["cy"]
+            prefer_up = (n_to["cy"] <= n_from["cy"]) and not _node_top_occupied(n_to, routed_records)
             yb, yc = _side_channel_y(n_to, boxes, skip, rail_x, prefer_above=prefer_up, used_ys=used_fb_ys)
             p_tc = _avoid_mod_corner([tx_c, yb], n_to)
             pts.extend([[rail_x, yc], [p_tc[0], yc], p_tc])
@@ -278,19 +313,24 @@ def route_points(n_from, n_to, route, gap, m_override=None, port_offset=0.0,
         p1_up = _avoid_mod_corner([tx, ty_top], n_to)
         p0_dn = [sx, sy_bot]
         p1_dn = [tx, ty_bot]
-        # Prefer obstacle-free arc strictly below title safe zone (min_y)
+        # Prefer obstacle-free arc with fewest edge crossings strictly below title safe zone (min_y)
         cand_arcs = []
         for dm in (0.0, 14.0, 28.0):
             yl_u = min(p0_up[1], p1_up[1]) - (m + dm)
             if yl_u >= float(min_y):
-                cand_arcs.append([p0_up, [p0_up[0], yl_u], [p1_up[0], yl_u], p1_up])
+                cand_arcs.append((dm, 0, [p0_up, [p0_up[0], yl_u], [p1_up[0], yl_u], p1_up]))
             yl_d = max(p0_dn[1], p1_dn[1]) + (m + dm)
-            cand_arcs.append([p0_dn, [p0_dn[0], yl_d], [p1_dn[0], yl_d], p1_dn])
-        if boxes:
-            for arc in cand_arcs:
-                if not _poly_hits_boxes(arc, boxes, skip, pad=2.0):
-                    return arc
-        return cand_arcs[0]
+            cand_arcs.append((dm, 1, [p0_dn, [p0_dn[0], yl_d], [p1_dn[0], yl_d], p1_dn]))
+        best_arc = None
+        best_key = None
+        for dm, side_i, arc in cand_arcs:
+            hit = 1 if (boxes and _poly_hits_boxes(arc, boxes, skip, pad=2.0)) else 0
+            cr = _poly_edge_crossings(arc, routed_records)
+            k_sc = (hit, cr, dm, side_i)
+            if best_key is None or k_sc < best_key:
+                best_key = k_sc
+                best_arc = arc
+        return best_arc or cand_arcs[0][2]
 
     if n_from["id"] == n_to["id"]:
         # Clean autophosphorylation / autoregulation self-loop strictly anchored on node boundary
@@ -379,8 +419,10 @@ def draw_edges(edges, placed, gap, prims, node_boxes=None, avoid_boxes=None,
         pair_seen[key] = k + 1
         tot = pair_totals[key]
         same_row = abs(a["cy"] - b["cy"]) <= (a["h"] + b["h"]) / 2.0 + 12
-        max_poff = max(7.0, min(a["h"], b["h"]) / 2.0 - 8.0) if same_row else 16.0
-        step_poff = min(18.0, (2.0 * max_poff) / max(1, tot - 1)) if tot > 1 else 0.0
+        max_poff = (max(7.0, min(a["h"], b["h"]) / 2.0 - 8.0) if same_row
+                    else min(24.0, max(12.0, min(a["w"], b["w"]) / 2.0 - 12.0)))
+        step_cap = 18.0 if same_row else 24.0
+        step_poff = min(step_cap, (2.0 * max_poff) / max(1, tot - 1)) if tot > 1 else 0.0
         port_off = ((k - (tot - 1) / 2.0) * step_poff) if tot > 1 else 0.0
 
         req_route = e.get("route", "direct")
@@ -388,7 +430,7 @@ def draw_edges(edges, placed, gap, prims, node_boxes=None, avoid_boxes=None,
 
         if a["id"] == b["id"]:
             eff_route = "self_loop"
-            pts = route_points(a, b, "direct", gap, m_override=26.0, node_boxes=node_boxes, min_y=min_y)
+            pts = route_points(a, b, "direct", gap, m_override=26.0, node_boxes=node_boxes, min_y=min_y, routed_records=routed_records)
         elif eff_route == "feedback" and not same_row:
             if plot_right is not None:
                 eff_route = "feedback_side"
@@ -396,20 +438,20 @@ def draw_edges(edges, placed, gap, prims, node_boxes=None, avoid_boxes=None,
                 side_rail_i += 1
                 max_rail_x = max(max_rail_x, rail_x + 28.0)
                 pts = route_points(a, b, "feedback_side", gap, port_offset=port_off,
-                                   rail_x=rail_x, node_boxes=node_boxes, used_fb_ys=used_fb_ys, min_y=min_y)
+                                   rail_x=rail_x, node_boxes=node_boxes, used_fb_ys=used_fb_ys, min_y=min_y, routed_records=routed_records)
             else:
                 eff_route = "direct"
-                pts = route_points(a, b, "direct", gap, port_offset=port_off, min_y=min_y)
+                pts = route_points(a, b, "direct", gap, port_offset=port_off, min_y=min_y, routed_records=routed_records)
         elif eff_route == "arc" and not same_row:
             eff_route = "direct"
-            pts = route_points(a, b, "direct", gap, port_offset=port_off, min_y=min_y)
+            pts = route_points(a, b, "direct", gap, port_offset=port_off, min_y=min_y, routed_records=routed_records)
         elif eff_route in ("feedback", "arc"):
             cid = a.get("compartment") or "_"
             arc_by_comp[cid] = arc_by_comp.get(cid, 0) + 1
             m_ov = 26.0 + 20.0 * (arc_by_comp[cid] - 1)
-            pts = route_points(a, b, eff_route, gap, m_override=m_ov, port_offset=port_off, node_boxes=node_boxes, min_y=min_y)
+            pts = route_points(a, b, eff_route, gap, m_override=m_ov, port_offset=port_off, node_boxes=node_boxes, min_y=min_y, routed_records=routed_records)
         else:
-            pts = route_points(a, b, "direct", gap, port_offset=port_off, min_y=min_y)
+            pts = route_points(a, b, "direct", gap, port_offset=port_off, min_y=min_y, routed_records=routed_records)
             skip_ids = {e.get("from"), e.get("to")}
             if node_boxes and opts.get("auto_arc", True):
                 if _seg_hits_boxes(pts[0], pts[-1], node_boxes, skip=skip_ids, pad=2.0):
@@ -417,7 +459,7 @@ def draw_edges(edges, placed, gap, prims, node_boxes=None, avoid_boxes=None,
                         cid = a.get("compartment") or "_"
                         arc_by_comp[cid] = arc_by_comp.get(cid, 0) + 1
                         m_ov = 26.0 + 20.0 * (arc_by_comp[cid] - 1)
-                        pts = route_points(a, b, "arc", gap, m_override=m_ov, port_offset=port_off, node_boxes=node_boxes, min_y=min_y)
+                        pts = route_points(a, b, "arc", gap, m_override=m_ov, port_offset=port_off, node_boxes=node_boxes, min_y=min_y, routed_records=routed_records)
                         eff_route = "arc"
                     else:
                         det = _route_cross_detour(
@@ -627,8 +669,11 @@ def _edge_label(prims, pts, lbl, e, col, route="direct", tip_style=False, node_b
         else:
             # Symmetric label offset for bidirectional/parallel horizontal edges (lower edge -> below)
             y_off = 13.0 if port_off > 0 else -11.0
+            alt_off = -11.0 if port_off > 0 else 13.0
             anchors = [(pts[0][0] + (pts[1][0] - pts[0][0]) * t,
-                        pts[0][1] + (pts[1][1] - pts[0][1]) * t + y_off) for t in (0.5, 0.35, 0.65)]
+                        pts[0][1] + (pts[1][1] - pts[0][1]) * t + y_off) for t in (0.5, 0.35, 0.65)] + [
+                       (pts[0][0] + (pts[1][0] - pts[0][0]) * 0.5,
+                        pts[0][1] + (pts[1][1] - pts[0][1]) * 0.5 + alt_off)]
     _label_no_overlap(prims, anchors, txt, col, node_boxes=node_boxes or [],
                       rotate=(-90 if route == "feedback_side" else None), min_y=min_y)
 

@@ -38,13 +38,13 @@ python3 scripts/inspect_inputs.py /input \
     --init-output /app/output/result.json --dump-dir /app/work/extracted
 
 # 3. One-shot draw + 5-layer audit + contract validation using the synthetic example
-python3 scripts/run_case.py --case-id EXAMPLE-SYNTHETIC-01 \
+python3 scripts/run_case.py --case-id EXAMPLE-SYNTHETIC-01 --no-case-json \
     --spec examples/minimal_mechanism_spec.json --basename example_fig \
     --workdir /tmp/example_work --output-dir /tmp/example_out --dpi 300
 # See examples/example_result_output.json for the illustrative result.json schema output.
 
 # 4. Standalone source-preserving edit on an existing SVG (untouched bytes stay identical)
-python3 scripts/run_case.py --case-id EXAMPLE-SYNTHETIC-02 \
+python3 scripts/run_case.py --case-id EXAMPLE-SYNTHETIC-02 --no-case-json \
     --edit-svg /tmp/example_out/example_fig.svg \
     --edits examples/minimal_svg_edits.json --basename example_fig_rev \
     --workdir /tmp/example_work --output-dir /tmp/example_out --dpi 300

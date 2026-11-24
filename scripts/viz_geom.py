@@ -20,9 +20,18 @@ def boundary_point(node, tx, ty, port_offset=0.0):
         return cx + hw, cy
     shape = node.get("shape", "rect")
     if shape == "ellipse":
-        ang = math.atan2(dy, dx)
         if port_offset:
-            ang += max(-0.45, min(0.45, port_offset / max(hw, hh, 20.0)))
+            # Shift in fixed canvas axis (+y for horizontal rays, +x for vertical rays) so parallel ellipse edges never cross
+            if abs(dx) >= abs(dy):
+                py_cl = max(-hh * 0.72, min(hh * 0.72, (dy * (hw / (abs(dx) or 1.0))) + port_offset))
+                sx_s = 1.0 if dx >= 0 else -1.0
+                px_e = sx_s * hw * math.sqrt(max(0.05, 1.0 - (py_cl / max(hh, 1.0)) ** 2))
+                return cx + px_e, cy + py_cl
+            px_cl = max(-hw * 0.72, min(hw * 0.72, (dx * (hh / (abs(dy) or 1.0))) + port_offset))
+            sy_s = 1.0 if dy >= 0 else -1.0
+            py_e = sy_s * hh * math.sqrt(max(0.05, 1.0 - (px_cl / max(hw, 1.0)) ** 2))
+            return cx + px_cl, cy + py_e
+        ang = math.atan2(dy, dx)
         return cx + hw * math.cos(ang), cy + hh * math.sin(ang)
     ts = abs(hw / dx) if dx else float("inf")
     tt = abs(hh / dy) if dy else float("inf")
