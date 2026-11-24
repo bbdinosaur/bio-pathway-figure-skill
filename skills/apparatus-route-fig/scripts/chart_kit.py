@@ -22,11 +22,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import table_probe as tp
 PAL = ["#2B6CB0", "#C05621", "#2F855A", "#6B46C1", "#B83280", "#2C7A7B", "#B7791F", "#4A5568"]
 MK = ["o", "s", "^", "D", "v", "P", "X", "*"]
-VALID_KINDS = ("line", "step", "bar", "barh", "stacked_bar", "scatter", "volcano", "box", "heatmap")
+VALID_KINDS = ("line", "step", "bar", "barh", "stacked_bar", "scatter", "volcano", "box", "violin", "hist", "heatmap")
 KIND_ALIASES = {
     "survival": "step", "km": "step", "kaplan_meier": "step", "kaplan-meier": "step",
     "grouped_bar": "bar", "column": "bar", "horizontal_bar": "barh",
-    "stacked": "stacked_bar", "boxplot": "box", "correlation": "scatter",
+    "stacked": "stacked_bar", "boxplot": "box", "violinplot": "violin", "violin_plot": "violin",
+    "histogram": "hist", "distribution": "hist", "correlation": "scatter",
     "regression": "scatter", "volcano_plot": "volcano", "matrix": "heatmap",
 }
 
@@ -49,13 +50,18 @@ def _to_float(v):
 def _series_stats(vals):
     n = len(vals)
     if not n:
-        return {"mean": 0.0, "median": 0.0, "sd": 0.0}
+        return {"min": 0.0, "max": 0.0, "mean": 0.0, "median": 0.0, "sd": 0.0, "sem": 0.0, "iqr": 0.0}
     sv = sorted(vals)
     mid = n // 2
     med = sv[mid] if n % 2 == 1 else (sv[mid - 1] + sv[mid]) / 2.0
+    q1 = sv[n // 4]
+    q3 = sv[(3 * n) // 4] if n > 1 else sv[0]
     mu = sum(vals) / n
     sd = math.sqrt(sum((v - mu) ** 2 for v in vals) / (n - 1)) if n > 1 else 0.0
-    return {"mean": round(mu, 6), "median": round(med, 6), "sd": round(sd, 6)}
+    sem = sd / math.sqrt(n) if n > 1 else 0.0
+    return {"min": round(sv[0], 6), "max": round(sv[-1], 6),
+            "mean": round(mu, 6), "median": round(med, 6),
+            "sd": round(sd, 6), "sem": round(sem, 6), "iqr": round(q3 - q1, 6)}
 
 
 def _points_sha12(xs, ys):
@@ -143,10 +149,12 @@ def _clean_rows_xy(rows, xc, yc, ec=None, lc=None):
 
 
 def _apply_y_transform(xs, ys, errs, plabs, y_transform):
-    """支持将原始 p_value/padj 自动转换为 -log10(p)（零手工预处理，保留原始范围溯源）。"""
+    """支持将原始 p_value/padj 自动转换为 -log10(p)（零手工预处理，保留原始范围溯源；若全部值已 >1 则视为已转换并原样保留）。"""
     tf = str(y_transform or "").strip().lower().replace("_", "").replace("-", "")
     if tf not in ("neglog10", "neglog10p", "minuslog10"):
         return xs, ys, errs, plabs, None
+    if ys and all(yv > 1.0 for yv in ys):
+        return xs, ys, errs, plabs, {"y_transform": "already_neglog10_kept"}
     nxs, nys, nerrs, nlabs, raw_ps = [], [], [], [], []
     has_err = isinstance(errs, list) and len(errs) == len(ys)
     has_lab = isinstance(plabs, list) and len(plabs) == len(ys)
@@ -169,7 +177,17 @@ def _hydrate_panel(p, base_dir):
     """若 panel 或 series 指定了 table（CSV/TSV/XLSX/JSON），直接从磁盘读取原值，零人工抄写误差。"""
     def _resolve(tpath):
         pp = Path(tpath)
-        return pp if pp.is_absolute() or pp.exists() else (base_dir / pp)
+        if pp.is_absolute() or pp.exists():
+            return pp
+        for cand in (base_dir / pp, base_dir.parent / pp, Path("/input") / pp):
+            if cand.exists():
+                return cand
+        inp_dir = Path("/input")
+        if inp_dir.exists():
+            for hit in inp_dir.rglob(pp.name):
+                if hit.is_file():
+                    return hit
+        return base_dir / pp
 
     p = dict(p)
     if p.get("kind"):
@@ -185,7 +203,9 @@ def _hydrate_panel(p, base_dir):
         src_base["table"] = tpath.name
         src_base["sha256_12"] = tbl["sha256"][:12]
         if p.get("x_col") and p.get("y_col") and p.get("val_col"):
-            xc, yc, vc = p["x_col"], p["y_col"], p["val_col"]
+            xc = tp.resolve_col(cols, p["x_col"])
+            yc = tp.resolve_col(cols, p["y_col"])
+            vc = tp.resolve_col(cols, p["val_col"])
             xs = list(dict.fromkeys(str(r.get(xc, "")) for r in rows))
             ys = list(dict.fromkeys(str(r.get(yc, "")) for r in rows))
             grid = {}
@@ -196,8 +216,8 @@ def _hydrate_panel(p, base_dir):
             mat = [[grid.get((yv, xv), float("nan")) for xv in xs] for yv in ys]
             p["x_labels"], p["y_labels"], p["matrix"] = xs, ys, mat
         else:
-            row_col = p.get("row_col") or (cols[0] if cols else "")
-            val_cols = p.get("value_cols") or [c for c in cols if c != row_col]
+            row_col = tp.resolve_col(cols, p["row_col"]) if p.get("row_col") else (cols[0] if cols else "")
+            val_cols = [tp.resolve_col(cols, c) for c in p["value_cols"]] if p.get("value_cols") else [c for c in cols if c != row_col]
             p["y_labels"] = [str(r.get(row_col, "")) for r in rows]
             p["x_labels"] = list(val_cols)
             mat = []
@@ -215,16 +235,19 @@ def _hydrate_panel(p, base_dir):
     if p.get("table") and not p.get("series"):
         tpath = _resolve(p["table"])
         tbl = tp.load_table(tpath, sheet=p.get("sheet"), skip_rows=int(p.get("skip_rows") or 0))
+        cols = tbl["columns"]
         rows = _filter_rows(tbl["rows"], p.get("filter"))
-        xc = p.get("x_col")
+        xc = tp.resolve_col(cols, p.get("x_col"), allow_none=True)
         agg = p.get("agg")
         src_base = p.get("source") or {"quote": "Direct table %s" % tpath.name,
                                        "loc": "%s%s" % (tpath.name, (" [%s]" % tbl["sheet"]) if tbl["sheet"] else "")}
         series = []
         if isinstance(p.get("y_cols"), list) and p["y_cols"]:
             yerr_cols = p.get("yerr_cols") or []
-            for ci, yc in enumerate(p["y_cols"]):
-                ec = yerr_cols[ci] if ci < len(yerr_cols) else None
+            lc_w = tp.resolve_col(cols, p.get("label_col"), allow_none=True)
+            for ci, yc_raw in enumerate(p["y_cols"]):
+                yc = tp.resolve_col(cols, yc_raw)
+                ec = tp.resolve_col(cols, yerr_cols[ci], allow_none=True) if ci < len(yerr_cols) else None
                 src_d = dict(src_base, table=tpath.name, sha256_12=tbl["sha256"][:12])
                 if agg in ("mean_sd", "mean_sem"):
                     raw_xs = [r.get(xc, "") for r in rows] if xc else list(range(len(rows)))
@@ -233,7 +256,7 @@ def _hydrate_panel(p, base_dir):
                     src_d.update({"agg": agg, "replicates_per_x": ns, "dropped_missing": dropped})
                     s = {"name": str(yc), "x": xs, "y": ys, "yerr": errs, "raw_points": raw_pts, "source": src_d}
                 else:
-                    xs, ys, errs, dropped, pm_cnt, plabs = _clean_rows_xy(rows, xc, yc, ec, p.get("label_col"))
+                    xs, ys, errs, dropped, pm_cnt, plabs = _clean_rows_xy(rows, xc, yc, ec, lc_w)
                     if dropped:
                         src_d["dropped_missing"] = dropped
                     if pm_cnt:
@@ -247,9 +270,11 @@ def _hydrate_panel(p, base_dir):
                         s["point_labels"] = plabs
                 series.append(s)
         else:
-            p_col = p.get("p_col") or p.get("padj_col")
-            yc = p.get("y_col") or p_col
-            ec, gc, lc = p.get("yerr_col"), p.get("group_col"), p.get("label_col")
+            p_col = tp.resolve_col(cols, p.get("p_col") or p.get("padj_col"), allow_none=True)
+            yc = tp.resolve_col(cols, p.get("y_col"), allow_none=True) or p_col
+            ec = tp.resolve_col(cols, p.get("yerr_col"), allow_none=True)
+            gc = tp.resolve_col(cols, p.get("group_col"), allow_none=True)
+            lc = tp.resolve_col(cols, p.get("label_col"), allow_none=True)
             y_tf = p.get("y_transform") or ("neglog10" if p_col else None)
             if y_tf and not p.get("ylabel"):
                 p["ylabel"] = "-log10(%s)" % (p_col or "p-value")
@@ -295,9 +320,13 @@ def _hydrate_panel(p, base_dir):
         if s.get("table") and not s.get("y"):
             tpath = _resolve(s["table"])
             tbl = tp.load_table(tpath, sheet=s.get("sheet"), skip_rows=int(s.get("skip_rows") or 0))
+            cols = tbl["columns"]
             rows = _filter_rows(tbl["rows"], s.get("filter"))
-            sp_col = s.get("p_col") or s.get("padj_col")
-            xc, yc, ec, lc = s.get("x_col"), s.get("y_col") or sp_col, s.get("yerr_col"), s.get("label_col") or p.get("label_col")
+            sp_col = tp.resolve_col(cols, s.get("p_col") or s.get("padj_col"), allow_none=True)
+            xc = tp.resolve_col(cols, s.get("x_col"), allow_none=True)
+            yc = tp.resolve_col(cols, s.get("y_col"), allow_none=True) or sp_col
+            ec = tp.resolve_col(cols, s.get("yerr_col"), allow_none=True)
+            lc = tp.resolve_col(cols, s.get("label_col") or p.get("label_col"), allow_none=True)
             sy_tf = s.get("y_transform") or p.get("y_transform") or ("neglog10" if sp_col else None)
             src = dict(s.get("source") or {})
             src.setdefault("quote", "Direct table %s (%s vs %s)" % (tpath.name, xc or "index", yc))
@@ -469,9 +498,11 @@ def _validate_panel(p, prefix=""):
     if not series:
         errs.append(prefix + "series 为空")
     for i, s in enumerate(series):
+        if kind == "hist" and not s.get("y") and s.get("x"):
+            s["y"] = list(s["x"])
         y = s.get("y") or []
-        x = s.get("x") or ([] if kind != "box" else [s.get("name", "G%d" % (i + 1))] * len(y))
-        if kind != "box" and len(x) != len(y):
+        x = s.get("x") or ([] if kind not in ("box", "violin", "hist") else [s.get("name", "G%d" % (i + 1))] * len(y))
+        if kind not in ("box", "violin", "hist") and len(x) != len(y):
             errs.append("%sseries[%d] x/y 长度不一致 (%d vs %d)" % (prefix, i, len(x), len(y)))
         if not y:
             errs.append("%sseries[%d] 无数据" % (prefix, i))
@@ -500,6 +531,9 @@ def _validate_panel(p, prefix=""):
     elif kind == "barh":
         if not has_xl:
             errs.append(prefix + "barh 缺少 xlabel（数值轴及单位不可省）")
+    elif kind == "hist":
+        if not has_xl:
+            errs.append(prefix + "hist 缺少 xlabel（分布变量及单位不可省）")
     else:
         if not has_yl:
             errs.append(prefix + "缺少 ylabel（数值轴及单位不可省）")
@@ -518,7 +552,7 @@ def validate(spec):
     return _validate_panel(spec)
 
 
-def _plot_panel(ax, p, panel_tag=""):
+def _plot_panel(ax, p, panel_tag="", row_title_pad=None):
     kind = _norm_kind(p.get("kind", "line"))
     warns, mapping = [], []
     cats, cat_idx = [], {}
@@ -583,49 +617,68 @@ def _plot_panel(ax, p, panel_tag=""):
     series = p["series"]
     n_s = len(series)
 
-    if kind == "box":
+    if kind in ("box", "violin"):
         # 每个 series 的 y 为一组分布，或单 series 用 x 分组
         groups_data, group_names, group_colors = [], [], []
         if n_s == 1 and series[0].get("x") and len(set(str(v) for v in series[0]["x"])) > 1:
             s0 = series[0]
             buckets = {}
             for xv, yv in zip(s0["x"], s0["y"]):
-                buckets.setdefault(str(xv), []).append(float(yv))
+                buckets.setdefault(str(xv), []).append(_to_float(yv))
             src = s0.get("source") or {}
             for gi, (gn, gvals) in enumerate(buckets.items()):
                 groups_data.append(gvals)
                 group_names.append(gn)
                 group_colors.append(PAL[gi % len(PAL)])
+                st = _series_stats(gvals)
                 mapping.append({"panel": panel_tag.rstrip(".") or "main", "series": gn, "n": len(gvals),
-                                "y_range": [min(gvals), max(gvals)],
-                                "mean": round(sum(gvals) / len(gvals), 6),
+                                "y_range": [st["min"], st["max"]], **st,
+                                "data_sha12": _points_sha12([gn] * len(gvals), gvals),
                                 "quote": src.get("quote", ""), "loc": src.get("loc", ""),
                                 "table": src.get("table", ""), "sha256_12": src.get("sha256_12", "")})
         else:
             for i, s in enumerate(series):
-                vals = [float(v) for v in s["y"]]
+                vals = [_to_float(v) for v in s["y"]]
                 gn = str(s.get("name", "G%d" % (i + 1)))
                 groups_data.append(vals)
                 group_names.append(gn)
                 group_colors.append(s.get("color") or PAL[s.get("color_index", i) % len(PAL)])
                 src = s.get("source") or {}
+                st = _series_stats(vals)
                 mapping.append({"panel": panel_tag.rstrip(".") or "main", "series": gn, "n": len(vals),
-                                "y_range": [min(vals), max(vals)],
-                                "mean": round(sum(vals) / len(vals), 6),
+                                "y_range": [st["min"], st["max"]], **st,
+                                "data_sha12": _points_sha12([gn] * len(vals), vals),
                                 "quote": src.get("quote", ""), "loc": src.get("loc", ""),
                                 "table": src.get("table", ""), "sha256_12": src.get("sha256_12", "")})
         cats = group_names
         cat_idx = {c: idx for idx, c in enumerate(cats)}
-        bp = ax.boxplot(groups_data, positions=range(len(cats)), widths=0.52, patch_artist=True,
-                        medianprops={"color": "#1A202C", "linewidth": 1.6},
-                        whiskerprops={"color": "#4A5568", "linewidth": 1.1},
-                        capprops={"color": "#4A5568", "linewidth": 1.1},
-                        flierprops={"marker": "o", "markersize": 3.5, "alpha": 0.5}, zorder=3)
-        for patch, col in zip(bp["boxes"], group_colors):
-            patch.set_facecolor(col)
-            patch.set_alpha(0.35)
-            patch.set_edgecolor(col)
-            patch.set_linewidth(1.3)
+        if kind == "violin":
+            vp = ax.violinplot(groups_data, positions=range(len(cats)), widths=0.66,
+                               showmeans=False, showmedians=True, showextrema=False)
+            for body, col in zip(vp["bodies"], group_colors):
+                body.set_facecolor(col)
+                body.set_edgecolor(col)
+                body.set_alpha(0.32)
+                body.set_linewidth(1.2)
+            if "cmedians" in vp:
+                vp["cmedians"].set_color("#1A202C")
+                vp["cmedians"].set_linewidth(1.8)
+            for gi, gvals in enumerate(groups_data):
+                sv = sorted(gvals)
+                if len(sv) >= 4:
+                    q1, q3 = sv[len(sv) // 4], sv[(3 * len(sv)) // 4]
+                    ax.plot([gi, gi], [q1, q3], color="#1A202C", lw=3.2, solid_capstyle="round", zorder=3.5)
+        else:
+            bp = ax.boxplot(groups_data, positions=range(len(cats)), widths=0.52, patch_artist=True,
+                            medianprops={"color": "#1A202C", "linewidth": 1.6},
+                            whiskerprops={"color": "#4A5568", "linewidth": 1.1},
+                            capprops={"color": "#4A5568", "linewidth": 1.1},
+                            flierprops={"marker": "o", "markersize": 3.5, "alpha": 0.5}, zorder=3)
+            for patch, col in zip(bp["boxes"], group_colors):
+                patch.set_facecolor(col)
+                patch.set_alpha(0.35)
+                patch.set_edgecolor(col)
+                patch.set_linewidth(1.3)
         if p.get("show_points", True):
             for gi, (gvals, col) in enumerate(zip(groups_data, group_colors)):
                 if len(gvals) <= 60:
@@ -634,6 +687,24 @@ def _plot_panel(ax, p, panel_tag=""):
                     xs_j = [gi + (((k % 5) - 2) * 0.045 if m > 1 else 0.0) for k in range(m)]
                     ax.scatter(xs_j, gvals, s=18, color=col, alpha=0.82, edgecolors="#FFFFFF", linewidths=0.4, zorder=4)
         numeric_x = False
+    elif kind == "hist":
+        bins = p.get("bins") or "auto"
+        for i, s in enumerate(series):
+            vals = [_to_float(v) for v in (s.get("y") or s.get("x") or [])]
+            col = s.get("color") or PAL[s.get("color_index", i) % len(PAL)]
+            lbl = str(s.get("name", "S%d" % (i + 1)))
+            ax.hist(vals, bins=bins, density=bool(p.get("density", False)), alpha=0.55 if n_s > 1 else 0.78,
+                    color=col, edgecolor="#1A202C", linewidth=0.7, label=lbl, zorder=3)
+            src = s.get("source") or {}
+            st = _series_stats(vals)
+            mapping.append({"panel": panel_tag.rstrip(".") or "main", "series": lbl, "n": len(vals),
+                            "x_range": [st["min"], st["max"]], "y_range": [st["min"], st["max"]], **st,
+                            "data_sha12": _points_sha12(list(range(len(vals))), vals),
+                            "quote": src.get("quote", ""), "loc": src.get("loc", ""),
+                            "table": src.get("table", ""), "sha256_12": src.get("sha256_12", "")})
+        if not p.get("ylabel"):
+            p = dict(p, ylabel="Density" if p.get("density") else "Count")
+        numeric_x = True
     else:
         all_x = [v for s in series for v in s["x"]]
         numeric_x = all(_is_num(v) for v in all_x) and kind not in ("bar", "barh", "stacked_bar")
@@ -770,21 +841,24 @@ def _plot_panel(ax, p, panel_tag=""):
                     for ci_p, (_, _, xv, yv, ps) in enumerate(chosen):
                         pref_dir = 1 if (kind != "volcano" or xv >= 0) else -1
                         slots = [
-                            (6 * pref_dir, 6), (6 * pref_dir, -10), (12 * pref_dir, 14),
-                            (12 * pref_dir, -16), (-6 * pref_dir, 6), (-6 * pref_dir, -10),
-                            (0, 14), (0, -14),
+                            (7 * pref_dir, 6), (7 * pref_dir, -12), (14 * pref_dir, 14),
+                            (14 * pref_dir, -18), (-8 * pref_dir, 8), (-8 * pref_dir, -12),
+                            (0, 16), (0, -16), (20 * pref_dir, 0), (-16 * pref_dir, 16),
+                            (20 * pref_dir, 20), (-16 * pref_dir, -18),
                         ]
                         nx0 = (xv - min(x)) / xspan
                         ny0 = (yv - min(y)) / yspan
+                        dx_req = max(0.15, 0.022 * len(ps))
+                        dy_req = 0.098
                         best_slot = slots[0]
                         for ox, oy in slots:
-                            cx_n = nx0 + ox * 0.0045
-                            cy_n = ny0 + oy * 0.0055
-                            if all(abs(cx_n - px_n) > 0.12 or abs(cy_n - py_n) > 0.072 for px_n, py_n in placed_norm):
+                            cx_n = nx0 + ox * 0.0055
+                            cy_n = ny0 + oy * 0.0070
+                            if all(abs(cx_n - px_n) > dx_req or abs(cy_n - py_n) > dy_req for px_n, py_n in placed_norm):
                                 best_slot = (ox, oy)
                                 break
                         ox, oy = best_slot
-                        placed_norm.append((nx0 + ox * 0.0045, ny0 + oy * 0.0055))
+                        placed_norm.append((nx0 + ox * 0.0055, ny0 + oy * 0.0070))
                         ha_p = "left" if ox > 0 else ("right" if ox < 0 else "center")
                         arrow_kw = dict(arrowstyle="-", color="#A0AEC0", lw=0.6) if (abs(ox) >= 12 or abs(oy) >= 14) else None
                         tgt_ax.annotate(ps, xy=(xv, yv), xytext=(ox, oy), textcoords="offset points",
@@ -858,11 +932,16 @@ def _plot_panel(ax, p, panel_tag=""):
             src = s.get("source") or {}
             st = _series_stats(y)
             row = {"panel": panel_tag.rstrip(".") or "main", "series": lbl, "n": len(y),
-                   "x_range": x_rng, "y_range": [min(y), max(y)],
+                   "x_range": x_rng, "y_range": [st["min"], st["max"]],
                    "mean": st["mean"], "median": st["median"], "sd": st["sd"],
+                   "sem": st["sem"], "iqr": st["iqr"],
                    "has_yerr": yerr is not None,
                    "data_sha12": _points_sha12(s["x"], y),
                    "quote": (src.get("quote") or ""), "loc": (src.get("loc") or "")}
+            if src.get("y_transform"):
+                row["y_transform"] = src["y_transform"]
+            if src.get("raw_p_range"):
+                row["raw_p_range"] = src["raw_p_range"]
             if src.get("table"):
                 row["table"] = src["table"]
                 row["sha256_12"] = src.get("sha256_12", "")
@@ -1026,7 +1105,7 @@ def _plot_panel(ax, p, panel_tag=""):
         ax2.set_ylim(float(p["y2lim"][0]), float(p["y2lim"][1]))
     leg_loc = str(p.get("legend_loc") or "").strip()
     title_pad = 8
-    if kind != "box" and (kind == "volcano" or n_s > 1 or any(s.get("name") for s in series)):
+    if kind not in ("box", "violin") and (kind == "volcano" or n_s > 1 or any(s.get("name") for s in series)):
         if ax2 is not None:
             h1, l1 = ax.get_legend_handles_labels()
             h2, l2 = ax2.get_legend_handles_labels()
@@ -1059,6 +1138,8 @@ def _plot_panel(ax, p, panel_tag=""):
             ax.legend(frameon=False, fontsize=8.8, loc="upper center", ncol=min(n_s, 3))
         else:
             ax.legend(frameon=False, fontsize=9.0, loc=leg_loc or "best")
+    if row_title_pad is not None:
+        title_pad = max(title_pad, row_title_pad)
     if p.get("title") or p.get("subtitle"):
         t_str = str(p.get("title") or "").strip()
         s_str = str(p.get("subtitle") or "").strip()
@@ -1073,10 +1154,13 @@ def _write_result_skel(a, rep, out, name, mapping, spec=None):
         return
     spec = spec or {}
     contract = {}
+    cid_eff = a.case_id
     if a.contract and Path(a.contract).exists():
         try:
             import audit_delivery as auditmod
             cj = json.loads(Path(a.contract).read_text(encoding="utf-8"))
+            if not cid_eff and cj.get("case_id"):
+                cid_eff = str(cj["case_id"])
             keys = auditmod._extract_contract_keys(cj)
             for k in keys:
                 kl = k.strip().lower()
@@ -1095,7 +1179,7 @@ def _write_result_skel(a, rep, out, name, mapping, spec=None):
                 elif kl in ("data_mapping",):
                     contract[k] = mapping
                 elif kl in ("case_id", "id"):
-                    contract[k] = a.case_id or "CASE_ID"
+                    contract[k] = cid_eff or "CASE_ID"
                 else:
                     contract[k] = "<待填：依据真实源数据与图件如实撰写>"
         except Exception:
@@ -1109,8 +1193,13 @@ def _write_result_skel(a, rep, out, name, mapping, spec=None):
     for u in (spec.get("uncertainty") or []):
         if str(u) not in unc:
             unc.append(str(u))
+    title_s = str(spec.get("title") or name).strip()
+    detail_s = "Plotted '%s' (%d panel(s), %d series, %d verified points from %s) as editable SVG/PDF and %ddpi PNG." % (
+        title_s[:80], rep.get("panel_count", 1), rep.get("series_count", len(mapping)),
+        rep.get("total_points_plotted", 0), ", ".join(srcs[:4]) or "inline source spec", a.dpi
+    )
     sk = {
-        "case_id": a.case_id or "CASE_ID",
+        "case_id": cid_eff or "CASE_ID",
         "status": "ok" if rep["ok"] else "partial",
         "deliverables": {
             "editable_source": {"path": name + ".svg", "format": "svg", "editable_text": rep["editable_svg_text"]},
@@ -1123,18 +1212,34 @@ def _write_result_skel(a, rep, out, name, mapping, spec=None):
         "output_contract": contract,
         "output_contract_fields": list(contract.keys()),
         "uncertainty": unc,
-        "change_records": [{"action": "generate_chart", "target": name + ".svg",
-                            "detail": "Generated editable SVG/PDF and %ddpi PNG from verified source data" % a.dpi}],
+        "change_records": [{"action": "generate_chart", "target": name + ".svg", "detail": detail_s}],
     }
     for k, v in contract.items():
         if k not in sk:
             sk[k] = v
-    if isinstance(spec.get("result_fields"), dict):
-        for k, v in spec["result_fields"].items():
-            sk[k] = v
+    explicit_rf = spec.get("result_fields") if isinstance(spec.get("result_fields"), dict) else {}
+    for k, v in explicit_rf.items():
+        sk[k] = v
+        if k in contract:
+            contract[k] = v
     p = Path(dst_path)
+    if p.exists():
+        try:
+            old_res = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(old_res, dict):
+                old_oc = old_res.get("output_contract") if isinstance(old_res.get("output_contract"), dict) else {}
+                for k, v in list(contract.items()):
+                    if k not in explicit_rf and isinstance(v, str) and "<待填" in v:
+                        prev = old_oc.get(k) if k in old_oc else old_res.get(k)
+                        if prev not in (None, "") and not (isinstance(prev, str) and "<待填" in prev):
+                            contract[k] = prev
+                            sk[k] = prev
+        except Exception:
+            pass
+    unfilled = [k for k, v in contract.items() if isinstance(v, str) and "<待填" in v]
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(sk, ensure_ascii=False, indent=1), encoding="utf-8")
+    return unfilled
 
 
 def _render_svg_stdlib(spec, out, name, dpi, preview=None, preview_dpi=96):
@@ -1277,13 +1382,22 @@ def render(spec, out, name, dpi, preview=None, preview_dpi=96):
         fs = tuple(float(v) for v in custom_fs) if (isinstance(custom_fs, list) and len(custom_fs) == 2) else (5.6 * ncols, 3.9 * nrows + 0.5)
         fig, axes = plt.subplots(nrows, ncols, figsize=fs, constrained_layout=True, squeeze=False)
         flat = [ax for row in axes for ax in row]
+        row_out_top = {}
+        for idx, p in enumerate(panels):
+            if str(p.get("legend_loc") or "").strip() == "outside_top":
+                row_out_top[idx // ncols] = True
         for idx, p in enumerate(panels):
             tag = p.get("panel_label") or chr(ord("A") + idx)
-            w, m = _plot_panel(flat[idx], p, panel_tag=tag + ".")
+            r_top = row_out_top.get(idx // ncols, False)
+            w, m = _plot_panel(flat[idx], p, panel_tag=tag + ".", row_title_pad=(28 if r_top else None))
             warns.extend(w)
             mapping.extend(m)
-            flat[idx].text(-0.12, 1.07, tag, transform=flat[idx].transAxes,
-                           fontsize=13, fontweight="bold", va="top", ha="left", color="#1A202C")
+            pt = str(p.get("title") or "").strip()
+            has_prefix = pt.startswith(tag + ".") or pt.startswith(tag + " ") or pt.startswith(tag + ":") or pt.startswith("(" + tag + ")")
+            if p.get("panel_label") or not has_prefix:
+                by = 1.15 if r_top else 1.07
+                flat[idx].text(-0.11, by, tag, transform=flat[idx].transAxes,
+                               fontsize=13, fontweight="bold", va="top", ha="left", color="#1A202C")
         for extra in flat[n:]:
             extra.axis("off")
         if spec.get("title"):
@@ -1357,7 +1471,11 @@ def main():
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     sp_path = Path(a.spec)
-    spec = hydrate_spec(json.loads(sp_path.read_text(encoding="utf-8")), sp_path.parent)
+    try:
+        spec = hydrate_spec(json.loads(sp_path.read_text(encoding="utf-8")), sp_path.parent)
+    except (ValueError, FileNotFoundError) as e:
+        print(json.dumps({"ok": False, "stage": "hydrate_table", "errors": [str(e)]}, ensure_ascii=False))
+        return 2
     errs = validate(spec)
     if errs:
         print(json.dumps({"ok": False, "stage": "spec_validate", "errors": errs}, ensure_ascii=False))
@@ -1366,7 +1484,9 @@ def main():
     rep["errors"] = []
     if a.preview:
         rep["preview"] = str(a.preview)
-    _write_result_skel(a, rep, out, a.name, rep["data_mapping"], spec)
+    unfilled = _write_result_skel(a, rep, out, a.name, rep["data_mapping"], spec)
+    if unfilled is not None:
+        rep["unfilled_contract_fields"] = unfilled
     if a.result_out:
         import audit_delivery as auditmod
         rep["audit"] = auditmod.audit(Path(a.result_out).parent, a.contract)

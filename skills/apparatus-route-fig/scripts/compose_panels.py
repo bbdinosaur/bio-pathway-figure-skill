@@ -531,10 +531,11 @@ def _assemble_and_export(spec, loaded_rows, out, name, ff, fam, footer, dpi, pre
     return rep, merged_prov
 
 
-def _write_result_skel(a, rep, merged_prov):
-    dst_res = getattr(a, "result_skel", None)
+def _write_result_skel(a, rep, merged_prov, spec=None):
+    dst_res = getattr(a, "result_out", None) or getattr(a, "result_skel", None)
     if not dst_res:
-        return
+        return None
+    spec = spec if isinstance(spec, dict) else {}
     contract = {}
     if getattr(a, "contract", None) and Path(a.contract).exists():
         try:
@@ -588,9 +589,29 @@ def _write_result_skel(a, rep, merged_prov):
     for k, v in contract.items():
         if k not in sk:
             sk[k] = v
+    explicit_rf = spec.get("result_fields") if isinstance(spec.get("result_fields"), dict) else {}
+    for k, v in explicit_rf.items():
+        sk[k] = v
+        if k in contract:
+            contract[k] = v
     p_out = Path(dst_res)
+    if p_out.exists():
+        try:
+            old_res = json.loads(p_out.read_text(encoding="utf-8"))
+            if isinstance(old_res, dict):
+                old_oc = old_res.get("output_contract") if isinstance(old_res.get("output_contract"), dict) else {}
+                for k, v in list(contract.items()):
+                    if k not in explicit_rf and isinstance(v, str) and "<待填" in v:
+                        prev = old_oc.get(k) if k in old_oc else old_res.get(k)
+                        if prev not in (None, "") and not (isinstance(prev, str) and "<待填" in prev):
+                            contract[k] = prev
+                            sk[k] = prev
+        except Exception:
+            pass
+    unfilled = [k for k, v in contract.items() if isinstance(v, str) and "<待填" in v]
     p_out.parent.mkdir(parents=True, exist_ok=True)
     p_out.write_text(json.dumps(sk, ensure_ascii=False, indent=1), encoding="utf-8")
+    return unfilled
 
 
 def main():
@@ -610,6 +631,7 @@ def main():
     ap.add_argument("--case-id", default=None)
     ap.add_argument("--contract", default=None)
     ap.add_argument("--result-skel", default=None)
+    ap.add_argument("--result-out", default=None, help="直接写入正式 result.json")
     a = ap.parse_args()
 
     if a.spec:
@@ -636,7 +658,9 @@ def main():
     except (ValueError, FileNotFoundError) as e:
         print(json.dumps({"ok": False, "stage": "compose_validate", "errors": [str(e)]}, ensure_ascii=False))
         return 2
-    _write_result_skel(a, rep, merged_prov)
+    unfilled = _write_result_skel(a, rep, merged_prov, spec=spec)
+    if unfilled is not None:
+        rep["unfilled_contract_fields"] = unfilled
     print(json.dumps(rep, ensure_ascii=False, indent=1))
     return 0
 

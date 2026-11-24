@@ -65,13 +65,16 @@ def _multi(a, sirmod, buildmod, checks, svgfig, rendermod, figures, sird=None):
         {"case_id": a.case_id, "ok": all_ok, "figures": manifest,
          "files": sorted(p.name for p in out.iterdir())}, ensure_ascii=False, indent=1), encoding="utf-8")
     res_dst = a.result_out or a.result_skel
+    unfilled = None
     if res_dst:
         agg_rep = {"ok": all_ok, "errors": [] if all_ok else ["部分子图检查未通过，见 manifest"],
                    "warns": all_warns, "figures": manifest}
-        _skel(a, agg_rep, {"mode": "multi", "cjk_family": fam}, Path(res_dst),
-              Path(a.contract) if a.contract else None, all_prov, sird=sird)
+        unfilled = _skel(a, agg_rep, {"mode": "multi", "cjk_family": fam}, Path(res_dst),
+                         Path(a.contract) if a.contract else None, all_prov, sird=sird, multi_count=len(figures))
     out_msg = {"ok": all_ok, "mode": "multi", "figures": len(figures),
                "manifest": str(out / (a.name + "_manifest.json"))}
+    if unfilled is not None:
+        out_msg["unfilled_contract_fields"] = unfilled
     if a.result_out:
         import audit_delivery as auditmod
         out_msg["audit"] = auditmod.audit(Path(a.result_out).parent, a.contract)
@@ -157,13 +160,16 @@ def main():
         "note": "每个图面元素对应一条材料原文短摘录与定位；可直接人工比对核验"},
         ensure_ascii=False, indent=1), encoding="utf-8")
     res_dst = a.result_out or a.result_skel
+    unfilled = None
     if res_dst:
-        _skel(a, rep, rmeta, Path(res_dst), Path(a.contract) if a.contract else None, prov_rows, sird=sird)
+        unfilled = _skel(a, rep, rmeta, Path(res_dst), Path(a.contract) if a.contract else None, prov_rows, sird=sird)
     out_msg = {"ok": rep["ok"], "canvas": rep["summary"]["canvas"],
                "errors": len(rep["errors"]), "warns": len(rep["warns"]),
                "png": str(png_path), "svg": str(svg_path), "render": rmeta}
     if a.preview:
         out_msg["preview"] = str(a.preview)
+    if unfilled is not None:
+        out_msg["unfilled_contract_fields"] = unfilled
     if a.result_out:
         import audit_delivery as auditmod
         out_msg["audit"] = auditmod.audit(Path(a.result_out).parent, a.contract)
@@ -171,50 +177,49 @@ def main():
     return 0 if rep["ok"] else 3
 
 
-def _smart_fill(key, a):
+def _smart_fill(key, a, stem=None):
     """仅对无歧义的文件路径/状态标识字段自动映射，绝不覆盖需科学判断的语义字段（如 source_evidence/figure_caption）。"""
+    st = stem or a.name
     k = str(key).strip().lower()
     if k in ("case_id", "id"):
         return a.case_id or "CASE_ID"
     if k in ("status", "run_status"):
         return "ok"
-    if k in ("editable_svg", "svg", "svg_file", "svg_path", "output_svg", "editable_source", "editable_source_path", "source_svg"):
-        return "%s.svg" % a.name
-    if k in ("png", "png_file", "png_path", "preview_png", "rendered_png", "output_png", "figure_png", "image_path"):
-        return "%s.png" % a.name
-    if k in ("pdf", "pdf_file", "pdf_path", "output_pdf", "figure_pdf", "vector_pdf"):
-        return "%s.pdf" % a.name
-    if k in ("provenance_file", "provenance_path", "provenance_json"):
+    if k in ("editable_svg", "svg", "svg_file", "svg_path", "output_svg", "editable_source", "editable_source_path", "editable_source_file", "source_svg", "source_svg_path", "figure_svg", "figure_file"):
+        return "%s.svg" % st
+    if k in ("png", "png_file", "png_path", "preview_png", "rendered_png", "rendered_image", "output_png", "export_png", "figure_png", "image_path", "image_file"):
+        return "%s.png" % st
+    if k in ("pdf", "pdf_file", "pdf_path", "output_pdf", "rendered_pdf", "export_pdf", "figure_pdf", "vector_pdf"):
+        return "%s.pdf" % st
+    if k in ("provenance_file", "provenance_path", "provenance_json", "provenance_report"):
         return "provenance.json"
-    if k in ("checks_report", "check_report", "export_check", "export_checks", "quality_check"):
+    if k in ("checks_report", "check_report", "checks_file", "export_check", "export_checks", "quality_check", "quality_report"):
         return "checks_report.json"
     if k in ("render_meta", "export_meta"):
         return "render_meta.json"
     if k.endswith("_svg") or k.endswith("_svg_path"):
-        return "%s.svg" % a.name
+        return "%s.svg" % st
     if k.endswith("_png") or k.endswith("_png_path"):
-        return "%s.png" % a.name
+        return "%s.png" % st
     if k.endswith("_pdf") or k.endswith("_pdf_path"):
-        return "%s.pdf" % a.name
+        return "%s.pdf" % st
     return None
 
 
-def _skel(a, rep, rmeta, path, contract_path=None, prov_rows=None, sird=None):
+def _skel(a, rep, rmeta, path, contract_path=None, prov_rows=None, sird=None, multi_count=0):
     sird = sird or {}
+    stem = ("%s_1" % a.name) if multi_count else a.name
     contract = {}
+    cid_eff = a.case_id
     if contract_path and contract_path.exists():
         try:
             import audit_delivery as auditmod
             cj = json.loads(contract_path.read_text(encoding="utf-8"))
-            c = cj.get("output_contract")
+            if not cid_eff and cj.get("case_id"):
+                cid_eff = str(cj["case_id"])
             for ks in auditmod._extract_contract_keys(cj):
-                fill = _smart_fill(ks, a)
-                if fill:
-                    contract[ks] = fill
-                elif isinstance(c, dict) and ks in c and c[ks] not in (None, "") and not isinstance(c[ks], (dict, list)):
-                    contract[ks] = c[ks]
-                else:
-                    contract[ks] = "<待填：按 case.json 契约填写>"
+                fill = _smart_fill(ks, a, stem=stem)
+                contract[ks] = fill if fill else "<待填：按 case.json 契约填写>"
         except Exception:
             contract = {}
     src_locs = []
@@ -226,13 +231,25 @@ def _skel(a, rep, rmeta, path, contract_path=None, prov_rows=None, sird=None):
     for u in (sird.get("uncertainty") or []):
         if str(u) not in unc:
             unc.append(str(u))
+    title_s = str(sird.get("title") or a.name).strip()[:80]
+    if multi_count:
+        detail_s = "Built multi-figure set '%s' (%d figures, %d grounded elements from %s) as layered SVG + %ddpi PNG/PDF." % (
+            title_s, multi_count, len(prov_rows or []), ", ".join(src_locs[:4]) or "source SIR", a.dpi
+        )
+    else:
+        summ = rep.get("summary") or {}
+        detail_s = "Built %s '%s' (%d nodes/phases, %d links, %s provenance from %s) as layered SVG + %ddpi PNG/PDF." % (
+            summ.get("kind") or sird.get("kind") or "diagram", title_s,
+            int(summ.get("nodes") or 0), int(summ.get("links") or 0),
+            summ.get("provenance") or "100%", ", ".join(src_locs[:4]) or "source SIR", a.dpi
+        )
     sk = {
-        "case_id": a.case_id or "CASE_ID",
+        "case_id": cid_eff or "CASE_ID",
         "status": "ok" if rep["ok"] else "partial",
         "deliverables": {
-            "editable_source": {"path": a.name + ".svg", "format": "svg", "layers": ["frame", "nodes", "links", "labels", "legend", "footer"]},
-            "exports": [{"path": a.name + ".png", "format": "png", "dpi": a.dpi},
-                        {"path": a.name + ".pdf", "format": "pdf"}],
+            "editable_source": {"path": stem + ".svg", "format": "svg", "layers": ["frame", "nodes", "links", "labels", "legend", "footer"]},
+            "exports": [{"path": stem + ".png", "format": "png", "dpi": a.dpi},
+                        {"path": stem + ".pdf", "format": "pdf"}],
             "provenance": "逐元素来源见 SVG data-prov/data-prov-loc 属性与 provenance.json",
             "provenance_table": prov_rows or [],
         },
@@ -242,17 +259,20 @@ def _skel(a, rep, rmeta, path, contract_path=None, prov_rows=None, sird=None):
         "output_contract": contract,
         "output_contract_fields": list(contract.keys()),
         "uncertainty": unc,
-        "change_records": [{"action": "generate", "target": a.name + ".svg",
-                            "detail": "Generated editable layered SVG and PNG/PDF exports from source-bound SIR"}],
+        "change_records": [{"action": "generate", "target": stem + ".svg", "detail": detail_s}],
     }
+    if multi_count:
+        sk["deliverables"]["manifest"] = a.name + "_manifest.json"
     for k in list(contract.keys()):
         if "status" in str(k).lower():
             contract[k] = sk["status"]
         if k not in sk:
             sk[k] = contract[k]
-    if isinstance(sird.get("result_fields"), dict):
-        for k, v in sird["result_fields"].items():
-            sk[k] = v
+    explicit_rf = sird.get("result_fields") if isinstance(sird.get("result_fields"), dict) else {}
+    for k, v in explicit_rf.items():
+        sk[k] = v
+        if k in contract:
+            contract[k] = v
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = {}
     if path.exists():
@@ -260,9 +280,19 @@ def _skel(a, rep, rmeta, path, contract_path=None, prov_rows=None, sird=None):
             existing = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             existing = {}
-    if isinstance(existing, dict) and existing.get("output_contract_fields"):
-        sk["output_contract_fields"] = existing["output_contract_fields"]
+    if isinstance(existing, dict):
+        old_oc = existing.get("output_contract") if isinstance(existing.get("output_contract"), dict) else {}
+        for k, v in list(contract.items()):
+            if k not in explicit_rf and isinstance(v, str) and "<待填" in v:
+                prev = old_oc.get(k) if k in old_oc else existing.get(k)
+                if prev not in (None, "") and not (isinstance(prev, str) and "<待填" in prev):
+                    contract[k] = prev
+                    sk[k] = prev
+        if existing.get("output_contract_fields"):
+            sk["output_contract_fields"] = existing["output_contract_fields"]
+    unfilled = [k for k, v in contract.items() if isinstance(v, str) and "<待填" in v]
     path.write_text(json.dumps(sk, ensure_ascii=False, indent=1), encoding="utf-8")
+    return unfilled
 
 
 if __name__ == "__main__":

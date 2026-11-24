@@ -19,7 +19,7 @@ import unicodedata
 
 # ---- 节点类型样式: type -> (fill, stroke, text_fill, shape, legend_zh, legend_en)
 NODE_STYLES = {
-    "apparatus": ("#EDF4FC", "#1E5B88", "#123859", "rect", "装置/单元", "Apparatus / Unit"),
+    "apparatus": ("#EDF2F7", "#334E68", "#102A43", "rect", "装置/单元", "Apparatus / Unit"),
     "process":   ("#E8F1FB", "#2B6CB0", "#1A365D", "rect", "工艺步骤",  "Process Step"),
     "decision":  ("#FFF4E0", "#C05621", "#7B341E", "rect", "判定/分支", "Decision / Control"),
     "start":     ("#E6FFED", "#2F855A", "#22543D", "pill", "起点",      "Start"),
@@ -60,6 +60,12 @@ NODE_TYPE_SYNONYMS = {
     "buffer": "storage", "tank": "storage", "reservoir": "storage", "pool": "storage", "library": "storage",
     "exhaust": "waste", "effluent": "waste", "byproduct": "waste", "discard": "waste",
     "cell": "process", "tissue": "process", "treatment": "process", "step": "process", "intervention": "process",
+    "receptor": "process", "protein": "process", "gene": "process", "pathway": "process", "cytokine": "process",
+    "enzyme": "process", "ligand": "input", "drug": "input", "inhibitor": "input", "antibody": "input",
+    "mice": "input", "mouse": "input", "patient": "input", "cohort": "input", "organoid": "input",
+    "rna": "input", "dna": "input", "sirna": "input", "lnp": "input", "nanoparticle": "input",
+    "elisa": "measure", "facs": "measure", "qpcr": "measure", "western": "measure", "ihc": "measure",
+    "rna_seq": "measure", "scrna_seq": "measure", "flow_cytometry": "measure", "sequencing": "measure",
 }
 
 LINK_KIND_SYNONYMS = {
@@ -165,6 +171,8 @@ def normalize_sir(sir):
             e["kind"] = LINK_KIND_SYNONYMS[k]
         elif k in LINK_STYLES and not e.get("kind"):
             e["kind"] = k
+        if e.get("bidirectional") and not e.get("bidir"):
+            e["bidir"] = True
     phase_ids = set()
     for p in sir.get("phases") or []:
         if not isinstance(p, dict):

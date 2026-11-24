@@ -52,7 +52,7 @@
 ```json
 {
   "title": "主标题", "subtitle": "可选", "xlabel": "X轴(单位)", "ylabel": "Y轴(单位)",
-  "kind": "line | step | bar | barh | stacked_bar | scatter | box | heatmap",
+  "kind": "line | step | bar | barh | stacked_bar | scatter | volcano | box | violin | hist | heatmap",
   "xscale": "linear|log", "yscale": "linear|log", "xlim": [0, 60], "ylim": [0, 100], "y2label": "右侧Y轴(可选)",
   "hlines": [{"y": 50, "label": "IC50"}], "annotations": [{"x": "KO", "y": 82, "text": "***"}],
   "brackets": [{"x1": "Ctrl", "x2": "High", "text": "***", "s1": "可选组内系列", "s2": "可选组内系列"}],

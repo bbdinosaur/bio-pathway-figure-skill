@@ -27,12 +27,12 @@ def _has_icon(n):
     return glyphs.match(n) is not None
 
 
-def _text_w(n):
-    return NODE_W - (58.0 if _has_icon(n) else 26.0)
+def _text_w(n, nw=NODE_W):
+    return nw - (58.0 if _has_icon(n) else 26.0)
 
 
-def _node_h(n):
-    tw = _text_w(n)
+def _node_h(n, nw=NODE_W):
+    tw = _text_w(n, nw)
     nl = len(sirmod.wrap_text(n.get("label", ""), FS_LABEL, tw, bold=True))
     al = 0
     for k, v in (n.get("attrs") or {}).items():
@@ -55,11 +55,43 @@ def _assign_layers(nodes, all_links):
         touched.add(e["from"])
         touched.add(e["to"])
 
+    # DFS 破环：自动识别生物负反馈等有向环的回边（如 JAK2→STAT3→SOCS3-|JAK2），避免环上节点被推到最末列
+    adj_use = {i: [] for i in ids}
+    in_use = {i: 0 for i in ids}
+    for e in use_links:
+        if e["from"] in adj_use and e["to"] in in_use and e["from"] != e["to"]:
+            adj_use[e["from"]].append(e["to"])
+            in_use[e["to"]] += 1
+    roots = sorted(
+        ids,
+        key=lambda nid: (
+            0 if nmap[nid].get("type") == "start" else (1 if nmap[nid].get("type") == "input" else 2),
+            0 if in_use.get(nid, 0) == 0 else 1,
+            ids.index(nid),
+        ),
+    )
+    visited, on_stack, back_pairs = set(), set(), set()
+
+    def _dfs_cycle(u):
+        visited.add(u)
+        on_stack.add(u)
+        for v in adj_use.get(u, []):
+            if v in on_stack:
+                back_pairs.add((u, v))
+            elif v not in visited:
+                _dfs_cycle(v)
+        on_stack.remove(u)
+
+    for r in roots:
+        if r not in visited:
+            _dfs_cycle(r)
+    dag_links = [e for e in use_links if e["from"] != e["to"] and (e["from"], e["to"]) not in back_pairs]
+
     layer = {i: explicit.get(i, 0) for i in ids}
     cap = max(len(ids), 1)
     for _ in range(len(ids) + 1):
         changed = False
-        for e in use_links:
+        for e in dag_links:
             a, b = e["from"], e["to"]
             if b in explicit:
                 continue
@@ -117,11 +149,11 @@ def _assign_layers(nodes, all_links):
             if min_tgt >= 2 and layer.get(nid, 0) < min_tgt - 1:
                 layer[nid] = min_tgt - 1
 
-    # 归一化最小层为 0
+    # 压缩空列并归一化最小层为 0，杜绝显式 layer 跳号产生空白列
     if layer:
-        mn = min(layer.values())
-        if mn != 0:
-            layer = {k: v - mn for k, v in layer.items()}
+        uniq_l = sorted(set(layer.values()))
+        lmap = {lv: idx_l for idx_l, lv in enumerate(uniq_l)}
+        layer = {k: lmap[v] for k, v in layer.items()}
     return layer
 
 
@@ -183,10 +215,21 @@ def place_nodes(sird, maxcols=None):
                 return (group_order[g_s] if (use_g_lane and g_s in group_order) else 999, base)
             cols[c].sort(key=score_out)
 
-    # 真正按带内列号 c % maxcols 计算 X 坐标，杜绝对角线漂移与超宽死白
+    # 真正按带内列号 c % maxcols 计算 X 坐标，杜绝对角线漂移与超宽死白；<=4 列且文本较密时自适应拓宽节点卡片
     eff_cols = min(ncols, maxcols) if ncols else 1
-    col_x = {c: L_M + (c % maxcols) * (NODE_W + COLGAP) for c in range(ncols)}
-    W = max(720.0, L_M + eff_cols * (NODE_W + COLGAP) - COLGAP + R_M)
+    nw = NODE_W
+    if eff_cols <= 4 and nodes:
+        max_need = 0.0
+        for n in nodes:
+            pad_ic = 58.0 if _has_icon(n) else 26.0
+            lw = sirmod.est_w(str(n.get("label") or ""), FS_LABEL, True) + pad_ic
+            aw = max((sirmod.est_w("%s: %s" % (k, v), FS_ATTR) + pad_ic
+                      for k, v in (n.get("attrs") or {}).items()), default=0.0)
+            max_need = max(max_need, min(lw, 238.0), min(aw, 238.0))
+        if max_need > NODE_W + 4.0:
+            nw = min(238.0, max(NODE_W, round(max_need, 1)))
+    col_x = {c: L_M + (c % maxcols) * (nw + COLGAP) for c in range(ncols)}
+    W = max(720.0, L_M + eff_cols * (nw + COLGAP) - COLGAP + R_M)
 
     # 动态计算标题/副标题高度与 Band 0 跨列顶通道留白，无标题子面板自动紧缩顶部留白
     title_s = str(sird.get("title") or "").strip()
@@ -254,7 +297,7 @@ def place_nodes(sird, maxcols=None):
                     lnodes = [n for n in cols[c]
                               if (str(n.get("group") or "").strip() or "__ungrouped__") == lk]
                     if lnodes:
-                        hs = [_node_h(n) for n in lnodes]
+                        hs = [_node_h(n, nw) for n in lnodes]
                         mh = max(mh, sum(hs) + max(len(hs) - 1, 0) * base_rg)
                 lane_h[lk] = max(mh, 60.0)
             lane_y = {}
@@ -274,40 +317,40 @@ def place_nodes(sird, maxcols=None):
                                   if (str(n.get("group") or "").strip() or "__ungrouped__") == lk]
                         if not lnodes:
                             continue
-                        hs = [_node_h(n) for n in lnodes]
+                        hs = [_node_h(n, nw) for n in lnodes]
                         ch = sum(hs) + max(len(hs) - 1, 0) * base_rg
                         y = lane_y[lk] + (lane_h[lk] - ch) / 2.0
                         for n, hn in zip(lnodes, hs):
-                            geom[n["id"]] = {"x": col_x[c], "y": y, "w": NODE_W, "h": hn,
-                                             "cx": col_x[c] + NODE_W / 2.0, "cy": y + hn / 2.0,
+                            geom[n["id"]] = {"x": col_x[c], "y": y, "w": nw, "h": hn,
+                                             "cx": col_x[c] + nw / 2.0, "cy": y + hn / 2.0,
                                              "col": c, "bcol": c % maxcols, "band": b,
                                              "type": n.get("type", "process")}
                             y += hn + base_rg
                 else:
-                    hs = [_node_h(n) for n in cols[c]]
+                    hs = [_node_h(n, nw) for n in cols[c]]
                     ch = sum(hs) + max(len(hs) - 1, 0) * base_rg
                     center_span_y = grp_top if (grp_bot - grp_top) >= ch else yb
                     center_span_h = (grp_bot - grp_top) if (grp_bot - grp_top) >= ch else band_h
                     y = center_span_y + (center_span_h - ch) / 2.0
                     for n, hn in zip(cols[c], hs):
-                        geom[n["id"]] = {"x": col_x[c], "y": y, "w": NODE_W, "h": hn,
-                                         "cx": col_x[c] + NODE_W / 2.0, "cy": y + hn / 2.0,
+                        geom[n["id"]] = {"x": col_x[c], "y": y, "w": nw, "h": hn,
+                                         "cx": col_x[c] + nw / 2.0, "cy": y + hn / 2.0,
                                          "col": c, "bcol": c % maxcols, "band": b,
                                          "type": n.get("type", "process")}
                         y += hn + base_rg
         else:
             col_hs = {}
             for c in bcols:
-                hs = [_node_h(n) for n in cols[c]]
+                hs = [_node_h(n, nw) for n in cols[c]]
                 col_hs[c] = sum(hs) + max(len(hs) - 1, 0) * rowgap
             band_h = max(col_hs.values(), default=60.0)
             for c in bcols:
                 # 每一列在带内垂直居中，消除相邻不同高度节点间的小锯齿折角
                 y = yb + (band_h - col_hs[c]) / 2.0
                 for n in cols[c]:
-                    hn = _node_h(n)
-                    geom[n["id"]] = {"x": col_x[c], "y": y, "w": NODE_W, "h": hn,
-                                     "cx": col_x[c] + NODE_W / 2.0, "cy": y + hn / 2.0,
+                    hn = _node_h(n, nw)
+                    geom[n["id"]] = {"x": col_x[c], "y": y, "w": nw, "h": hn,
+                                     "cx": col_x[c] + nw / 2.0, "cy": y + hn / 2.0,
                                      "col": c, "bcol": c % maxcols, "band": b,
                                      "type": n.get("type", "process")}
                     y += hn + rowgap
@@ -380,7 +423,7 @@ def place_nodes(sird, maxcols=None):
         node_prims.append(scene.R(gg["x"], gg["y"], gg["w"], gg["h"], fill=st[0], stroke=st[1],
                                   sw=1.6, rx=rx_v, layer="nodes", **meta))
         icon = glyphs.draw(n, gg["x"] + 9, gg["cy"] - 13) if not pill else None
-        tw = _text_w(n)
+        tw = _text_w(n, nw)
         if icon:
             node_prims += icon[1]
             tx_x = gg["x"] + 48.0

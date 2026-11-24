@@ -582,14 +582,17 @@ def _apply_op(root, op):
         else:
             targets = list(root.iter())
         hits = 0
+        _css_col_pat = re.compile(r"#[0-9a-fA-F]{6}\b|#[0-9a-fA-F]{3}\b|rgb\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)", re.I)
         for e in targets:
             if _tag(e) == "style" and e.text and not scope_id:
-                txt = e.text
-                for k_old, v_new in cmap.items():
-                    pat = re.compile(re.escape(k_old), re.I)
-                    txt, n_sub = pat.subn(v_new, txt)
-                    hits += n_sub
-                e.text = txt
+                def _sub_css(m):
+                    nonlocal hits
+                    nk = _norm_hex_color(m.group(0))
+                    if nk in cmap:
+                        hits += 1
+                        return cmap[nk]
+                    return m.group(0)
+                e.text = _css_col_pat.sub(_sub_css, e.text)
                 continue
             for ak in props:
                 cur = e.get(ak)
@@ -630,7 +633,7 @@ def _apply_op(root, op):
         if not removed:
             raise LookupError("remove 未找到可删除元素 id/data-id=%s" % tid)
         return {"action": "remove", "target_id": tid, "removed": removed, "reason": reason}
-    raise ValueError("未知操作 action=%r（支持 set-text/set-attr/translate/add-text/add-rect/add-arrow/pad-canvas/remove）" % (act,))
+    raise ValueError("未知操作 action=%r（支持 set-text/set-attr/translate/add-text/add-rect/add-arrow/pad-canvas/replace-color/remove）" % (act,))
 
 
 def _append_log(log_path, records):
@@ -739,10 +742,13 @@ def _write_result_skel(a, dst, records, exp, diff_rep, raw_spec=None):
         return
     raw_spec = raw_spec if isinstance(raw_spec, dict) else {}
     contract = {}
+    cid_eff = getattr(a, "case_id", None)
     if getattr(a, "contract", None) and Path(a.contract).exists():
         try:
             import audit_delivery as auditmod
             cj = json.loads(Path(a.contract).read_text(encoding="utf-8"))
+            if not cid_eff and cj.get("case_id"):
+                cid_eff = str(cj["case_id"])
             keys = auditmod._extract_contract_keys(cj)
             stem = Path(dst).stem
             for k in keys:
@@ -756,7 +762,7 @@ def _write_result_skel(a, dst, records, exp, diff_rep, raw_spec=None):
                 elif kl in ("status", "run_status"):
                     contract[k] = "ok"
                 elif kl in ("case_id", "id"):
-                    contract[k] = a.case_id or "CASE_ID"
+                    contract[k] = cid_eff or "CASE_ID"
                 elif kl in ("change_log", "edit_log", "change_records"):
                     contract[k] = records
                 elif kl in ("diff", "diff_report", "svg_diff"):
@@ -766,7 +772,7 @@ def _write_result_skel(a, dst, records, exp, diff_rep, raw_spec=None):
         except Exception:
             pass
     sk = {
-        "case_id": getattr(a, "case_id", None) or "CASE_ID",
+        "case_id": cid_eff or "CASE_ID",
         "status": "ok" if not any("error" in v for v in exp.values()) else "partial",
         "deliverables": {
             "editable_source": {"path": Path(dst).name, "format": "svg", "source_svg": str(a.svg)},
@@ -782,12 +788,29 @@ def _write_result_skel(a, dst, records, exp, diff_rep, raw_spec=None):
     for k, v in contract.items():
         if k not in sk:
             sk[k] = v
-    if isinstance(raw_spec.get("result_fields"), dict):
-        for k, v in raw_spec["result_fields"].items():
-            sk[k] = v
+    explicit_rf = raw_spec.get("result_fields") if isinstance(raw_spec.get("result_fields"), dict) else {}
+    for k, v in explicit_rf.items():
+        sk[k] = v
+        if k in contract:
+            contract[k] = v
     p = Path(dst_res)
+    if p.exists():
+        try:
+            old_res = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(old_res, dict):
+                old_oc = old_res.get("output_contract") if isinstance(old_res.get("output_contract"), dict) else {}
+                for k, v in list(contract.items()):
+                    if k not in explicit_rf and isinstance(v, str) and "<待填" in v:
+                        prev = old_oc.get(k) if k in old_oc else old_res.get(k)
+                        if prev not in (None, "") and not (isinstance(prev, str) and "<待填" in prev):
+                            contract[k] = prev
+                            sk[k] = prev
+        except Exception:
+            pass
+    unfilled = [k for k, v in contract.items() if isinstance(v, str) and "<待填" in v]
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(sk, ensure_ascii=False, indent=1), encoding="utf-8")
+    return unfilled
 
 
 def cmd_info(a):
@@ -795,13 +818,27 @@ def cmd_info(a):
     root = t.getroot()
     pmap = _parent_map(root)
     tmap = _abs_transform_map(root)
-    counts, layers, texts, boxes, shapes = {}, [], [], [], []
+    counts, layers, texts, boxes, shapes, color_cnt = {}, [], [], [], [], {}
     has_style_tag = False
+    _col_scan = re.compile(r"#[0-9a-fA-F]{6}\b|#[0-9a-fA-F]{3}\b|rgb\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)", re.I)
     for e in root.iter():
         tg = _tag(e)
         counts[tg] = counts.get(tg, 0) + 1
         if tg == "style":
             has_style_tag = True
+            if e.text:
+                for cm in _col_scan.findall(e.text):
+                    nc = _norm_hex_color(cm)
+                    color_cnt[nc] = color_cnt.get(nc, 0) + 1
+        for ak in ("fill", "stroke", "stop-color"):
+            av = e.get(ak)
+            if av and (av.startswith("#") or av.lower().startswith("rgb(")):
+                nc = _norm_hex_color(av)
+                color_cnt[nc] = color_cnt.get(nc, 0) + 1
+        if e.get("style"):
+            for cm in _col_scan.findall(e.get("style") or ""):
+                nc = _norm_hex_color(cm)
+                color_cnt[nc] = color_cnt.get(nc, 0) + 1
         if tg == "g":
             gid = _elem_id(e)
             if gid:
@@ -861,6 +898,7 @@ def cmd_info(a):
         "viewBox": root.get("viewBox"),
         "has_css_style_tag": has_style_tag,
         "counts": {k: counts.get(k, 0) for k in ("g", "rect", "path", "polyline", "line", "circle", "ellipse", "text")},
+        "colors_top": [{"color": c, "count": n} for c, n in sorted(color_cnt.items(), key=lambda kv: -kv[1])[:12]],
         "groups": layers[:32],
         "rect_boxes": boxes,
         "shapes": shapes,
@@ -951,7 +989,9 @@ def _run_single_op(a, op):
     if diff_rep:
         rec["diff"] = diff_rep
     _append_log(a.log, rec)
-    _write_result_skel(a, dst, [rec], exp, diff_rep)
+    unfilled = _write_result_skel(a, dst, [rec], exp, diff_rep)
+    if unfilled is not None:
+        rec["unfilled_contract_fields"] = unfilled
     if getattr(a, "result_out", None):
         import audit_delivery as auditmod
         rec["audit"] = auditmod.audit(Path(a.result_out).parent, getattr(a, "contract", None))
@@ -985,9 +1025,11 @@ def cmd_batch(a):
     exp = _export_if_needed(dst, a)
     diff_rep = _write_diff(a.svg, dst) if Path(a.svg).resolve() != Path(dst).resolve() else {}
     _append_log(a.log, recs)
-    _write_result_skel(a, dst, recs, exp, diff_rep, raw_spec=raw if isinstance(raw, dict) else None)
+    unfilled = _write_result_skel(a, dst, recs, exp, diff_rep, raw_spec=raw if isinstance(raw, dict) else None)
     out = {"ok": True, "source_svg": str(a.svg), "output_svg": str(dst),
            "ops_applied": len(recs), "exports": exp, "diff": diff_rep, "records": recs}
+    if unfilled is not None:
+        out["unfilled_contract_fields"] = unfilled
     if getattr(a, "result_out", None):
         import audit_delivery as auditmod
         out["audit"] = auditmod.audit(Path(a.result_out).parent, getattr(a, "contract", None))

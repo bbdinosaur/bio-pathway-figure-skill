@@ -63,7 +63,8 @@ def run(sc, sird):
                     break
             own = (p.get("meta") or {}).get("edge")
             for eid, vx, vy0, vy1 in vsegs:
-                if eid != own and tb[0] + 2 < vx < tb[2] - 2 and tb[1] < vy1 - 2 and vy0 + 2 < tb[3]:
+                pad_x = 5.0 if eid == own else 2.0
+                if tb[0] + pad_x < vx < tb[2] - pad_x and tb[1] < vy1 - 2 and vy0 + 2 < tb[3]:
                     warns.append("边标签被连线 %s 穿过: %r" % (eid, p["s"][:18]))
                     break
     for p in prims:

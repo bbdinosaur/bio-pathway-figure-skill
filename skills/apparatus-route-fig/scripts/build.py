@@ -81,23 +81,39 @@ def _legend_prims(sird, parts, used_nt, used_lk, W, y0, groups=None, lang="zh"):
 
 
 def inset_panels(sird, parts, lang="zh"):
-    """局部放大：node.zoom=[细目行] → 底部右侧绘制放大面板 + 引线，返回额外图元。"""
+    """局部放大：node.zoom=[细目行] → 底部绘制放大面板 + 引线（多放大面板宽画布自动并排），返回额外图元。"""
     W = parts["W"]
-    y0 = max(parts["bottom"], max(parts.get("bus_ys") or [0]) + 16.0) + 16.0
-    prims, new_bottom = [], y0
-    pw = min(330.0, max(240.0, W - 120.0))
-    for n in sird.get("nodes") or []:
+    y_row = max(parts["bottom"], max(parts.get("bus_ys") or [0]) + 16.0) + 16.0
+    prims, new_bottom = [], y_row
+    z_nodes = [n for n in (sird.get("nodes") or [])
+               if isinstance(n.get("zoom"), list) and n.get("zoom") and (parts.get("geom") or {}).get(n["id"])]
+    if not z_nodes:
+        return prims
+    can_side = len(z_nodes) >= 2 and (W - 64.0) >= 560.0
+    pw = min(330.0, max(240.0, (W - 68.0) / 2.0)) if can_side else min(330.0, max(240.0, W - 120.0))
+    if can_side:
+        y_row += 18.0
+    row_max_h = 0.0
+    for zi, n in enumerate(z_nodes):
         items = n.get("zoom")
-        if not items or not isinstance(items, list):
-            continue
         g = (parts.get("geom") or {}).get(n["id"])
-        if not g:
-            continue
         lines = []
         for it in items:
             lines += sirmod.wrap_text("• " + str(it), 11, pw - 26)
         ph = 30 + len(lines) * 15 + 10
-        x0 = W - pw - 24.0
+        if can_side:
+            col_i = zi % 2
+            if col_i == 0 and zi > 0:
+                y_row += row_max_h + 24.0
+                row_max_h = 0.0
+            x0 = (W - 2 * pw - 20.0 - 24.0) + col_i * (pw + 20.0)
+            x0 = max(24.0, x0)
+            y0 = y_row
+            row_max_h = max(row_max_h, ph)
+        else:
+            x0 = W - pw - 24.0
+            y0 = y_row
+            y_row += ph + 14.0
         src = n.get("source") or {}
         prefix = "Zoom-in: " if lang == "en" else "局部放大："
         meta = {"tag": "node", "id": n["id"] + "_inset"}
@@ -119,14 +135,28 @@ def inset_panels(sird, parts, lang="zh"):
         gi = _gl.draw(n, x0 + pw - 42, y0 + 6, 30, 22)
         if gi:
             prims += gi[1]
-        # 引线若同列下方有节点则从右侧外廊绕下，避免穿透下方节点盒
+        # 引线若同列下方有节点则从右侧外廊绕下；并排多放大面板统一从面板顶边汇入，绝不横穿相邻放大框
         geom = parts.get("geom") or {}
         blocked_below = any(
             oid != n["id"] and og["col"] == g["col"] and og["band"] == g["band"] and og["y"] >= g["y"] + g["h"] - 2
             for oid, og in geom.items()
         )
         ax_ = g["cx"]
-        if blocked_below:
+        if can_side:
+            turn_y = y0 - 10.0 - 6.0 * (zi % 2)
+            tx_top = x0 + pw * (0.35 if (zi % 2 == 0) else 0.50)
+            if blocked_below:
+                sx = min(W - 18.0, g["x"] + g["w"] + 18.0)
+                prims.append(scene.LN([(g["x"] + g["w"], g["cy"]), (sx, g["cy"]),
+                                       (sx, turn_y), (tx_top, turn_y), (tx_top, y0)],
+                                      stroke="#718096", sw=1.2, dash="3,3", marker="arrow",
+                                      layer="links", tag="leader"))
+            else:
+                prims.append(scene.LN([(ax_, g["y"] + g["h"]), (ax_, turn_y),
+                                       (tx_top, turn_y), (tx_top, y0)],
+                                      stroke="#718096", sw=1.2, dash="3,3", marker="arrow",
+                                      layer="links", tag="leader"))
+        elif blocked_below:
             sx = min(W - 18.0, g["x"] + g["w"] + 18.0)
             if sx < x0 - 8:
                 prims.append(scene.LN([(g["x"] + g["w"], g["cy"]), (sx, g["cy"]),
@@ -146,8 +176,7 @@ def inset_panels(sird, parts, lang="zh"):
             prims.append(scene.LN([(ax_, g["y"] + g["h"]), (ax_, y0)],
                                   stroke="#718096", sw=1.2, dash="3,3", marker="arrow",
                                   layer="links", tag="leader"))
-        y0 = y0 + ph + 14
-        new_bottom = y0
+        new_bottom = max(new_bottom, y0 + ph + 14.0)
     parts["bottom"] = max(parts["bottom"], new_bottom)
     return prims
 
@@ -250,9 +279,9 @@ def _nudge_labels(labels, node_prims, W=2000.0, H=1200.0, edge_prims=None):
             tb = _sc.bbox(t)
             own = (t.get("meta") or {}).get("edge")
             for eid, vx, vy0, vy1 in vsegs:
-                if eid == own:
-                    continue
-                if tb[0] - 2 < vx < tb[2] + 2 and tb[1] < vy1 - 2 and vy0 + 2 < tb[3]:
+                # 同时避免跨过其他边以及自身垂直折线段中心，杜绝文字压在红/蓝竖线上
+                pad_x = 3.0 if eid == own else -2.0
+                if tb[0] + pad_x < vx < tb[2] - pad_x and tb[1] < vy1 - 2 and vy0 + 2 < tb[3]:
                     # 优先水平避让；若窄缝内水平移不动则垂直翻到连线另一侧避开垂线端点
                     shift_l = (vx - 6.0) - tb[2]
                     shift_r = (vx + 6.0) - tb[0]
@@ -270,7 +299,7 @@ def _nudge_labels(labels, node_prims, W=2000.0, H=1200.0, edge_prims=None):
                         for dy in (22.0, -22.0, 26.0, -26.0):
                             nb = (tb[0], tb[1] + dy, tb[2], tb[3] + dy)
                             hit_node = any(nb[0] < rb[2] and rb[0] < nb[2] and nb[1] < rb[3] and rb[1] < nb[3] for rb in rects)
-                            hit_v = any(e2 != own and nb[0] - 2 < vx2 < nb[2] + 2 and nb[1] < vy1_2 - 2 and vy0_2 + 2 < nb[3]
+                            hit_v = any(nb[0] + (3.0 if e2 == own else -2.0) < vx2 < nb[2] - (3.0 if e2 == own else -2.0) and nb[1] < vy1_2 - 2 and vy0_2 + 2 < nb[3]
                                         for e2, vx2, vy0_2, vy1_2 in vsegs)
                             if not hit_node and not hit_v and nb[1] >= 22.0 and nb[3] <= H - 10.0:
                                 t["y"] += dy

@@ -158,20 +158,34 @@ def parse_val_err(v):
     return a, b, bool(m.group(3))
 
 
+_SUP_MAP = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻", "0123456789+-")
+_SCI_PAT = re.compile(
+    r"^\s*([+-]?\d+(?:\.\d+)?)\s*(?:[×xX\*]|·)\s*10\s*\^?\s*([+-]?\d+)\s*$"
+)
+_POW10_PAT = re.compile(r"^\s*10\s*\^?\s*([+-]?\d+)\s*$")
+
+
 def parse_num(v):
-    """宽容解析科研数值（支持 Unicode 负号 −/–、千分位逗号、尾随%），缺失/非法返回 (None, False)。"""
+    """宽容解析科研数值（支持 Unicode 负号 −/–、科学计数 3.4×10⁻⁴ / 10^-5、千分位逗号、尾随%），缺失/非法返回 (None, False)。"""
     if is_missing(v):
         return None, False
     if isinstance(v, (int, float)) and not isinstance(v, bool):
         fv = float(v)
         return (None, False) if (math.isnan(fv) or math.isinf(fv)) else (fv, False)
-    s = _norm_num_str(v)
+    s = _norm_num_str(v).translate(_SUP_MAP)
     pct = False
     if s.endswith("%") and len(s) > 1:
         s = s[:-1].strip()
         pct = True
     if "," in s and re.match(r"^[+-]?\d{1,3}(,\d{3})+(\.\d+)?$", s):
         s = s.replace(",", "")
+    m_sci = _SCI_PAT.match(s)
+    if m_sci:
+        s = "%se%s" % (m_sci.group(1), m_sci.group(2))
+    else:
+        m_p10 = _POW10_PAT.match(s)
+        if m_p10:
+            s = "1e%s" % m_p10.group(1)
     try:
         fv = float(s)
         if math.isnan(fv) or math.isinf(fv):
@@ -179,6 +193,26 @@ def parse_num(v):
         return fv, pct
     except Exception:
         return None, False
+
+
+def resolve_col(columns, wanted, allow_none=False):
+    """容错解析源表列名：精确匹配 → 去空白大小写匹配 → 唯一字母数字归一化匹配；缺失时抛出含真实列名清单的 ValueError。"""
+    if wanted is None or str(wanted).strip() == "":
+        return None if allow_none else ""
+    w = str(wanted)
+    cols = [str(c) for c in (columns or [])]
+    if w in cols:
+        return w
+    ws = w.strip().lower()
+    ci = [c for c in cols if c.strip().lower() == ws]
+    if len(ci) == 1:
+        return ci[0]
+    wn = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", ws)
+    if wn:
+        nm = [c for c in cols if re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", c.strip().lower()) == wn]
+        if len(nm) == 1:
+            return nm[0]
+    raise ValueError("源表不存在列 %r，可用列: %s" % (wanted, cols))
 
 
 _FOOTNOTE_PREFIXES = ("note", "notes", "source", "注", "说明", "备注", "*", "†", "‡", "#")

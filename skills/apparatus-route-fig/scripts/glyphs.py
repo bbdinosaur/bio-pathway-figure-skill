@@ -5,6 +5,7 @@
 全部为几何近似造型（线/矩形/椭圆），svgfig 与 mirror 双端一致渲染。
 """
 import math
+import re
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -269,21 +270,47 @@ def _g_spectrum(x, y, w, h):
     ]
 
 
+def _g_chip(x, y, w, h):
+    """微流控芯片/液滴分选器件图元。"""
+    c = "#334E68"
+    cy = y + h / 2.0
+    return [
+        scene.R(x + 2, y + 3, w - 4, h - 6, fill="#FFFFFF", stroke=c, sw=1.3, rx=3, layer="nodes", tag="glyph"),
+        scene.LN([(x + 5, cy - 4), (x + w * 0.45, cy), (x + 5, cy + 4)], stroke="#2B6CB0", sw=1.2, marker="none", layer="nodes", tag="glyph"),
+        scene.LN([(x + w * 0.45, cy), (x + w - 5, cy)], stroke="#2B6CB0", sw=1.4, marker="none", layer="nodes", tag="glyph"),
+        scene.EL(x + w * 0.70, cy, 2.3, 2.3, fill="#2B6CB0", stroke=c, sw=0.7, layer="nodes", tag="glyph"),
+    ]
+
+
+def _g_optics(x, y, w, h):
+    """光学分束立方/二向色镜/棱镜图元。"""
+    c = "#2B6CB0"
+    x0, y0, x1, y1 = x + 6, y + 3, x + w - 6, y + h - 3
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    return [
+        scene.R(x0, y0, x1 - x0, y1 - y0, fill="#FFFFFF", stroke=c, sw=1.2, rx=1.5, layer="nodes", tag="glyph"),
+        scene.LN([(x0 + 1.5, y1 - 1.5), (x1 - 1.5, y0 + 1.5)], stroke="#C05621", sw=1.4, marker="none", layer="nodes", tag="glyph"),
+        scene.LN([(x + 1, cy), (cx, cy), (cx, y + h - 1)], stroke="#D69E2E", sw=1.1, marker="none", layer="nodes", tag="glyph"),
+    ]
+
+
 # 显式 icon 键 + 中英文关键词匹配表（按优先级排列）
 GLYPH_RULES = [
     (("显微", "荧光", "成像", "microscop", "confocal", "fluorescen", "imaging"), _g_microscope),
+    (("分光", "二向色", "棱镜", "透镜", "反射镜", "光路", "dichroic", "beam splitter", "beam_splitter", "beamsplitter", "prism", "lens", "mirror", "optic"), _g_optics),
+    (("微流控", "芯片", "microfluid", "chip", "droplet", "sorter"), _g_chip),
     (("病毒", "脂质体", "纳米粒", "囊泡", "virus", "viral", "aav", "lenti", "lnp", "liposome", "nanoparticle", "exosome"), _g_virus),
     (("质谱", "光谱", "核磁", "拉曼", "lc-ms", "ms/ms", "mass spec", "nmr", "raman", "ftir", "xrd", "spectrum", "spectroscop"), _g_spectrum),
     (("抗体", "蛋白", "受体", "配体", "antibod", "protein", "receptor", "ligand", "immuno", "igg", "kinase", "enzyme"), _g_antibody),
     (("基因", "质粒", "crispr", "dna", "plasmid", "gene", "genome", "vector", "knockout", "editing"), _g_dna),
     (("孔板", "微孔", "高通量", "96-well", "384-well", "well plate", "microplate", "array", "screen"), _g_wellplate),
-    (("小鼠", "大鼠", "动物", "体内", "队列", "患者", "mouse", "mice", "rat", "animal", "in vivo", "cohort", "patient", "xenograft"), _g_organism),
+    (("小鼠", "大鼠", "动物", "体内", "队列", "患者", "mouse", "mice", "rat", "rats", "animal", "in vivo", "cohort", "patient", "xenograft"), _g_organism),
     (("测序", "pcr", "rna", "sequenc", "gel", "blot", "elisa", "facs", "cytom", "qpcr", "电泳"), _g_seq),
     (("离心", "centrifug", "spin", "pellet"), _g_centrifuge),
     (("细胞", "培养", "组织", "样本", "菌", "类器官", "cell", "culture", "plate", "dish", "tissue", "sample", "organoid", "bio"), _g_cell),
     (("移液", "加样", "pipet", "dispens"), _g_pipette),
     (("泵", "pump", "syringe"), _g_pump),
-    (("阀", "valve", "bpr", "regulator"), _g_valve),
+    (("阀", "valve", "bpr", "pressure regulator", "flow regulator"), _g_valve),
     (("混合", "mixer", "mix", "vortex"), _g_mix),
     (("盘管", "coil"), _g_coil),
     (("光", "laser", "led", "lamp", "photo"), _g_light),
@@ -298,22 +325,39 @@ GLYPH_RULES = [
 ]
 
 GLYPHS = {k: fn for keys, fn in GLYPH_RULES for k in keys}
+# 易在英文长词中误命中的短 ASCII 词强制词边界匹配（如 rat 不应命中 administration/rate，led 不应命中 labeled）
+_WORD_BOUNDARY_KEYS = {
+    "rat", "rats", "led", "uv", "gel", "mix", "aav", "lnp", "nmr", "xrd", "igg", "bpr", "plc",
+    "bio", "dna", "rna", "pcr", "spin", "dish", "bath", "oven", "vial", "tube", "tank", "chip",
+}
+
+
+def _kw_hit(k, text):
+    if k in _WORD_BOUNDARY_KEYS:
+        return bool(re.search(r"(?<![a-z0-9])" + re.escape(k) + r"(?![a-z0-9])", text))
+    return k in text
 
 
 def match(node):
-    """返回 (关键词, 绘制函数) 或 None。优先显式 node['icon']，否则扫 label+attrs 键（不区分大小写）。"""
+    """返回 (关键词, 绘制函数) 或 None。优先显式 node['icon']，否则先扫 label 再扫 attrs 键（短词启用词边界防误判）。"""
     kw = str(node.get("icon") or "").strip().lower()
     if kw == "none":
         return None
     if kw:
         for keys, fn in GLYPH_RULES:
-            if kw in keys or any(k in kw for k in keys):
+            if kw in keys or any(_kw_hit(k, kw) for k in keys):
                 return kw, fn
-    text = (str(node.get("label") or "") + " " + " ".join(str(k) for k in (node.get("attrs") or {}).keys())).lower()
+    lbl_text = str(node.get("label") or "").lower()
     for keys, fn in GLYPH_RULES:
         for k in keys:
-            if k in text:
+            if _kw_hit(k, lbl_text):
                 return k, fn
+    attr_text = " ".join(str(k) for k in (node.get("attrs") or {}).keys()).lower()
+    if attr_text:
+        for keys, fn in GLYPH_RULES:
+            for k in keys:
+                if _kw_hit(k, attr_text):
+                    return k, fn
     return None
 
 

@@ -264,9 +264,20 @@ def route_edges(sird, g):
                 gap_w = b["x"] - (a["x"] + a["w"])
                 chx = a["x"] + a["w"] + max(24.0, gap_w * (0.56 + 0.10 * ((k % 3) - 1)))
                 pts = [(a["x"] + a["w"], uyc), (chx, uyc), (chx, vyc), (b["x"], vyc)]
-                # 多输入汇入同一目标 → 标签放源出线段；单源分叉多目标 → 标签贴目标进线段右对齐（若有垂直跨列通道则自动左退避让）
+                lab_s = str(e.get("label") or "").strip()
+                est_lw = sirmod.est_w(lab_s, 11.2) if lab_s else 0.0
+                left_leg = chx - (a["x"] + a["w"])
+                right_leg = b["x"] - chx
                 dy_lbl = 14.0 if (pk % 2 == 1 or (uyc > vyc and in_deg.get(e["to"], 0) > 1)) else -8.0
-                if in_deg.get(e["to"], 0) > 1 and out_deg.get(e["from"], 0) == 1:
+                if est_lw > 0 and est_lw + 10.0 > max(left_leg, right_leg) and abs(uyc - vyc) >= 34.0:
+                    # 跨行弯折边标签长于单侧水平段时，紧贴垂直段中点外侧放置，避免横穿自身垂线或分组框线
+                    if left_leg >= right_leg:
+                        lxy = (chx - 6.0, (uyc + vyc) / 2.0 + 3.5)
+                        lbl_anchor = "end"
+                    else:
+                        lxy = (chx + 6.0, (uyc + vyc) / 2.0 + 3.5)
+                        lbl_anchor = "start"
+                elif in_deg.get(e["to"], 0) > 1 and out_deg.get(e["from"], 0) == 1:
                     lxy = (a["x"] + a["w"] + 6.0, uyc + dy_lbl)
                     lbl_anchor = "start"
                 else:
