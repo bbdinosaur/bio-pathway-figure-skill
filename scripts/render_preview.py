@@ -45,19 +45,158 @@ def _inline_css_for_mupdf(svg_text: str) -> str:
         return tag[:idx] + f' style="{css_inline}"' + tag[idx:]
     return re.sub(r'<(?:\w+:)?(?:rect|circle|ellipse|path|polygon|polyline|line|text|tspan|g)\b[^>]*\bclass=["\'][^"\']+["\'][^>]*/?>', _apply_cls, svg_text)
 
+_SVG_UNIT_TO_PX = {
+    "": 1.0,
+    "px": 1.0,
+    "in": 96.0,
+    "cm": 96.0 / 2.54,
+    "mm": 96.0 / 25.4,
+    "pt": 96.0 / 72.0,
+    "pc": 96.0 / 6.0,
+    "q": 96.0 / 101.6,
+}
+
+_ROOT_SVG_RE = re.compile(r'<(?:\w+:)?svg\b((?:"[^"]*"|\'[^\']*\'|[^>\'"])*)>', re.S | re.I)
+_SVG_LEN_RE = re.compile(r'^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*([a-zA-Z%]*)$')
+
+def _extract_root_svg_attrs(svg_txt: str) -> str:
+    """Return attribute text of ONLY the root <svg ...> opening tag (ignoring comments & inner elements)."""
+    cleaned = re.sub(r"<!--.*?-->", "", svg_txt or "", flags=re.S)
+    m = _ROOT_SVG_RE.search(cleaned)
+    return m.group(1) if m else ""
+
+def _parse_svg_attr(tag_attrs: str, name: str):
+    """Extract an attribute value (single or double quoted) from a single tag's attribute string."""
+    if not tag_attrs:
+        return None
+    m = re.search(r'(?:^|[\s/])' + re.escape(name) + r'\s*=\s*(["\'])([^"\']*)\1', tag_attrs, re.I)
+    return m.group(2) if m else None
+
+def _parse_svg_length_px(val) -> float | None:
+    """Convert an SVG absolute CSS length to CSS px (96 px/in). Returns None for '%' or relative/invalid values."""
+    if val is None:
+        return None
+    m = _SVG_LEN_RE.match(str(val).strip())
+    if not m:
+        return None
+    try:
+        num = float(m.group(1))
+    except ValueError:
+        return None
+    if num <= 0.0:
+        return None
+    unit = m.group(2).lower()
+    if unit == "%" or unit not in _SVG_UNIT_TO_PX:
+        return None
+    return num * _SVG_UNIT_TO_PX[unit]
+
+def _parse_svg_viewbox(tag_attrs: str):
+    """Parse root <svg> viewBox into (min_x, min_y, width, height) floats, or None."""
+    vb = _parse_svg_attr(tag_attrs, "viewBox")
+    if not vb:
+        return None
+    parts = [p for p in re.split(r"[\s,]+", vb.strip()) if p]
+    if len(parts) < 4:
+        return None
+    try:
+        x0, y0, vw, vh = (float(parts[i]) for i in range(4))
+    except ValueError:
+        return None
+    if vw <= 0.0 or vh <= 0.0:
+        return None
+    return (x0, y0, vw, vh)
+
+def parse_svg_dimensions(svg_txt: str) -> dict:
+    """Parse root <svg> CSS size (px at 96 dpi) and viewBox user-space coordinates.
+
+    Strictly inspects ONLY the root <svg ...> opening tag so inner <rect>/<symbol>
+    attributes never pollute canvas size or DPI calculations. Supports single/double
+    quotes and CSS units (px, pt, pc, mm, cm, in, Q); '%' falls back to viewBox.
+    """
+    tag_attrs = _extract_root_svg_attrs(svg_txt)
+    vb = _parse_svg_viewbox(tag_attrs)
+    w_raw = _parse_svg_attr(tag_attrs, "width")
+    h_raw = _parse_svg_attr(tag_attrs, "height")
+    w_px = _parse_svg_length_px(w_raw)
+    h_px = _parse_svg_length_px(h_raw)
+    vb_w = vb[2] if vb else None
+    vb_h = vb[3] if vb else None
+
+    if w_px is not None and h_px is not None:
+        css_w, css_h = w_px, h_px
+    elif w_px is not None:
+        css_w = w_px
+        css_h = (w_px * vb_h / vb_w) if (vb_w and vb_h) else (vb_h or 0.0)
+    elif h_px is not None:
+        css_h = h_px
+        css_w = (h_px * vb_w / vb_h) if (vb_w and vb_h) else (vb_w or 0.0)
+    elif vb is not None:
+        css_w, css_h = vb_w, vb_h
+    else:
+        css_w, css_h = 0.0, 0.0
+
+    if vb is not None:
+        user_x, user_y, user_w, user_h = vb
+    else:
+        user_x, user_y = 0.0, 0.0
+        user_w = css_w if css_w > 0.0 else 1000.0
+        user_h = css_h if css_h > 0.0 else 800.0
+
+    return {
+        "css_w": float(css_w),
+        "css_h": float(css_h),
+        "user_x": float(user_x),
+        "user_y": float(user_y),
+        "user_w": float(user_w),
+        "user_h": float(user_h),
+        "viewbox": vb,
+        "width_raw": w_raw,
+        "height_raw": h_raw,
+    }
+
+def _normalize_pct_for_mupdf(svg_txt: str) -> str:
+    """In-memory only: replace root <svg> '%' width/height with resolved CSS px so MuPDF preserves aspect ratio."""
+    dims = parse_svg_dimensions(svg_txt)
+    if dims["css_w"] <= 0.0 or dims["css_h"] <= 0.0:
+        return svg_txt
+    w_pct = bool(dims["width_raw"] and "%" in str(dims["width_raw"]))
+    h_pct = bool(dims["height_raw"] and "%" in str(dims["height_raw"]))
+    if not (w_pct or h_pct):
+        return svg_txt
+    def _fix_root(m):
+        attrs = m.group(1)
+        if w_pct:
+            attrs = re.sub(
+                r'((?:^|[\s/])width\s*=\s*)(["\'])[^"\']*%\s*\2',
+                lambda am: f'{am.group(1)}"{dims["css_w"]:.2f}"',
+                attrs, count=1, flags=re.I,
+            )
+        if h_pct:
+            attrs = re.sub(
+                r'((?:^|[\s/])height\s*=\s*)(["\'])[^"\']*%\s*\2',
+                lambda am: f'{am.group(1)}"{dims["css_h"]:.2f}"',
+                attrs, count=1, flags=re.I,
+            )
+        return m.group(0)[:m.start(1) - m.start(0)] + attrs + m.group(0)[m.end(1) - m.start(0):]
+    for m in re.finditer(r'<!--.*?-->|' + _ROOT_SVG_RE.pattern, svg_txt, re.S | re.I):
+        if m.group(0).startswith("<!--"):
+            continue
+        return svg_txt[:m.start()] + _fix_root(m) + svg_txt[m.end():]
+    return svg_txt
+
 def _stamp_png_dpi(svg_txt: str, png_path: Path):
-    """Set truthful physical pHYs DPI metadata on rasterized SVG PNGs (width_px / (svg_w / 96))."""
+    """Set truthful physical pHYs DPI metadata on rasterized SVG PNGs (width_px / (svg_css_w / 96))."""
     try:
         from PIL import Image
-        wm = re.search(r'\bwidth=["\']([0-9.]+)', svg_txt)
-        vb = re.search(r'\bviewBox=["\']\s*[0-9.-]+[\s,]+[0-9.-]+[\s,]+([0-9.]+)', svg_txt)
-        svg_w = float(wm.group(1)) if wm else (float(vb.group(1)) if vb else 0.0)
+        dims = parse_svg_dimensions(svg_txt)
+        svg_w = dims["css_w"]
         if svg_w <= 10.0:
             return
         with Image.open(png_path) as im:
+            im.load()
             pw = im.size[0]
             dpi_val = int(round(pw / (svg_w / 96.0)))
-            if 72 <= dpi_val <= 600:
+            if 72 <= dpi_val <= 1200:
                 cur = im.info.get("dpi")
                 if not cur or abs(float(cur[0]) - dpi_val) > 5:
                     im.save(png_path, dpi=(dpi_val, dpi_val))
@@ -93,9 +232,11 @@ def render(svg, png, width):
     for mod in ("pymupdf", "fitz"):
         try:
             m = __import__(mod)
+            prep = _normalize_pct_for_mupdf(svg_txt)
             if has_css:
-                inlined = _inline_css_for_mupdf(svg_txt)
-                doc = m.open(stream=inlined.encode("utf-8"), filetype="svg")
+                prep = _inline_css_for_mupdf(prep)
+            if prep != svg_txt:
+                doc = m.open(stream=prep.encode("utf-8"), filetype="svg")
             else:
                 doc = m.open(str(svg_p))
             pdf_bytes = doc.convert_to_pdf()
@@ -153,9 +294,11 @@ def render_pdf(svg, pdf):
     for mod in ("pymupdf", "fitz"):
         try:
             m = __import__(mod)
+            prep = _normalize_pct_for_mupdf(svg_txt)
             if has_css:
-                inlined = _inline_css_for_mupdf(svg_txt)
-                doc = m.open(stream=inlined.encode("utf-8"), filetype="svg")
+                prep = _inline_css_for_mupdf(prep)
+            if prep != svg_txt:
+                doc = m.open(stream=prep.encode("utf-8"), filetype="svg")
             else:
                 doc = m.open(str(svg_p))
             pdf_bytes = doc.convert_to_pdf()

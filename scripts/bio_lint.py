@@ -178,22 +178,30 @@ def bio_audit(spec: dict) -> dict:
 
     comps = spec.get("compartments") or []
     comp_kind = {c["id"]: c.get("kind", "custom") for c in comps}
-    has_membrane = any(c.get("kind") == "membrane" for c in comps)
+    n_membranes = sum(1 for c in comps if c.get("kind") == "membrane")
+    has_membrane = n_membranes >= 1
+    is_multicell = n_membranes >= 2
 
-    # 1. Physiological compartment ordering
-    prev_rank = -1
-    prev_id = None
-    for c in comps:
-        ck = c.get("kind", "custom")
-        if ck in _COMP_RANK:
-            r = _COMP_RANK[ck]
-            if r < prev_rank:
-                issues.append({
-                    "code": "compartment_order_inverted",
-                    "detail": f"compartment '{c['id']}' ({ck}) appears after '{prev_id}' (expected exterior -> membrane -> cytosol -> organelle -> nucleus)",
-                })
-            prev_rank = r
-            prev_id = c["id"]
+    # 1. Physiological compartment ordering (exempt mirrored cell-to-cell synapse / tumor-immune diagrams with >=2 membranes)
+    if is_multicell:
+        advisories.append({
+            "code": "multicell_topology_noted",
+            "detail": f"multi-cell topology detected ({n_membranes} membrane bands); mirrored compartment ordering permitted",
+        })
+    else:
+        prev_rank = -1
+        prev_id = None
+        for c in comps:
+            ck = c.get("kind", "custom")
+            if ck in _COMP_RANK:
+                r = _COMP_RANK[ck]
+                if r < prev_rank:
+                    issues.append({
+                        "code": "compartment_order_inverted",
+                        "detail": f"compartment '{c['id']}' ({ck}) appears after '{prev_id}' (expected exterior -> membrane -> cytosol -> organelle -> nucleus)",
+                    })
+                prev_rank = r
+                prev_id = c["id"]
 
     nodes = spec.get("nodes") or []
     nmap = {}
@@ -217,14 +225,20 @@ def bio_audit(spec: dict) -> dict:
             "compartment": cid, "source": n.get("source", ""),
         })
 
-        # 2. Subcellular placement sanity (exclude known nuclear/cytosolic/endosomal receptors)
+        # 2. Subcellular placement sanity (exclude known nuclear/cytosolic/endosomal/cleaved receptors)
         _INTRA_RECEPTORS = {
-            "ESR1", "ESR2", "AR", "NR3C1", "GR", "PPARA", "PPARG", "PPARD", "VDR", "AHR",
-            "RXRA", "RXRB", "RARA", "RARB", "RORC", "RORG", "NR1H3", "NR1H4", "PGR", "THRA", "THRB",
-            "NLRP3", "NLRC4", "AIM2", "NOD1", "NOD2", "DDX58", "RIGI", "IFIH1", "MDA5", "STING1",
-            "CGAS", "TLR3", "TLR7", "TLR8", "TLR9", "ITPR1", "IP3R", "RYR1", "RYR2", "RAGE",
+            "ESR1", "ESR2", "ERA", "ERB", "ERALPHA", "ERBETA", "AR", "NR3C1", "NR3C2", "GR", "MR",
+            "PPARA", "PPARG", "PPARD", "VDR", "AHR", "RXRA", "RXRB", "RXR", "RARA", "RARB", "RAR",
+            "RORC", "RORG", "NR1H3", "NR1H4", "NR1I2", "NR1I3", "PXR", "CAR", "PGR", "THRA", "THRB",
+            "NLRP1", "NLRP3", "NLRP6", "NLRC4", "AIM2", "NOD1", "NOD2", "PYRIN", "MEFV", "IFI16",
+            "ZBP1", "DDX58", "RIGI", "IFIH1", "MDA5", "MAVS", "STING1", "CGAS", "NICD",
+            "TLR3", "TLR7", "TLR8", "TLR9", "ITPR1", "IP3R", "IP3R1", "IP3R2", "IP3R3", "RYR1", "RYR2", "RAGE",
         }
-        _intra_kw = re.search(r"\b(nuclear|cytosol|cytoplasm|intracellular|endosom|er\b|reticulum)\b", lbl, re.I)
+        _lbl_and_sub = f"{lbl} {n.get('sublabel') or ''} {n.get('alias') or ''}"
+        _intra_kw = re.search(
+            r"\b(nuclear|cytosol\w*|cytoplasm\w*|intracellular|internaliz\w*|endosom\w*|vesic\w*|er\b|reticulum|golgi|soluble|cleaved|icd|nicd|domain)\b",
+            _lbl_and_sub, re.I,
+        )
         _canon_u = (canon or _norm_key(lbl).upper())
         if kind == "receptor" and has_membrane and ckind in ("nucleus", "cytosol"):
             if _canon_u in _INTRA_RECEPTORS or _intra_kw or any(k in _norm_key(lbl).upper() for k in ("ESR", "PPAR", "NLRP", "STING", "NOD", "RIGI", "TLR3", "TLR7", "TLR8", "TLR9", "NR3C")):
@@ -269,12 +283,13 @@ def bio_audit(spec: dict) -> dict:
         lbl = str(e.get("label") or "")
         if et == "undirected" or e.get("directed") is False:
             undirected.append({"index": i, "edge": f"{u}--{v}", "label": lbl, "source": e.get("source", "")})
-        if et in ("activation", "recruitment") and _INHIB_WORDS.search(lbl):
+        _derepress = re.search(r"\b(reliev\w*|de-?repress\w*|disinhibit\w*|rescues?|anti-?)", lbl, re.I)
+        if et in ("activation", "recruitment") and _INHIB_WORDS.search(lbl) and not _derepress:
             issues.append({
                 "code": "edge_semantic_contradiction",
                 "detail": f"edge {u}->{v} has type='{et}' but label='{lbl}' implies inhibition (use type='inhibition')",
             })
-        elif et == "inhibition" and _ACTIV_WORDS.search(lbl):
+        elif et == "inhibition" and _ACTIV_WORDS.search(lbl) and not _INHIB_WORDS.search(lbl):
             issues.append({
                 "code": "edge_semantic_contradiction",
                 "detail": f"edge {u}->{v} has type='{et}' but label='{lbl}' implies activation",
@@ -439,12 +454,15 @@ def verify_legend_consistency(spec: dict, prims: list[dict], used_edges: list[st
         leg_prims = [p for p in prims if str(p.get("layer", "")) == "layer-legend"]
         ch = spec.get("chart") or {}
         kind = str(ch.get("kind") or "bar").lower()
+        rm = ch.get("_resolved_meta") or {}
         needs_leg = (kind in ("heatmap", "dotplot", "enrichment_dot", "bubble_enrichment", "stacked_bar", "stacked", "composition")
                      or bool(ch.get("items"))
                      or (kind == "volcano" and (ch.get("x_thresh") is not None or ch.get("y_thresh") is not None))
-                     or len(ch.get("series") or []) >= 2
+                     or len(ch.get("series") or []) >= 2 or int(rm.get("n_series", 0)) >= 2
                      or len({b.get("group") for b in (ch.get("bars") or []) if b.get("group")}) >= 1
-                     or len({pt.get("group") for pt in (ch.get("points") or []) if pt.get("group")}) >= 1)
+                     or bool(rm.get("has_group_bars"))
+                     or len({pt.get("group") for pt in (ch.get("points") or []) if pt.get("group")}) >= 1
+                     or bool(rm.get("has_group_points")))
         ok = (len(leg_prims) > 0) if needs_leg else True
         return {
             "mode": "chart", "chart_kind": kind,

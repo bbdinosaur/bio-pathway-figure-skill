@@ -94,13 +94,13 @@ def prim_to_svg(p):
         style = ' font-style="italic"' if p.get("italic") else ""
         rot = p.get("rotate")
         transform = f' transform="rotate({rot} {p["x"]:.1f} {p["y"]:.1f})"' if rot else ""
-        halo = (' stroke="#ffffff" stroke-width="3" paint-order="stroke" stroke-linejoin="round"'
-                if p.get("halo", True) else "")
+        # Never emit SVG2 paint-order="stroke" white text strokes: SVG 1.1 / MuPDF renderers paint
+        # stroke OVER fill and wash out small text. Edge labels already have explicit pill rects behind them.
         lines = str(p["s"]).split("\n")
         if len(lines) == 1:
             return (f'  <text x="{p["x"]:.1f}" y="{p["y"]:.1f}" font-size="{size}"'
                     f' text-anchor="{anchor}" dominant-baseline="central"{weight}{style}'
-                    f' fill="{p.get("fill", "#1e293b")}"{transform}{halo}'
+                    f' fill="{p.get("fill", "#1e293b")}"{transform}'
                     f' font-family="{esc(FONT_STACK)}"{drole}>{esc(lines[0])}</text>')
         line_h = size * 1.22
         y_start = p["y"] - line_h * (len(lines) - 1) / 2.0
@@ -110,7 +110,7 @@ def prim_to_svg(p):
         )
         return (f'  <text x="{p["x"]:.1f}" y="{p["y"]:.1f}" font-size="{size}"'
                 f' text-anchor="{anchor}" dominant-baseline="central"{weight}{style}'
-                f' fill="{p.get("fill", "#1e293b")}"{transform}{halo}'
+                f' fill="{p.get("fill", "#1e293b")}"{transform}'
                 f' font-family="{esc(FONT_STACK)}"{drole}>{tspans}</text>')
     return ""
 

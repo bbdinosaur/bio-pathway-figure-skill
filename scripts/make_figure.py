@@ -304,7 +304,9 @@ def render(spec, dpi=300, scales=None, outdir=None, basename="fig",
     return summary
 
 def content_map_draft(spec, prims=None, prefix=""):
-    """Element->source provenance draft covering mechanism, all 5 chart types, and composites."""
+    """Element->source provenance draft covering mechanism, all 9 chart types, and composites."""
+    from bio_lint import resolve_canonical
+    from viz_style import EDGE_STYLES
     cm = []
     if spec.get("mode") == "composite":
         for idx, pdef in enumerate(spec.get("panels") or []):
@@ -314,6 +316,8 @@ def content_map_draft(spec, prims=None, prefix=""):
     for n in spec.get("nodes", []):
         nkind = str(n.get("kind", "protein"))
         ncomp = str(n.get("compartment", "unspecified"))
+        lbl_s = str(n.get("label", n["id"]))
+        canon = resolve_canonical(lbl_s) or (resolve_canonical(str(n["alias"])) if n.get("alias") else None)
         rel = f"{nkind} in {ncomp}"
         if n.get("alias"):
             rel += f" (alias: {n['alias']})"
@@ -324,7 +328,7 @@ def content_map_draft(spec, prims=None, prefix=""):
         if isinstance(n.get("size_value"), (int, float)):
             rel += f"; size_value={n['size_value']}"
         entry = {
-            "element": f"{prefix}{n.get('label', n['id'])}",
+            "element": f"{prefix}{lbl_s}",
             "entity_id": str(n["id"]),
             "kind": "node",
             "symbol_style": ("italic_gene" if nkind == "gene" else f"roman_{nkind}"),
@@ -332,10 +336,14 @@ def content_map_draft(spec, prims=None, prefix=""):
             "relation": rel,
             "source": n.get("source", "unspecified — fill before shipping"),
         }
+        if canon:
+            entry["canonical_symbol"] = canon
         if n.get("alias"):
             entry["alias"] = str(n["alias"])
         if n.get("mods"):
             entry["modifications"] = [str(m) for m in n["mods"]]
+        if n.get("subunits"):
+            entry["subunits"] = [str(u) for u in n["subunits"]]
         cm.append(entry)
     for g in spec.get("groups") or []:
         cm.append({"element": f"{prefix}group:{g.get('label', g.get('id', 'module'))}",
@@ -355,9 +363,11 @@ def content_map_draft(spec, prims=None, prefix=""):
         if isinstance(e.get("weight") if e.get("weight") is not None else e.get("confidence"), (int, float)):
             wval = e.get("weight") if e.get("weight") is not None else e.get("confidence")
             rel += f"; weight={wval}"
+        est = EDGE_STYLES.get(etype, EDGE_STYLES["other"])
+        glyph = est.get("end", "arrow") + (f"({est['tag']})" if est.get("tag") else "")
         cm.append({"element": f"{prefix}{e.get('from')}->{e.get('to')}", "kind": "edge",
                    "from": str(e.get("from")), "to": str(e.get("to")),
-                   "interaction_type": etype, "evidence": evid,
+                   "interaction_type": etype, "arrow_glyph": glyph, "evidence": evid,
                    "relation": rel, "source": e.get("source", "unspecified — fill before shipping")})
     if spec.get("width_map"):
         wm = spec["width_map"]
@@ -377,32 +387,74 @@ def content_map_draft(spec, prims=None, prefix=""):
                    "source": dm.get("source") or spec.get("data_source", "unspecified — fill before shipping")})
     if spec.get("mode") == "chart":
         ch = spec.get("chart") or {}
-        dsrc = ch.get("source") or ch.get("y_note") or "unspecified — fill before shipping"
-        for b in ch.get("bars") or []:
+        ft = ch.get("from_table") if isinstance(ch.get("from_table"), dict) else {}
+        ft_src = Path(str(ft["file"])).name if ft.get("file") else None
+        dsrc = ch.get("source") or ft_src or ch.get("y_note") or "unspecified — fill before shipping"
+        bars_all = ch.get("bars") or []
+        if len(bars_all) > 40:
+            cm.append({"element": f"{prefix}bars_dataset:{len(bars_all)}_bars", "kind": "data",
+                       "relation": f"total={len(bars_all)} bars (showing first 40)", "source": dsrc})
+        for b in bars_all[:40]:
             cm.append({"element": f"{prefix}bar:{b.get('label', '')}", "kind": "data",
                        "relation": f"value={b.get('value')} err={b.get('err', 0)} group={b.get('group', '')}",
                        "source": b.get("source", dsrc)})
         for s in ch.get("series") or []:
             vals_s = s.get("y") if s.get("y") is not None else s.get("values")
+            vals_list = vals_s or []
+            if len(vals_list) > 12:
+                nums_s = [float(v) for v in vals_list if isinstance(v, (int, float))]
+                rel_s = f"n={len(vals_list)} range=[{min(nums_s):.4g}..{max(nums_s):.4g}] head={vals_list[:6]}" if nums_s else f"n={len(vals_list)} head={vals_list[:6]}"
+            else:
+                rel_s = f"n={len(vals_list)} values={vals_list}"
             cm.append({"element": f"{prefix}series:{s.get('name', '')}", "kind": "data",
-                       "relation": f"n={len(vals_s or [])} values={vals_s}",
-                       "source": s.get("source", dsrc)})
-        for pt in ch.get("points") or []:
-            if pt.get("label") or len(ch.get("points") or []) <= 15:
-                plbl = pt.get("label") or f"({pt.get('x')},{pt.get('y')})"
-                cm.append({"element": f"{prefix}point:{plbl}",
-                           "kind": "data",
-                           "relation": f"x={pt.get('x')} y={pt.get('y')} group={pt.get('group', '')}",
-                           "source": pt.get("source", dsrc)})
-        for it in ch.get("items") or []:
+                       "relation": rel_s, "source": s.get("source", dsrc)})
+        pts_all = ch.get("points") or []
+        if len(pts_all) > 25:
+            xt = abs(float(ch["x_thresh"])) if ch.get("x_thresh") is not None else 0.0
+            yt = float(ch["y_thresh"]) if ch.get("y_thresh") is not None else 0.0
+            n_up = sum(1 for pt in pts_all if isinstance(pt.get("x"), (int, float)) and isinstance(pt.get("y"), (int, float)) and pt["y"] >= yt and pt["x"] >= xt)
+            n_dn = sum(1 for pt in pts_all if isinstance(pt.get("x"), (int, float)) and isinstance(pt.get("y"), (int, float)) and pt["y"] >= yt and pt["x"] <= -xt)
+            cm.append({
+                "element": f"{prefix}{ch.get('kind', 'scatter')}_dataset:{len(pts_all)}_points",
+                "kind": "data",
+                "relation": f"n={len(pts_all)} (Up={n_up}, Down={n_dn} at |x|>={xt:g}, y>={yt:g}; top/highlighted listed below)",
+                "source": dsrc,
+            })
+            hl_set = set(str(g) for g in (ch.get("highlight_labels") or ch.get("highlight_genes") or ch.get("label_genes") or []))
+            scored = []
+            for pt in pts_all:
+                if not pt.get("label"):
+                    continue
+                xv = float(pt["x"]) if isinstance(pt.get("x"), (int, float)) else 0.0
+                yv = float(pt["y"]) if isinstance(pt.get("y"), (int, float)) else 0.0
+                is_hl = 1 if str(pt["label"]) in hl_set else 0
+                is_sig = 1 if (yv >= yt and abs(xv) >= xt) else 0
+                scored.append((is_hl, is_sig, abs(xv) * max(0.5, yv) + yv, pt))
+            scored.sort(key=lambda t: (t[0], t[1], t[2]), reverse=True)
+            pts_show = [t[3] for t in scored[:25]]
+        else:
+            pts_show = [pt for pt in pts_all if pt.get("label") or len(pts_all) <= 15]
+        for pt in pts_show:
+            plbl = pt.get("label") or f"({pt.get('x')},{pt.get('y')})"
+            cm.append({"element": f"{prefix}point:{plbl}",
+                       "kind": "data",
+                       "relation": f"x={pt.get('x')} y={pt.get('y')} group={pt.get('group', '')}",
+                       "source": pt.get("source", dsrc)})
+        items_all = ch.get("items") or []
+        if len(items_all) > 40:
+            cm.append({"element": f"{prefix}dotplot_dataset:{len(items_all)}_items", "kind": "data",
+                       "relation": f"total={len(items_all)} items (showing first 40)", "source": dsrc})
+        for it in items_all[:40]:
             cm.append({"element": f"{prefix}dot:{it.get('label', '')}", "kind": "data",
                        "relation": f"x={it.get('x')} size={it.get('size')} color={it.get('color')}",
                        "source": it.get("source", dsrc)})
         for g in ch.get("groups") or []:
             if isinstance(g, dict) and g.get("values"):
+                gv = g["values"]
+                rel_g = (f"n={len(gv)} range=[{min(gv):.4g}..{max(gv):.4g}]"
+                         if len(gv) > 12 and all(isinstance(v, (int, float)) for v in gv) else f"n={len(gv)} values={gv}")
                 cm.append({"element": f"{prefix}box:{g.get('label', '')}", "kind": "data",
-                           "relation": f"n={len(g['values'])} values={g['values']}",
-                           "source": g.get("source", dsrc)})
+                           "relation": rel_g, "source": g.get("source", dsrc)})
         if ch.get("rows") and ch.get("values"):
             cm.append({"element": f"{prefix}heatmap:{len(ch['rows'])}x{len(ch.get('cols') or [])}",
                        "kind": "data",

@@ -33,30 +33,30 @@
                "caption": "Node fill encodes log2 TPM (Table S2).",
                "source": "Table S2"},
   "width_map": {"min": 0.2, "max": 1.0, "caption": "Edge width encodes confidence.", "source": "Table S3"},
-  "size_map": {"min": 0.0, "max": 1.0, "caption": "Node height encodes score."},
+  "size_map": {"min": 0.0, "max": 1.0, "caption": "Node size encodes score."},
   "layout": {"auto_arc": true, "tighten_bands": true, "auto_tier": true,
-             "evidence_auto_style": false},
+             "evidence_auto_style": true},
   "legend": true
 }
 ```
 
 ### Key options
-- **Compartment kinds**: `exterior`, `membrane` (auto lipid bilayer interrupted by receptors),
-  `cytosol`, `nucleus`, `organelle` (mitochondria/ER/Golgi), `custom`.
-- **Node kinds**: `receptor` (spans membrane band), `protein`, `gene` (italicized), `complex`
+- **Compartment kinds**: `exterior`, `membrane` (auto lipid bilayer interrupted by receptors; ≥2 membranes supported for cell-to-cell synapses),
+  `cytosol`, `nucleus`, `organelle` (mitochondria/ER/Golgi/lysosome), `custom`.
+- **Node kinds**: `receptor` (spans membrane band; intracellular/nuclear/cleaved receptors also valid in cytosol/nucleus), `protein`, `gene` (italicized), `complex`
   (double border), `metabolite` (hexagon), `drug` (rose hexagon), `process` / `phenotype`
   (rounded pill), `cell` (ellipse), `dna`, `other`.
-- **Node fields**: `mods` (`["P","Ub","Ac","GTP","Me","SUMO"]`), `alias` (small italic above),
+- **Node fields**: `mods` (`["P","Ub","Ac","GTP","Me","SUMO"]`), `alias` (small italic inside node below primary label),
   `sublabel` (second line inside node), `subunits` (`["PIK3CA","PIK3R1"]` rendered as subunit pills inside complexes),
   `row` / `tier` (explicit integer sub-row inside a
   compartment; auto-tiered when wide), `value` (numeric value mapped automatically to `data_map`
-  fill color with WCAG contrast text and/or `size_map` node height), optional explicit `x`/`y`/`w`/`h`.
-- **Edge fields**: `type` (see `arrow_semantics.md`), `label`, `evidence` (appended as `[direct]`),
+  fill color with WCAG contrast text and/or `size_map` bi-dimensional node scaling), optional explicit `x`/`y`/`w`/`h`.
+- **Edge fields**: `type` (see `arrow_semantics.md`), `label`, `evidence` (non-direct values such as `inferred`/`reported`/`putative` auto-dash and `weak` auto-dots when `evidence_auto_style` is enabled),
   `dashed` (indirect/reported), `dotted` (weak), `weight` / `confidence` (numeric value mapped
   to stroke width via `width_map` with automatic legend swatches), `route`: `"direct"` (default;
   auto obstacle-avoiding on same-row & cross-row), `"arc"` (staggered top rail), `"feedback"`
   (same-row top rail or obstacle-free outer right-margin rail for cross-compartment feedback).
-- **Palettes**: `blues`, `fold` (blue-white-red diverging), `viridis`, `reds`, `qual` (colorblind-safe).
+- **Palettes**: `blues`, `fold`/`rdbu` (blue-white-red diverging with automatic `0` midpoint tick), `viridis`, `reds`, `greens`, `oranges`, `purples`, `ylorrd`, `plasma`, `qual` (colorblind-safe), plus `*_r` reverse variants.
 
 ## 2. Chart Mode (`"mode": "chart"`)
 Supports **9 quantitative plot types** via `chart.kind` (auto-inferred from data keys) and direct

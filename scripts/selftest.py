@@ -17,6 +17,7 @@ from make_figure import render
 from check_figure import audit
 from edit_svg import apply_edits, preservation_stats
 from bio_lint import bio_audit
+from render_preview import parse_svg_dimensions, _stamp_png_dpi
 
 MECH = {
     "mode": "mechanism", "title": "RTK-MAPK mechanism with complex group and feedback",
@@ -233,6 +234,54 @@ def main():
     print(json.dumps({"case": "edit_svg", "ok": edit_ok, "preservation": pstats}))
     if not edit_ok:
         failures.append({"case": "edit_svg", "rec": rec, "preservation": pstats})
+
+    # Test root <svg> dimension, unit conversion, and pHYs DPI stamping edge cases
+    svg_dim_cases = [
+        ("no_root_w_inner_rect",
+         '<!-- <svg width="50"> --><svg xmlns="http://www.w3.org/2000/svg" stroke-width="2" viewBox="0 0 1400 800">'
+         '<rect x="10" y="10" width="140" height="80" fill="#2563eb"/></svg>',
+         1400.0, 1400.0, 800.0, 4375, 300),
+        ("pct_100_fallback_vb",
+         '<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="0 0 1200 750">'
+         '<rect x="10" y="10" width="120" height="60" fill="#0f766e"/></svg>',
+         1200.0, 1200.0, 750.0, 3750, 300),
+        ("mm_unit",
+         '<svg xmlns="http://www.w3.org/2000/svg" width="180mm" height="120mm" viewBox="0 0 180 120">'
+         '<rect x="5" y="5" width="40" height="20" fill="#b91c1c"/></svg>',
+         180.0 * 96.0 / 25.4, 180.0, 120.0, 2126, 300),
+        ("pt_single_quote_inner_symbol",
+         "<svg xmlns='http://www.w3.org/2000/svg' width='500pt' height='300pt'>"
+         "<defs><symbol id='ic' viewBox='0 0 24 24'><rect width='24' height='24'/></symbol></defs>"
+         "<rect x='10' y='10' width='50' height='30' fill='#7c3aed'/></svg>",
+         500.0 * 96.0 / 72.0, 500.0 * 96.0 / 72.0, 300.0 * 96.0 / 72.0, 2083, 300),
+        ("cm_and_in_units",
+         '<svg xmlns="http://www.w3.org/2000/svg" width="7.5in" height="12.7cm">'
+         '<rect x="10" y="10" width="80" height="40" fill="#334155"/></svg>',
+         720.0, 720.0, 480.0, 2250, 300),
+    ]
+    dim_errs = []
+    for cname, stxt, exp_css_w, exp_uw, exp_uh, px_w, exp_dpi in svg_dim_cases:
+        d = parse_svg_dimensions(stxt)
+        a_res = audit(stxt)
+        if abs(d["css_w"] - exp_css_w) > 0.2:
+            dim_errs.append(f"{cname}: css_w={d['css_w']:.2f} != {exp_css_w:.2f}")
+        if abs(a_res["canvas"][0] - exp_uw) > 0.2 or abs(a_res["canvas"][1] - exp_uh) > 0.2:
+            dim_errs.append(f"{cname}: audit.canvas={a_res['canvas']} != [{exp_uw:.2f}, {exp_uh:.2f}]")
+        try:
+            from PIL import Image
+            p_png = work / f"dpi_{cname}.png"
+            Image.new("RGB", (px_w, 100), "white").save(p_png, dpi=(72, 72))
+            _stamp_png_dpi(stxt, p_png)
+            with Image.open(p_png) as im_chk:
+                got_dpi = float((im_chk.info.get("dpi") or (0, 0))[0])
+            if abs(got_dpi - exp_dpi) > 2.0:
+                dim_errs.append(f"{cname}: stamped_dpi={got_dpi:.1f} != {exp_dpi}")
+        except ImportError:
+            pass
+    dim_ok = (len(dim_errs) == 0)
+    print(json.dumps({"case": "svg_dims_dpi", "ok": dim_ok, "checked": len(svg_dim_cases), "errors": dim_errs}))
+    if not dim_ok:
+        failures.append({"case": "svg_dims_dpi", "errors": dim_errs})
 
     (work / "selftest-results.json").write_text(
         json.dumps({"failures": failures}, indent=1), encoding="utf-8")

@@ -4,7 +4,7 @@ import sys
 from copy import deepcopy
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from viz_style import SCALES, text_w
+from viz_style import SCALES, text_w, wrap_text
 from viz_layout import (auto_compartment_bands, draw_compartments, draw_groups,
                         place_nodes, tighten_bands, LEFT)
 from viz_nodes import draw_nodes
@@ -13,16 +13,7 @@ from viz_legend import build_legend
 from viz_geom import bbox_of, text_bbox
 
 def _wrap(s, maxpx, size):
-    words, lines, cur = str(s).split(" "), [], ""
-    for w in words:
-        t = (cur + " " + w).strip()
-        if text_w(t, size) <= maxpx or not cur:
-            cur = t
-        else:
-            lines.append(cur); cur = w
-    if cur:
-        lines.append(cur)
-    return lines
+    return wrap_text(s, maxpx, size)
 
 def _estimate_arc_pad(spec):
     """Estimate top padding per compartment so same-row feedback/auto_arc rails stay inside the band."""
@@ -83,7 +74,7 @@ def build_mechanism(spec, scale_name="regular"):
     plot_w = max(row_w, 560)
 
     if comps:
-        draw_compartments(comps, bands, plot_w, prims, placed=placed)
+        draw_compartments(comps, bands, plot_w, prims, placed=placed, groups=spec.get("groups"))
     if spec.get("groups"):
         draw_groups(spec["groups"], placed, prims)
 

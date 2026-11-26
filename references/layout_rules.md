@@ -7,7 +7,7 @@
 2. **Species convention**: preserve exact species casing from the material (human `EGFR`, mouse
    `Egfr`, *Arabidopsis* `UVR8`). Never silently rename across species.
 3. **Aliases & synonyms**: keep the primary symbol in `label` and place old/common synonyms in
-   `alias` (rendered small italic above the node, e.g., `beta-catenin` above `CTNNB1`); log the
+   `alias` (rendered small italic inside the node below the primary label, e.g., `CTNNB1` with `(beta-catenin)`); log the
    mapping in `content_map`.
 4. **Complexes vs module groups**: use `kind: "complex"` (double border) for a single functional
    complex node; use `"groups": [{"id": ..., "label": ..., "members": [...]}]` when individual
@@ -18,7 +18,7 @@
 
 ## Layout, Legend & Export Parity
 - **Compartment order**: declare compartments in physiological top-to-bottom order (`exterior` →
-  `membrane` → `cytosol` → `organelle` → `nucleus`). Membrane bands render a lipid bilayer
+  `membrane` → `cytosol` → `organelle` → `nucleus`; mirrored multi-cell synapses with ≥2 `membrane` bands such as Tumor ↔ T cell are also supported). Membrane bands render a lipid bilayer
   interrupted cleanly by transmembrane receptors and the compartment label.
 - **Band tightening & multi-tier placement**: `tighten_bands` and `auto_tier` are enabled by
   default; dense cytosolic cascades (>1350 px single row) split automatically into clean vertical

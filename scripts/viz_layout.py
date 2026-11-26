@@ -66,8 +66,8 @@ def _auto_assign_rows(group, edges, gap, allow_auto_tier=True):
         return [0 if i < half else 1 for i in range(len(group))]
     return [0] * len(group)
 
-def _count_crossings(row_seq, edges):
-    """Count inter-row edge crossings PLUS same-row non-adjacent edge skips."""
+def _count_crossings(row_seq, edges, groups=None):
+    """Count inter-row edge crossings PLUS same-row skips PLUS split-group penalties."""
     pos = {}
     for r_idx, rnodes in enumerate(row_seq):
         n = max(1, len(rnodes))
@@ -75,6 +75,16 @@ def _count_crossings(row_seq, edges):
             pos[nd["id"]] = (r_idx, (i + 0.5) / n, i)
     segs = []
     same_row_penalty = 0
+    for g in (groups or []):
+        mids = [m for m in (g.get("members") or []) if m in pos]
+        by_r = {}
+        for m in mids:
+            by_r.setdefault(pos[m][0], []).append(pos[m][2])
+        for idxs in by_r.values():
+            if len(idxs) >= 2:
+                gap_nonmembers = (max(idxs) - min(idxs) + 1) - len(set(idxs))
+                if gap_nonmembers > 0:
+                    same_row_penalty += 10 * gap_nonmembers
     for e in edges or []:
         if e.get("route") == "feedback":
             continue
@@ -108,8 +118,8 @@ def _count_crossings(row_seq, edges):
                     cross += 1
     return cross
 
-def _untangle_rows(comp_order, comp_rows, edges):
-    """Monotonic crossing-reducing barycenter sort (only accepts strict crossing reduction)."""
+def _untangle_rows(comp_order, comp_rows, edges, groups=None):
+    """Monotonic crossing-reducing barycenter sort (only accepts strict crossing reduction & keeps groups contiguous)."""
     row_keys = []
     row_seq = []
     for cid in comp_order:
@@ -119,7 +129,7 @@ def _untangle_rows(comp_order, comp_rows, edges):
             row_seq.append(list(by_r[r]))
     if len(row_seq) < 2 or not edges:
         return
-    base_c = _count_crossings(row_seq, edges)
+    base_c = _count_crossings(row_seq, edges, groups)
     if base_c == 0:
         return
     nbrs = {}
@@ -150,7 +160,7 @@ def _untangle_rows(comp_order, comp_rows, edges):
             cand_row = [t[2] for t in sorted(scored, key=lambda t: (t[0], t[1]))]
             old_row = row_seq[ri]
             row_seq[ri] = cand_row
-            new_c = _count_crossings(row_seq, edges)
+            new_c = _count_crossings(row_seq, edges, groups)
             if new_c < base_c:
                 base_c = new_c
             else:
@@ -190,6 +200,18 @@ def place_nodes(spec, bands, comp_kind, gap, plot_w=0, extra_top_pad=None, top_y
     bycomp = {}
     for n in spec.get("nodes", []):
         bycomp.setdefault(n.get("compartment") or "_", []).append(n)
+    sm = spec.get("size_map") or {}
+    have_scale = sm.get("min") is not None and sm.get("max") is not None
+    def _nsize(n):
+        w, h = node_size(n, gap)
+        sv_raw = n.get("size_value") if n.get("size_value") is not None else n.get("value")
+        if have_scale and isinstance(sv_raw, (int, float)):
+            tv = (sv_raw - sm["min"]) / ((sm["max"] - sm["min"]) or 1.0)
+            tv = min(1.0, max(0.0, tv))
+            w = max(84.0, w * (0.88 + 0.28 * tv))
+            h = h * (0.82 + 0.38 * tv)
+        return w, h
+
     # Pre-compute row assignments & widest row across all compartments
     comp_rows = {}
     max_row_w = 520.0
@@ -201,7 +223,7 @@ def place_nodes(spec, bands, comp_kind, gap, plot_w=0, extra_top_pad=None, top_y
             by_r.setdefault(r, []).append(n)
         comp_rows[cid] = by_r
         for r, rnodes in by_r.items():
-            rw = sum(node_size(n, gap)[0] for n in rnodes) + gap * max(0, len(rnodes) - 1)
+            rw = sum(_nsize(n)[0] for n in rnodes) + gap * max(0, len(rnodes) - 1)
             max_row_w = max(max_row_w, rw)
     # Monotonic barycenter crossing reduction across compartment rows
     if not lopts.get("preserve_order"):
@@ -209,19 +231,17 @@ def place_nodes(spec, bands, comp_kind, gap, plot_w=0, extra_top_pad=None, top_y
         for cid in comp_rows:
             if cid not in comp_order:
                 comp_order.append(cid)
-        _untangle_rows(comp_order, comp_rows, edges)
+        _untangle_rows(comp_order, comp_rows, edges, groups=spec.get("groups"))
     # Ensure membrane bands leave horizontal clearance for their compartment label on the left
     comp_lbl = {c["id"]: c.get("label", c["id"]) for c in spec.get("compartments", [])}
     for cid, by_r in comp_rows.items():
         if comp_kind.get(cid) == "membrane":
             lbl_w = text_w(comp_lbl.get(cid, cid), 12.5)
             for rnodes in by_r.values():
-                rw = sum(node_size(n, gap)[0] for n in rnodes) + gap * max(0, len(rnodes) - 1)
+                rw = sum(_nsize(n)[0] for n in rnodes) + gap * max(0, len(rnodes) - 1)
                 max_row_w = max(max_row_w, rw + min(360.0, 2.0 * (lbl_w + 14.0)))
     plot_w = max(float(plot_w), max_row_w, 560.0)
 
-    sm = spec.get("size_map") or {}
-    have_scale = sm.get("min") is not None and sm.get("max") is not None
     placed = []
     for cid, by_r in comp_rows.items():
         b = bmap.get(cid)
@@ -230,15 +250,7 @@ def place_nodes(spec, bands, comp_kind, gap, plot_w=0, extra_top_pad=None, top_y
         top_pad = extra_top_pad.get(cid, 0.0)
         for ri, r in enumerate(sorted_rs):
             rnodes = by_r[r]
-            sizes = []
-            for n in rnodes:
-                w, h = node_size(n, gap)
-                sv_raw = n.get("size_value") if n.get("size_value") is not None else n.get("value")
-                if have_scale and isinstance(sv_raw, (int, float)):
-                    tv = (sv_raw - sm["min"]) / ((sm["max"] - sm["min"]) or 1.0)
-                    tv = min(1.0, max(0.0, tv))
-                    h = h * (0.80 + 0.42 * tv)
-                sizes.append((w, h))
+            sizes = [_nsize(n) for n in rnodes]
             row_max_h = max((s[1] for s in sizes), default=46.0)
             rw = sum(s[0] for s in sizes) + gap * max(0, len(rnodes) - 1)
             x = LEFT + max(0.0, (plot_w - rw) / 2.0)
@@ -303,9 +315,26 @@ def tighten_bands(comps, bands, placed, extra_top_pad=None, group_pad_comps=None
         y = b["y1"] + GAP
     return out
 
-def draw_compartments(comps, bands, plot_w, prims, placed=None):
+def draw_compartments(comps, bands, plot_w, prims, placed=None, groups=None):
     x0, x1 = LEFT - 24, LEFT + plot_w + 24
     placed = placed or []
+    nmap_p = {n["id"]: n for n in placed}
+    gboxes = []
+    for g in (groups or []):
+        mems = [nmap_p[mid] for mid in (g.get("members") or []) if mid in nmap_p]
+        if not mems:
+            continue
+        has_mod = any(n.get("mods") for n in mems)
+        px = float(g.get("pad_x", 13))
+        pt = float(g.get("pad_top", 32 if has_mod else 24))
+        pb = float(g.get("pad_bot", 12))
+        gx0 = min(n["cx"] - n["w"] / 2.0 for n in mems) - px
+        gx1 = max(n["cx"] + n["w"] / 2.0 for n in mems) + px
+        if g.get("label"):
+            gx1 = max(gx1, gx0 + text_w(str(g["label"]), 11.5) + 22.0)
+        gy0 = min(n["cy"] - n["h"] / 2.0 for n in mems) - pt
+        gy1 = max(n["cy"] + n["h"] / 2.0 for n in mems) + pb
+        gboxes.append([gx0, gy0, gx1, gy1])
     for c, b in zip(comps, bands):
         kind = c.get("kind", "custom")
         st = dict(COMP_STYLES.get(kind, COMP_STYLES["custom"]))
@@ -347,7 +376,7 @@ def draw_compartments(comps, bands, plot_w, prims, placed=None):
         ly = b["y1"] - 13
         c_nodes = [n for n in placed if n.get("compartment") == c["id"]]
         nboxes = [[n["cx"] - n["w"] / 2, n["cy"] - n["h"] / 2,
-                   n["cx"] + n["w"] / 2, n["cy"] + n["h"] / 2] for n in c_nodes]
+                   n["cx"] + n["w"] / 2, n["cy"] + n["h"] / 2] for n in c_nodes] + gboxes
         # Try bottom-left, bottom-right, top-left, top-right with generous clearance from nodes
         candidates = [
             (x0 + 12, ly, "start"),

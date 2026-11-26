@@ -21,6 +21,7 @@ Exit 0 iff /app/output/result.json passes schema + file + magic-byte checks.
 """
 from __future__ import annotations
 import sys, json, re, math, argparse, shutil, bisect
+from html import unescape as html_unescape
 import xml.etree.ElementTree as ET
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -28,7 +29,7 @@ from make_figure import render
 from result_contract import skeleton, check_file
 from edit_svg import apply_edits, preservation_stats
 from check_figure import audit as svg_audit, pixel_audit
-from render_preview import render as render_svg_png, render_pdf as render_svg_pdf
+from render_preview import render as render_svg_png, render_pdf as render_svg_pdf, parse_svg_dimensions
 
 def _load_json_arg(val):
     if not val:
@@ -77,7 +78,14 @@ def _collect_spec_numbers(spec):
                     if isinstance(v, (int, float)):
                         c_local.append(float(v))
         if is_bound:
-            bound_n += len(c_local)
+            if c_local:
+                bound_n += len(c_local)
+            else:
+                try:
+                    from chart import count_from_table_values
+                    bound_n += count_from_table_values(ch)
+                except Exception:
+                    pass
         else:
             chart_nums.extend(c_local)
     else:
@@ -98,25 +106,92 @@ def _add_val(vals, v):
     except Exception:
         pass
 
+def _add_group_aggregates(vals, rows_2d):
+    """For compact source tables (<=500 rows), add per-group means/medians/SDs/SEMs/sums
+    grouped by the first categorical column so legitimate replicate summaries pass fidelity checks."""
+    if not rows_2d or len(rows_2d) < 3 or len(rows_2d) > 500:
+        return
+    # Skip leading 1-cell title banner if present
+    h_idx = 0
+    if len([c for c in rows_2d[0] if str(c).strip() != ""]) <= 1:
+        for ri in range(1, min(6, len(rows_2d))):
+            if len([c for c in rows_2d[ri] if str(c).strip() != ""]) >= 2:
+                h_idx = ri; break
+    data = rows_2d[h_idx + 1:]
+    if not data:
+        return
+    # Collect numeric values per column and per group key (col 0 and col 1 if non-numeric)
+    n_cols = max(len(r) for r in data)
+    cat_cols = []
+    for ci in range(min(2, n_cols)):
+        non_num = sum(1 for r in data[:40] if ci < len(r) and str(r[ci]).strip() and not re.fullmatch(r"[+-]?\d+(?:,\d{3})*(?:\.\d+)?%?", str(r[ci]).strip()))
+        if non_num >= max(1, min(len(data), 40) // 2):
+            cat_cols.append(ci)
+    for gcol in (cat_cols or [0]):
+        by_g = {}
+        for r in data:
+            gk = str(r[gcol]).strip() if gcol < len(r) else ""
+            if not gk:
+                continue
+            by_g.setdefault(gk, []).append(r)
+        if not (1 <= len(by_g) <= 60):
+            continue
+        for grp_rows in by_g.values():
+            if len(grp_rows) < 2:
+                continue
+            for ci in range(n_cols):
+                if ci == gcol:
+                    continue
+                nums = []
+                for r in grp_rows:
+                    if ci < len(r):
+                        raw = str(r[ci]).strip().replace(",", "")
+                        if raw.endswith("%"):
+                            raw = raw[:-1]
+                        try:
+                            fv = float(raw)
+                            if not math.isnan(fv) and not math.isinf(fv):
+                                nums.append(fv)
+                        except Exception:
+                            pass
+                if len(nums) >= 2:
+                    mu = sum(nums) / len(nums)
+                    _add_val(vals, mu)
+                    _add_val(vals, sum(nums))
+                    sv = sorted(nums)
+                    mid = len(sv) // 2
+                    _add_val(vals, sv[mid] if len(sv) % 2 else 0.5 * (sv[mid - 1] + sv[mid]))
+                    var = sum((x - mu) ** 2 for x in nums) / max(1, len(nums) - 1)
+                    sd = math.sqrt(max(0.0, var))
+                    _add_val(vals, sd)
+                    _add_val(vals, sd / math.sqrt(len(nums)))
+
 def _extract_table_numbers(p: Path, max_rows: int = 10000, max_chars: int = 2000000):
     vals = set()
     suf = p.suffix.lower()
     if suf in (".xlsx", ".xls"):
         rows_all = []
+        sheets_2d = []
         try:
             import openpyxl
             wb = openpyxl.load_workbook(p, read_only=True, data_only=True)
             for nm in wb.sheetnames:
+                srows = []
                 for ri, row in enumerate(wb[nm].iter_rows(values_only=True)):
                     if ri >= max_rows or len(rows_all) >= max_rows:
                         break
-                    rows_all.append(row)
+                    rlist = [("" if c is None else c) for c in row]
+                    rows_all.append(rlist)
+                    srows.append(rlist)
+                sheets_2d.append(srows)
             wb.close()
         except Exception:
             try:
                 from inspect_inputs import _read_xlsx_stdlib
                 for rows in _read_xlsx_stdlib(p, max_scan=max_rows).values():
-                    rows_all.extend(rows[:max(0, max_rows - len(rows_all))])
+                    sl = rows[:max(0, max_rows - len(rows_all))]
+                    rows_all.extend(sl)
+                    sheets_2d.append(sl)
             except Exception:
                 pass
         for row in rows_all:
@@ -124,8 +199,12 @@ def _extract_table_numbers(p: Path, max_rows: int = 10000, max_chars: int = 2000
                 if isinstance(cell, (int, float)):
                     _add_val(vals, cell)
                 elif isinstance(cell, str) and any(ch.isdigit() for ch in cell):
+                    for tok in re.findall(r"-?\d{1,3}(?:,\d{3})+(?:\.\d+)?", cell):
+                        _add_val(vals, tok.replace(",", ""))
                     for tok in re.findall(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?", cell):
                         _add_val(vals, tok)
+        for srows in sheets_2d:
+            _add_group_aggregates(vals, srows)
         return vals
     if suf == ".pdf":
         # Fast path: reuse Step 1's dumped /app/work/extracted/<stem>.txt when available
@@ -151,6 +230,17 @@ def _extract_table_numbers(p: Path, max_rows: int = 10000, max_chars: int = 2000
     else:
         with p.open("r", encoding="utf-8-sig", errors="replace") as fh:
             txt = fh.read(max_chars)
+        if suf in (".csv", ".tsv"):
+            try:
+                import csv
+                lines = txt.splitlines()
+                delim = "\t" if suf == ".tsv" else (";" if (lines and lines[0].count(";") >= 2 and lines[0].count(",") == 0) else ",")
+                if len(lines) <= 505:
+                    _add_group_aggregates(vals, list(csv.reader(lines, delimiter=delim)))
+            except Exception:
+                pass
+    for tok in re.findall(r"-?\d{1,3}(?:,\d{3})+(?:\.\d+)?", txt):
+        _add_val(vals, tok.replace(",", ""))
     for tok in re.findall(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?", txt):
         _add_val(vals, tok)
     return vals
@@ -306,7 +396,7 @@ def _probe_editability(fig_svg: Path, work: Path, out: Path, main_base: str):
     )
     if not m_lbl:
         return None
-    probe_id, orig_txt = m_lbl.group(1), m_lbl.group(2)
+    probe_id, orig_txt = m_lbl.group(1), html_unescape(m_lbl.group(2))
     probe_txt = f"{orig_txt} [verified]"
     probe_svg_text, rec1 = apply_edits(
         src_text, [{"op": "set_text_by_id", "id": probe_id, "text": probe_txt}]
@@ -367,6 +457,12 @@ def _actual_png_dpi(p: Path, fallback: int) -> int:
         pass
     return int(fallback)
 
+def _svg_target_png_width(svg_text: str, dpi: int) -> int:
+    dims = parse_svg_dimensions(svg_text)
+    svg_w = dims["css_w"] if dims["css_w"] > 10.0 else dims["user_w"]
+    svg_w = svg_w if svg_w > 10.0 else 800.0
+    return min(4800, max(2400, int(round(svg_w * dpi / 96.0))))
+
 def _run_standalone_edit(a, work, out, cid, cdata, cpath):
     src_path = Path(a.edit_svg)
     src_text = src_path.read_text(encoding="utf-8")
@@ -400,8 +496,7 @@ def _run_standalone_edit(a, work, out, cid, cdata, cpath):
     aud_before = svg_audit(src_text)
     aud = svg_audit(out_svg_text)
     new_v = max(0, aud["n_violations"] - aud_before["n_violations"])
-    svg_w = float((aud.get("canvas") or [800])[0] or 800)
-    target_w = min(4800, max(2400, int(round(svg_w * a.dpi / 96.0))))
+    target_w = _svg_target_png_width(out_svg_text, a.dpi)
     png_tool = render_svg_png(f_svg, f_png, width=target_w)
     render_svg_png(f_svg, f_prev, width=1000)
     pdf_tool = render_svg_pdf(f_svg, f_pdf)
@@ -501,7 +596,7 @@ def _run_standalone_edit(a, work, out, cid, cdata, cpath):
         "export_artifact": exports,
         "content_map": cm,
         "compliance_checks": {
-            "skill_metadata": {"skill": "bio-pathway-figure", "version": "v26", "schema_version": "2.6"},
+            "skill_metadata": {"skill": "bio-pathway-figure", "version": "v30", "schema_version": "3.0"},
             "delivery_integrity": {
                 "svg_ok": svg_ok, "png_ok": png_ok, "pdf_ok": pdf_ok,
                 "new_svg_violations": new_v,
@@ -529,7 +624,7 @@ def _run_standalone_edit(a, work, out, cid, cdata, cpath):
             elif kl in ("provenance", "sources", "element_sources", "evidence_map", "preserved_facts"):
                 res[k] = cm
             elif kl in ("build", "export_meta", "render_info"):
-                res[k] = {"skill": "bio-pathway-figure", "version": "v26", "export_checks": export_checks}
+                res[k] = {"skill": "bio-pathway-figure", "version": "v30", "export_checks": export_checks}
             elif kl in ("summary", "notes", "visual_inspection"):
                 res[k] = vis
             elif kl in ("checks", "audit", "verification"):
@@ -582,6 +677,8 @@ def main():
     ap.add_argument("--basename", default="fig")
     ap.add_argument("--spec2", default=None, help="optional secondary spec (e.g. chart)")
     ap.add_argument("--basename2", default="fig_chart")
+    ap.add_argument("--spec3", default=None, help="optional third spec")
+    ap.add_argument("--basename3", default="fig_extra")
     ap.add_argument("--extra", action="append", default=[], help="repeatable NAME:SPEC_PATH")
     ap.add_argument("--edit", default=None, help="optional JSON edit(s) to apply to primary SVG")
     ap.add_argument("--edit-svg", default=None, help="existing input SVG to edit byte-preservingly (standalone or paired with --spec)")
@@ -611,6 +708,8 @@ def main():
     spec_list = [(a.basename, Path(a.spec))]
     if a.spec2:
         spec_list.append((a.basename2, Path(a.spec2)))
+    if a.spec3:
+        spec_list.append((a.basename3, Path(a.spec3)))
     for item in a.extra:
         if ":" in item:
             nm, sp = item.split(":", 1)
@@ -687,7 +786,8 @@ def main():
             summaries[0] = (main_base, main_summary)
         else:
             fig_svg.write_text(out_svg_text, encoding="utf-8")
-            render_svg_png(fig_svg, work / "out" / f"{main_base}.png", width=2400)
+            target_w_ed = _svg_target_png_width(out_svg_text, a.dpi)
+            render_svg_png(fig_svg, work / "out" / f"{main_base}.png", width=target_w_ed)
             render_svg_png(fig_svg, work / "out" / f"{main_base}.preview.png", width=1000)
             render_svg_pdf(fig_svg, work / "out" / f"{main_base}.pdf")
     else:
@@ -698,6 +798,7 @@ def main():
     ext_edit_cm = []
     ext_edit_exc = []
     paired_stems = []
+    paired_nf = []
     if a.edit_svg:
         src_path = Path(a.edit_svg)
         src_text = src_path.read_text(encoding="utf-8")
@@ -718,6 +819,7 @@ def main():
         except Exception:
             xml_ok2 = False
         nf = [r for r in rec if r.get("status") == "not_found"]
+        paired_nf = nf
         ext_rec = {
             "mode": "paired_external_svg_edit",
             "source": str(src_path), "output": str(ef_svg),
@@ -727,7 +829,8 @@ def main():
             "edits": rec,
         }
         ef_rec.write_text(json.dumps(ext_rec, ensure_ascii=False, indent=1), encoding="utf-8")
-        ptool = render_svg_png(ef_svg, ef_png, width=2400)
+        target_w_e = _svg_target_png_width(out_svg_text, a.dpi)
+        ptool = render_svg_png(ef_svg, ef_png, width=target_w_e)
         render_svg_png(ef_svg, ef_prev, width=1000)
         ftool = render_svg_pdf(ef_svg, ef_pdf)
         edit_record = ext_rec
@@ -904,7 +1007,7 @@ def main():
         ],
         "content_map": cm,
         "compliance_checks": {
-            "skill_metadata": {"skill": "bio-pathway-figure", "version": "v26", "schema_version": "2.6"},
+            "skill_metadata": {"skill": "bio-pathway-figure", "version": "v30", "schema_version": "3.0"},
             "delivery_integrity": {
                 "svg_ok": all_svgs_ok, "png_ok": all_pngs_ok, "pdf_ok": all_pdfs_ok,
                 "critical_spec_error": empty_render,
@@ -963,7 +1066,7 @@ def main():
             elif kl in ("provenance", "sources", "element_sources", "evidence_map", "preserved_facts"):
                 res[k] = cm
             elif kl in ("build", "export_meta", "render_info"):
-                res[k] = {"skill": "bio-pathway-figure", "version": "v26", "export_checks": res["compliance_checks"]["export_checks"]}
+                res[k] = {"skill": "bio-pathway-figure", "version": "v30", "export_checks": res["compliance_checks"]["export_checks"]}
             elif kl in ("summary", "notes", "visual_inspection"):
                 res[k] = res["compliance_checks"]["visual_inspection"]
             elif kl in ("checks", "audit", "verification"):
@@ -1030,6 +1133,8 @@ def main():
         "deliverables": sorted(deliver),
         "next_action": na_draw,
     }
+    if paired_nf:
+        out_summary["not_found_details"] = paired_nf[:5]
     if dfid:
         df_out = {"match_ratio": dfid["match_ratio"], "checked": dfid["values_checked"]}
         if dfid["match_ratio"] < 0.85 and dfid.get("unmatched_sample"):

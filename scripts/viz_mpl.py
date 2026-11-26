@@ -1,12 +1,55 @@
-"""Matplotlib PNG/PDF renderer consuming the same primitives (true rounded rects + preview DPI)."""
+"""Matplotlib PNG/PDF renderer consuming the same primitives (true rounded rects + CJK font auto-resolve)."""
 from __future__ import annotations
+
+_CJK_FONT_CACHE = [False, None]  # [initialized, path_or_None]
+
+def _find_cjk_font():
+    """Find a real installed CJK font file (excluding LastResort) so Chinese labels never render as tofu."""
+    if _CJK_FONT_CACHE[0]:
+        return _CJK_FONT_CACHE[1]
+    _CJK_FONT_CACHE[0] = True
+    try:
+        import matplotlib.font_manager as fm
+        from matplotlib.ft2font import FT2Font
+        prefs = ("wenquanyi zen hei", "wenquanyi micro hei", "noto sans cjk sc",
+                 "source han sans", "microsoft yahei", "pingfang sc", "simhei",
+                 "noto serif cjk sc", "droid sans fallback", "ar pl uming cn", "ipagothic")
+        cands = []
+        for f in fm.fontManager.ttflist:
+            nl = f.name.lower()
+            if "last resort" in nl or "lastresort" in f.fname.lower():
+                continue
+            rank = next((i for i, k in enumerate(prefs) if k in nl), None)
+            if rank is not None:
+                cands.append((rank, f.fname))
+        cands.sort(key=lambda t: t[0])
+        seen = set()
+        for _, fn in cands:
+            if fn in seen:
+                continue
+            seen.add(fn)
+            try:
+                ft = FT2Font(fn)
+                if ft.get_char_index(ord("信")) != 0 and ft.get_char_index(ord("A")) != 0:
+                    _CJK_FONT_CACHE[1] = fn
+                    return fn
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return None
 
 def to_mpl(prims, W, H, dpi, png=None, pdf=None, preview_png=None, preview_dpi=100):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import matplotlib.patheffects as pe
+    from matplotlib.font_manager import FontProperties
     from matplotlib.patches import Polygon, Rectangle, FancyBboxPatch, Circle, Ellipse
+    cjk_font_path = _find_cjk_font() if any(
+        p.get("op") == "text" and any(ord(c) > 0x2E80 for c in str(p.get("s", "")))
+        for p in prims
+    ) else None
     # Use a fixed logical-px -> points scale (72/96 = 0.75 pt/px) so font & stroke sizes
     # stay IDENTICAL regardless of output DPI (100 vs 300 DPI)!
     base_dpi = 96.0
@@ -28,6 +71,8 @@ def to_mpl(prims, W, H, dpi, png=None, pdf=None, preview_png=None, preview_dpi=1
             return 1 if p.get("stroke") in (None, "none") else 2
         if role == "deco":
             lyr = p.get("layer", "")
+            if lyr == "layer-groups":
+                return 3.4
             if lyr == "layer-nodes":
                 return 4.6 if p.get("fill") == "#94a3b8" else 5.2
             if lyr == "layer-legend":
@@ -103,12 +148,16 @@ def to_mpl(prims, W, H, dpi, png=None, pdf=None, preview_png=None, preview_dpi=1
             ha = {"middle": "center", "start": "left", "end": "right"}.get(
                 p.get("anchor", "middle"), "center")
             pe_arg = halo if p.get("halo", True) else None
-            ax.text(p["x"], p["y"], str(p["s"]), fontsize=fs, ha=ha,
+            txt_s = str(p["s"])
+            fw = "bold" if p.get("weight") == "bold" else "normal"
+            fst = "italic" if p.get("italic") else "normal"
+            kw_font = {"fontsize": fs, "fontweight": fw, "fontstyle": fst}
+            if cjk_font_path and any(ord(ch) > 0x2E80 for ch in txt_s):
+                kw_font = {"fontproperties": FontProperties(fname=cjk_font_path, size=fs, weight=fw, style=fst)}
+            ax.text(p["x"], p["y"], txt_s, ha=ha,
                     va="center", color=p.get("fill", "#1e293b"),
-                    fontweight=("bold" if p.get("weight") == "bold" else "normal"),
-                    fontstyle=("italic" if p.get("italic") else "normal"),
                     rotation=-p.get("rotate", 0), rotation_mode="anchor",
-                    linespacing=1.22, path_effects=pe_arg, zorder=max(z, 9))
+                    linespacing=1.22, path_effects=pe_arg, zorder=max(z, 9), **kw_font)
     eff_dpi = int(dpi)
     if png:
         eff_dpi = min(int(dpi), max(150, int(5200 * base_dpi / max(1.0, float(max(W, H))))))

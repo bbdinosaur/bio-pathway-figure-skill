@@ -17,7 +17,7 @@ Only matched fragments are rewritten; all untouched regions remain byte-identica
 Emits before/after values and preservation ratio in .edit-record.json.
 """
 from __future__ import annotations
-import sys, json, re, argparse, difflib
+import sys, json, re, math, argparse, difflib
 from html import unescape as html_unescape
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -98,8 +98,12 @@ def apply_edits(svg, edits):
                     new_inner = inner.replace(target, rep) if e.get("all") else inner.replace(target, rep, 1)
                     return m.group(1) + new_inner + m.group(3)
                 return m.group(0)
-            pat = re.compile(r'(>)([^<]+)(<)')
-            svg = pat.sub(_sub_node, svg)
+            # Pass 1: target actual <text>/<tspan> leaf nodes first so <style>/<metadata> are never touched
+            txt_leaf_pat = re.compile(r'(<(?:\w+:)?(?:text|tspan)\b[^>]*>)([^<]+)(</(?:\w+:)?(?:text|tspan)>)')
+            svg = txt_leaf_pat.sub(_sub_node, svg)
+            if hit[0] == 0:
+                pat = re.compile(r'(>)([^<]+)(<)')
+                svg = pat.sub(_sub_node, svg)
             if hit[0] == 0:
                 # Fallback: text split across nested <tspan> elements (multi-line OR kerning-split)
                 tpat = re.compile(r'(<(?:\w+:)?text\b[^>]*>)(.*?)(</(?:\w+:)?text>)', re.S)
@@ -314,9 +318,13 @@ def apply_edits(svg, edits):
                 record.append({"op": op, "id": e["id"], "status": "not_found"})
         elif op == "add_text":
             anc = esc(e.get("anchor", "middle"))
+            wt = f' font-weight="{esc(e["weight"])}"' if e.get("weight") else ""
+            it = ' font-style="italic"' if e.get("italic") else ""
+            ff = esc(e.get("font_family", "Helvetica, Arial, 'DejaVu Sans', 'Noto Sans CJK SC', sans-serif"))
             el = (f'<text x="{e.get("x", 40)}" y="{e.get("y", 20)}" font-size="{e.get("size", 12)}"'
-                  f' text-anchor="{anc}" dominant-baseline="central"'
-                  f' fill="{e.get("fill", "#334155")}" id="{esc(e.get("id", "added_text"))}"'
+                  f' text-anchor="{anc}" dominant-baseline="central"{wt}{it}'
+                  f' fill="{e.get("fill", "#334155")}" font-family="{ff}"'
+                  f' id="{esc(e.get("id", "added_text"))}"'
                   f' data-role="annotation">{esc(e["text"])}</text>')
             lid = e.get("layer_id")
             inserted = False
@@ -330,11 +338,39 @@ def apply_edits(svg, edits):
             sid = esc(e.get("id", "added_shape"))
             fill = esc(e.get("fill", "none"))
             stroke = esc(e.get("stroke", "#334155"))
-            sw = e.get("stroke_w", 1.5)
+            sw = e.get("stroke_w", 1.8 if sk in ("arrow", "tbar") else 1.5)
             dash = ' stroke-dasharray="6,4"' if e.get("dashed") else ""
             if sk == "circle":
                 el = (f'<circle cx="{e.get("cx", 50)}" cy="{e.get("cy", 50)}" r="{e.get("r", 8)}"'
                       f' fill="{fill}" stroke="{stroke}" stroke-width="{sw}"{dash} id="{sid}" data-role="annotation"/>')
+            elif sk == "ellipse":
+                el = (f'<ellipse cx="{e.get("cx", 50)}" cy="{e.get("cy", 50)}" rx="{e.get("rx", 30)}" ry="{e.get("ry", 18)}"'
+                      f' fill="{fill}" stroke="{stroke}" stroke-width="{sw}"{dash} id="{sid}" data-role="annotation"/>')
+            elif sk == "polyline":
+                pts = " ".join(f"{float(p[0]):.1f},{float(p[1]):.1f}" for p in (e.get("pts") or []))
+                el = (f'<polyline points="{pts}" fill="{fill}" stroke="{stroke}" stroke-width="{sw}"'
+                      f' stroke-linecap="round" stroke-linejoin="round"{dash} id="{sid}" data-role="annotation"/>')
+            elif sk in ("arrow", "tbar"):
+                x1, y1 = float(e.get("x1", 0)), float(e.get("y1", 0))
+                x2, y2 = float(e.get("x2", 60)), float(e.get("y2", 0))
+                dx, dy = x2 - x1, y2 - y1
+                dist = math.hypot(dx, dy) or 1.0
+                ux, uy = dx / dist, dy / dist
+                nx, ny = -uy, ux
+                if sk == "arrow":
+                    hlen, hhalf = float(e.get("head_len", 10)), float(e.get("head_half", 4.5))
+                    sx2, sy2 = x2 - ux * hlen, y2 - uy * hlen
+                    p_str = f"{x2:.1f},{y2:.1f} {sx2 + nx*hhalf:.1f},{sy2 + ny*hhalf:.1f} {sx2 - nx*hhalf:.1f},{sy2 - ny*hhalf:.1f}"
+                    el = (f'<g id="{sid}" data-role="edge">\n'
+                          f'  <line x1="{x1:.1f}" y1="{y1:.1f}" x2="{sx2:.1f}" y2="{sy2:.1f}" stroke="{stroke}" stroke-width="{sw}" stroke-linecap="round"{dash}/>\n'
+                          f'  <polygon points="{p_str}" fill="{stroke}" stroke="{stroke}" stroke-width="0.6"/>\n'
+                          f'</g>')
+                else:
+                    bh = float(e.get("bar_half", 6.5))
+                    el = (f'<g id="{sid}" data-role="edge">\n'
+                          f'  <line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" stroke="{stroke}" stroke-width="{sw}" stroke-linecap="round"{dash}/>\n'
+                          f'  <line x1="{x2 - nx*bh:.1f}" y1="{y2 - ny*bh:.1f}" x2="{x2 + nx*bh:.1f}" y2="{y2 + ny*bh:.1f}" stroke="{stroke}" stroke-width="{float(sw) + 0.6}" stroke-linecap="round"/>\n'
+                          f'</g>')
             elif sk == "line":
                 el = (f'<line x1="{e.get("x1", 0)}" y1="{e.get("y1", 0)}" x2="{e.get("x2", 40)}" y2="{e.get("y2", 0)}"'
                       f' stroke="{stroke}" stroke-width="{sw}"{dash} id="{sid}" data-role="annotation"/>')
@@ -392,7 +428,8 @@ def apply_edits(svg, edits):
 def preservation_stats(src, out):
     src_lines = src.splitlines()
     out_lines = out.splitlines()
-    unchanged = sum(1 for a, b in zip(src_lines, out_lines) if a == b)
+    sm = difflib.SequenceMatcher(None, src_lines, out_lines, autojunk=False)
+    unchanged = sum(b.size for b in sm.get_matching_blocks())
     total = max(1, max(len(src_lines), len(out_lines)))
     gpat = re.compile(r'<(?:\w+:)?g\b[^>]*?\bid=["\']([^"\']+)["\']')
     l_src = sorted(set(gpat.findall(src)))

@@ -6,10 +6,11 @@ Zero dependencies beyond Python stdlib.
 from __future__ import annotations
 import csv
 import math
+import re
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from viz_style import PALETTES, ramp, contrast_text, text_w
+from viz_style import PALETTES, ramp, contrast_text, text_w, wrap_text, is_diverging
 from viz_geom import text_bbox, overlap
 
 def _opt_float(v):
@@ -125,16 +126,7 @@ def _marker(prims, x, y, col, idx, r=4.8, role="data_point"):
                       "stroke_w": 1.1, "role": role, "layer": "layer-nodes"})
 
 def _wrap_chart(s, maxpx, size):
-    words, lines, cur = str(s).split(" "), [], ""
-    for w in words:
-        t = (cur + " " + w).strip()
-        if text_w(t, size) <= maxpx or not cur:
-            cur = t
-        else:
-            lines.append(cur); cur = w
-    if cur:
-        lines.append(cur)
-    return lines
+    return wrap_text(s, maxpx, size)
 
 def _draw_chrome(prims, spec, ch, W, H, m):
     if spec.get("title"):
@@ -190,25 +182,52 @@ def _read_table_rows(p: Path, sheet=None, max_rows: int = 50000):
                 return []
         if not rows_2d:
             return []
-        hdr = [str(c).lstrip("\ufeff").strip() for c in rows_2d[0]]
+        # Auto-skip leading 1-cell title banners (e.g. "Table S1. ...") in supplementary Excel sheets
+        h_idx = 0
+        ne0 = [c for c in rows_2d[0] if str(c).strip() != ""]
+        if len(ne0) <= 1 and len(rows_2d) > 1:
+            for ri in range(1, min(8, len(rows_2d))):
+                nei = [c for c in rows_2d[ri] if str(c).strip() != ""]
+                if len(nei) >= 2 and sum(1 for c in nei if not isinstance(c, (int, float))) >= max(2, len(nei) // 2):
+                    h_idx = ri
+                    break
+        hdr = [str(c).lstrip("\ufeff").strip() for c in rows_2d[h_idx]]
         out = []
-        for r in rows_2d[1:max_rows + 1]:
+        for r in rows_2d[h_idx + 1:max_rows + h_idx + 1]:
             if not any(str(v) != "" for v in r):
                 continue
             out.append({hdr[i]: (r[i] if i < len(r) else "") for i in range(len(hdr))})
         return out
     delim = "\t" if suf == ".tsv" else ","
     try:
-        raw_txt = p.read_text(encoding="utf-8-sig", errors="replace")
-        first_ln = next((ln for ln in raw_txt.splitlines() if ln.strip()), "")
+        raw_lines = p.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+        clean_lines = []
+        for ln in raw_lines:
+            s = ln.strip()
+            if not s:
+                continue
+            if not clean_lines and s.startswith("#"):
+                continue
+            clean_lines.append(ln)
+        if not clean_lines:
+            return []
+        first_ln = clean_lines[0]
         if delim == "," and first_ln.count(";") >= 2 and first_ln.count(",") == 0:
             delim = ";"
-        rdr = csv.DictReader(raw_txt.splitlines(), delimiter=delim)
+        rows_2d = list(csv.reader(clean_lines, delimiter=delim))
+        h_idx = 0
+        if rows_2d and len([c for c in rows_2d[0] if str(c).strip() != ""]) <= 1 and len(rows_2d) > 1:
+            for ri in range(1, min(8, len(rows_2d))):
+                nei = [c for c in rows_2d[ri] if str(c).strip() != ""]
+                if len(nei) >= 2:
+                    h_idx = ri
+                    break
+        hdr = [str(c).lstrip("\ufeff").strip() for c in rows_2d[h_idx]]
         out = []
-        for ri, row in enumerate(rdr):
-            if ri >= max_rows:
-                break
-            out.append({(k.strip() if isinstance(k, str) else k): v for k, v in row.items() if k is not None})
+        for r in rows_2d[h_idx + 1:h_idx + 1 + max_rows]:
+            if not any(str(v).strip() != "" for v in r):
+                continue
+            out.append({hdr[i]: (r[i] if i < len(r) else "") for i in range(len(hdr)) if hdr[i]})
         return out
     except Exception:
         return []
@@ -326,12 +345,7 @@ def _load_from_table(ch):
         return ch
     if ft.get("sort_by"):
         scol = ft["sort_by"]
-        def _skey(r):
-            try:
-                return float(r.get(scol, 0))
-            except Exception:
-                return 0.0
-        rows.sort(key=_skey, reverse=bool(ft.get("descending", True)))
+        rows.sort(key=lambda r: _sfloat(r.get(scol), 0.0), reverse=bool(ft.get("descending", True)))
     if ft.get("top_n"):
         rows = rows[:int(ft["top_n"])]
     fname = p.name
@@ -357,8 +371,8 @@ def _load_from_table(ch):
             looks_p = any(k in cl for k in ("padj", "p_adj", "fdr", "qval", "q_val", "pval", "p_val", "pvalue"))
             if looks_p and all(0.0 <= v <= 1.0 for v in raw_cvals) and any(0.0 < v < 0.05 for v in raw_cvals):
                 auto_neglog = True
-                if not ch.get("color_caption"):
-                    ch["color_caption"] = f"-log10({ccol})"
+                if not ch.get("color_label") and not ch.get("cbar_label"):
+                    ch["color_label"] = f"-log10({ccol})"
         items = []
         for idx, r in enumerate(rows, start=2):
             xv = _opt_float(r.get(ft.get("x_col") or ft.get("value_col")))
@@ -393,14 +407,11 @@ def _load_from_table(ch):
             vals = []
             has_num = False
             for c in vcols:
-                raw = r.get(c, "")
-                if str(raw).strip().lower() in ("", "na", "nan", "none", "null"):
+                fv = _opt_float(r.get(c, ""))
+                if fv is None:
                     vals.append(None)
                 else:
-                    try:
-                        vals.append(float(raw)); has_num = True
-                    except Exception:
-                        vals.append(None)
+                    vals.append(fv); has_num = True
             if has_num:
                 rnames.append(str(r.get(rcol, "")))
                 mat.append(vals)
@@ -409,9 +420,8 @@ def _load_from_table(ch):
         gcol, vcol = ft["group_col"], ft["value_col"]
         g_order, g_vals = [], {}
         for r in rows:
-            try:
-                fv = float(r[vcol])
-            except Exception:
+            fv = _opt_float(r.get(vcol))
+            if fv is None:
                 continue
             gn = str(r.get(gcol, "Group"))
             if gn not in g_vals:
@@ -607,8 +617,40 @@ def _normalize_chart_spec(ch):
         ch["points"] = pts
     return ch
 
+def count_from_table_values(ch_raw):
+    """Hydrate a from_table chart spec without mutating input and return count of bound numeric values."""
+    if not isinstance(ch_raw, dict) or not isinstance(ch_raw.get("from_table"), dict):
+        return 0
+    ch = _normalize_chart_spec(ch_raw)
+    if ch.get("_table_error"):
+        return 0
+    cnt = 0
+    for b in ch.get("bars") or []:
+        if _opt_float(b.get("value")) is not None:
+            cnt += 1
+    for s in ch.get("series") or []:
+        cnt += sum(1 for v in (s.get("y") or s.get("values") or []) if _opt_float(v) is not None)
+    for pt in ch.get("points") or []:
+        cnt += sum(1 for k in ("x", "y") if _opt_float(pt.get(k)) is not None)
+    for it in ch.get("items") or []:
+        cnt += sum(1 for k in ("x", "size", "color") if _opt_float(it.get(k)) is not None)
+    for g in ch.get("groups") or []:
+        if isinstance(g, dict):
+            cnt += sum(1 for v in (g.get("values") or []) if _opt_float(v) is not None)
+    for row in ch.get("values") or []:
+        if isinstance(row, list):
+            cnt += sum(1 for v in row if _opt_float(v) is not None)
+    return cnt
+
 def build_chart(spec, scale_name="regular"):
-    ch = _normalize_chart_spec(spec.get("chart") or {})
+    raw_ch = spec.get("chart")
+    ch = _normalize_chart_spec(raw_ch or {})
+    if isinstance(raw_ch, dict) and isinstance(raw_ch.get("from_table"), dict) and not ch.get("_table_error"):
+        raw_ch["_resolved_meta"] = {
+            "n_series": len(ch.get("series") or []),
+            "has_group_bars": any(b.get("group") for b in (ch.get("bars") or [])),
+            "has_group_points": any(pt.get("group") for pt in (ch.get("points") or [])),
+        }
     kind = str(ch.get("kind") or ("box" if ch.get("groups") and isinstance(ch["groups"][0], dict) and ch["groups"][0].get("values")
                                   else "dotplot" if ch.get("items")
                                   else "heatmap" if ch.get("values") and ch.get("rows")
@@ -636,7 +678,7 @@ def build_chart(spec, scale_name="regular"):
     return _build_bar(spec, ch)
 
 def _fit_xlabel(lbl, max_w, base_size=12.5):
-    """Wrap into 2 lines if needed and shrink gently so long biological labels never collide."""
+    """Wrap into 2 lines if needed (ASCII spaces or CJK midpoint) and shrink gently so labels never collide."""
     s = str(lbl)
     if text_w(s, base_size) <= max_w:
         return s, base_size
@@ -650,6 +692,9 @@ def _fit_xlabel(lbl, max_w, base_size=12.5):
                 best = (w, a + "\n" + b)
         if best:
             s = best[1]
+    elif "\n" not in s and len(s) >= 4 and any(ord(c) > 0x2E80 for c in s):
+        mid = len(s) // 2
+        s = s[:mid] + "\n" + s[mid:]
     sz = base_size
     while sz > 8.5 and text_w(s, sz) > max_w:
         sz -= 0.5
@@ -675,14 +720,19 @@ def _build_grouped_bar(spec, ch):
 
     all_hi = [0.0]; all_lo = [0.0]
     for s in series:
-        vs = [float(v) for v in (s.get("values") or [])]
-        es = [abs(float(e or 0)) for e in (s.get("errs") or [0] * len(vs))]
-        for v, e in zip(vs, es):
-            all_hi.append(v + e); all_lo.append(v - e)
+        raw_vs = s.get("values") or []
+        raw_es = s.get("errs") or []
+        for ci_v, v in enumerate(raw_vs):
+            fv = _opt_float(v)
+            if fv is None:
+                continue
+            ev = abs(_sfloat(raw_es[ci_v] if ci_v < len(raw_es) else 0.0, 0.0))
+            all_hi.append(fv + ev); all_lo.append(fv - ev)
         for pts_i in (s.get("points") or []):
             if isinstance(pts_i, (list, tuple)):
-                all_hi.extend(float(p) for p in pts_i)
-                all_lo.extend(float(p) for p in pts_i)
+                fpts = [fv for p in pts_i if (fv := _opt_float(p)) is not None]
+                all_hi.extend(fpts)
+                all_lo.extend(fpts)
     hi_pad = max(all_hi) * 1.18 if max(all_hi) > 0 else 1.0
     lo_pad = min(all_lo) * 1.12 if min(all_lo) < 0 else 0.0
     ticks, bot, top = _nice_ticks(lo_pad, hi_pad, 5)
@@ -720,9 +770,12 @@ def _build_grouped_bar(spec, ch):
             vs = s.get("values") or []
             if ci >= len(vs):
                 continue
-            val = float(vs[ci])
+            fv_opt = _opt_float(vs[ci])
+            if fv_opt is None:
+                continue
+            val = fv_opt
             es = s.get("errs") or []
-            err = abs(float(es[ci])) if ci < len(es) and es[ci] is not None else 0.0
+            err = abs(_sfloat(es[ci], 0.0)) if ci < len(es) else 0.0
             col = s.get("color") or q[si % len(q)]
             bx = g_left + si * (bw + 4.0)
             cx = bx + bw / 2.0
@@ -741,10 +794,10 @@ def _build_grouped_bar(spec, ch):
                                   "stroke": "#1e293b", "stroke_w": 1.5, "role": "error_bar", "layer": "layer-edges"})
             pts_list = s.get("points") or []
             if ci < len(pts_list) and isinstance(pts_list[ci], (list, tuple)):
-                rpts = pts_list[ci]
+                rpts = [fv for pv in pts_list[ci] if (fv := _opt_float(pv)) is not None]
                 for pi, pv in enumerate(rpts):
                     px = cx + (pi - (len(rpts) - 1) / 2.0) * min(7.0, bw * 0.45 / max(1, len(rpts)))
-                    prims.append({"op": "circle", "cx": px, "cy": y_px(float(pv)), "r": 3.0,
+                    prims.append({"op": "circle", "cx": px, "cy": y_px(pv), "r": 3.0,
                                   "fill": "#1e293b", "stroke": "#ffffff", "stroke_w": 0.8,
                                   "role": "data_point", "layer": "layer-nodes"})
         lbl_txt, lbl_sz = _fit_xlabel(cat, slot - 8, 12.5)
@@ -760,8 +813,12 @@ def _build_grouped_bar(spec, ch):
             g_left = m["l"] + slot * (ci + 0.5) - used_w / 2.0
             xa = g_left + sa * (bw + 4.0) + bw / 2.0
             xb = g_left + sb * (bw + 4.0) + bw / 2.0
-            va = float((series[sa].get("values") or [0])[ci]) + abs(float((series[sa].get("errs") or [0] * n_c)[ci] or 0))
-            vb = float((series[sb].get("values") or [0])[ci]) + abs(float((series[sb].get("errs") or [0] * n_c)[ci] or 0))
+            vs_a = series[sa].get("values") or []
+            es_a = series[sa].get("errs") or []
+            vs_b = series[sb].get("values") or []
+            es_b = series[sb].get("errs") or []
+            va = (_sfloat(vs_a[ci], 0.0) if ci < len(vs_a) else 0.0) + abs(_sfloat(es_a[ci], 0.0) if ci < len(es_a) else 0.0)
+            vb = (_sfloat(vs_b[ci], 0.0) if ci < len(vs_b) else 0.0) + abs(_sfloat(es_b[ci], 0.0) if ci < len(es_b) else 0.0)
             by = max(m["t"] + 12.0, y_px(max(va, vb)) - 16.0 - bi * 18.0)
             prims.append({"op": "polyline", "pts": [[xa, by + 5], [xa, by], [xb, by], [xb, by + 5]],
                           "stroke": "#1e293b", "stroke_w": 1.3, "role": "bracket", "layer": "layer-edges"})
@@ -871,12 +928,12 @@ def _build_bar(spec, ch):
                 prims.append({"op": "polyline", "pts": [[cx - 5.5, yy], [cx + 5.5, yy]],
                               "stroke": "#1e293b", "stroke_w": 1.6, "role": "error_bar", "layer": "layer-edges"})
         # Optional individual replicate points
-        rpts = b.get("points") or []
+        rpts = [fv for pv in (b.get("points") or []) if (fv := _opt_float(pv)) is not None]
         if rpts:
             k_p = len(rpts)
             for pi, pv in enumerate(rpts):
                 px = cx + ((pi - (k_p - 1) / 2.0) * min(9.0, bw * 0.5 / max(1, k_p)))
-                py = y_px(float(pv))
+                py = y_px(pv)
                 top_pt = min(top_pt, py - 4)
                 bot_pt = max(bot_pt, py + 4)
                 prims.append({"op": "circle", "cx": px, "cy": py, "r": 3.4, "fill": "#ffffff",
@@ -933,7 +990,7 @@ def _build_hbar(spec, ch):
     left_m = int(min(440, max(120, max_lbl_w + 28)))
     W = int(ch.get("width") or max(900, left_m + 560))
     H = int(ch.get("height") or max(440, 150 + len(bars) * 48))
-    max_val_w = max((text_w(_fmt(float(b.get("value", 0))), 11.5) for b in bars), default=36)
+    max_val_w = max((text_w(_fmt(_sfloat(b.get("value"), 0.0)), 11.5) for b in bars), default=36)
     m = {"l": left_m, "r": int(max(68, max_val_w + 26)),
          "t": 62 + (24 if has_leg else 0), "b": 78}
     gw, gh = W - m["l"] - m["r"], H - m["t"] - m["b"]
@@ -942,8 +999,8 @@ def _build_hbar(spec, ch):
     if has_leg:
         _top_legend(prims, [(g, q[i % len(q)], "box") for i, g in enumerate(groups)], W, 56)
 
-    vals = [float(b.get("value", 0)) for b in bars]
-    errs = [abs(float(b.get("err") or 0)) for b in bars]
+    vals = [_sfloat(b.get("value"), 0.0) for b in bars]
+    errs = [abs(_sfloat(b.get("err"), 0.0)) for b in bars]
     has_neg = any(v - e < 0 for v, e in zip(vals, errs))
     hi_raw = max([0.0] + [v + e for v, e in zip(vals, errs)])
     lo_raw = min([0.0] + [v - e for v, e in zip(vals, errs)]) if has_neg else 0.0
@@ -1197,7 +1254,10 @@ def _build_scatter(spec, ch):
             gcounts[g] = gcounts.get(g, 0) + 1
             if g not in groups:
                 groups.append(g)
+    if set(groups).issubset({"Up", "Down", "Significant", "NS"}):
+        groups = [g for g in ("Up", "Down", "Significant", "NS") if g in groups]
     gcolors = {"Up": "#dc2626", "Down": "#2563eb", "NS": "#94a3b8", "Significant": "#dc2626"}
+    def_r = 3.8 if len(pts) > 80 else (4.4 if len(pts) > 35 else 5.2)
     has_leg = len(groups) >= 1
     W = int(ch.get("width") or 900)
     H = int(ch.get("height") or 580)
@@ -1213,11 +1273,19 @@ def _build_scatter(spec, ch):
 
     xs = [float(p["x"]) for p in pts] or [0.0, 1.0]
     ys = [float(p["y"]) for p in pts] or [0.0, 1.0]
-    xpad = ((max(xs) - min(xs)) or 1.0) * 0.12
-    ypad = ((max(ys) - min(ys)) or 1.0) * 0.14
-    xticks, x0, x1 = _nice_ticks(min(xs) - xpad, max(xs) + xpad, 6)
-    yticks, y0, y1 = _nice_ticks(max(0.0, min(ys) - ypad) if min(ys) >= 0 else min(ys) - ypad,
-                                 max(ys) + ypad, 5)
+    x_min_d, x_max_d = min(xs), max(xs)
+    y_min_d, y_max_d = min(ys), max(ys)
+    if x_thr is not None:
+        xt_a = abs(_sfloat(x_thr, 0.0))
+        x_min_d = min(x_min_d, -xt_a); x_max_d = max(x_max_d, xt_a)
+    if y_thr is not None:
+        yt_a = _sfloat(y_thr, 0.0)
+        y_max_d = max(y_max_d, yt_a)
+    xpad = ((x_max_d - x_min_d) or 1.0) * 0.12
+    ypad = ((y_max_d - y_min_d) or 1.0) * 0.14
+    xticks, x0, x1 = _nice_ticks(x_min_d - xpad, x_max_d + xpad, 6)
+    yticks, y0, y1 = _nice_ticks(max(0.0, y_min_d - ypad) if y_min_d >= 0 else y_min_d - ypad,
+                                 y_max_d + ypad, 5)
     xspan, yspan = (x1 - x0) or 1.0, (y1 - y0) or 1.0
     def x_px(v): return m["l"] + gw * ((v - x0) / xspan)
     def y_px(v): return m["t"] + gh * (1.0 - (v - y0) / yspan)
@@ -1240,20 +1308,26 @@ def _build_scatter(spec, ch):
                   "stroke": "#334155", "stroke_w": 1.5, "role": "deco", "layer": "layer-compartments"})
 
     for hl in hlines:
-        val = float(hl["y"] if isinstance(hl, dict) else hl)
+        val = _opt_float(hl["y"] if isinstance(hl, dict) else hl)
+        if val is None:
+            continue
         gy = y_px(val)
-        prims.append({"op": "polyline", "pts": [[m["l"], gy], [m["l"] + gw, gy]], "stroke": "#94a3b8",
-                      "stroke_w": 1.2, "dashed": True, "role": "deco", "layer": "layer-compartments"})
+        if m["t"] - 1 <= gy <= m["t"] + gh + 1:
+            prims.append({"op": "polyline", "pts": [[m["l"], gy], [m["l"] + gw, gy]], "stroke": "#94a3b8",
+                          "stroke_w": 1.2, "dashed": True, "role": "deco", "layer": "layer-compartments"})
     for vl in vlines:
-        val = float(vl["x"] if isinstance(vl, dict) else vl)
+        val = _opt_float(vl["x"] if isinstance(vl, dict) else vl)
+        if val is None:
+            continue
         gx = x_px(val)
-        prims.append({"op": "polyline", "pts": [[gx, m["t"]], [gx, m["t"] + gh]], "stroke": "#94a3b8",
-                      "stroke_w": 1.2, "dashed": True, "role": "deco", "layer": "layer-compartments"})
+        if m["l"] - 1 <= gx <= m["l"] + gw + 1:
+            prims.append({"op": "polyline", "pts": [[gx, m["t"]], [gx, m["t"] + gh]], "stroke": "#94a3b8",
+                          "stroke_w": 1.2, "dashed": True, "role": "deco", "layer": "layer-compartments"})
 
     dot_boxes = []
     for pt in pts:
         px0, py0 = x_px(float(pt["x"])), y_px(float(pt["y"]))
-        r0 = float(pt.get("size") or 5.2)
+        r0 = _sfloat(pt.get("size"), def_r)
         dot_boxes.append([px0 - r0 - 2.0, py0 - r0 - 2.0, px0 + r0 + 2.0, py0 + r0 + 2.0])
 
     # Guard against label explosion on dense omics CSVs (e.g. 50-200 DEG volcano tables)
@@ -1288,7 +1362,7 @@ def _build_scatter(spec, ch):
         px, py = x_px(float(pt["x"])), y_px(float(pt["y"]))
         g = pt.get("group")
         col = pt.get("color") or (gcolors.get(g, q[groups.index(g) % len(q)]) if g in groups else q[0])
-        r = float(pt.get("size") or 5.2)
+        r = _sfloat(pt.get("size"), def_r)
         is_hl = bool(pt.get("label") and str(pt.get("label")) in (explicit_genes | hl_genes))
         prims.append({"op": "circle", "cx": px, "cy": py, "r": (r + 1.2 if is_hl else r), "fill": col,
                       "opacity": 0.92 if is_hl else 0.85,
@@ -1309,7 +1383,7 @@ def _build_scatter(spec, ch):
     for i in lbl_order:
         pt = pts[i]
         px, py = x_px(float(pt["x"])), y_px(float(pt["y"]))
-        r = float(pt.get("size") or 5.2)
+        r = _sfloat(pt.get("size"), def_r)
         lbl = str(pt["label"])
         is_hl = lbl in must_set
         chosen = None
@@ -1370,16 +1444,15 @@ def _build_heatmap(spec, ch):
     flat = []
     for row in vals:
         for v in row:
-            if v is not None and str(v).strip().lower() not in ("", "na", "nan", "none"):
-                try:
-                    fv = float(v)
-                    if not math.isnan(fv):
-                        flat.append(fv)
-                except Exception:
-                    pass
+            fv = _opt_float(v)
+            if fv is not None:
+                flat.append(fv)
     flat = flat or [0.0, 1.0]
     vmin = float(ch.get("vmin") if ch.get("vmin") is not None else min(flat))
     vmax = float(ch.get("vmax") if ch.get("vmax") is not None else max(flat))
+    if is_diverging(pal) and ch.get("vmin") is None and ch.get("vmax") is None and vmin < 0.0 < vmax:
+        lim = max(abs(vmin), abs(vmax))
+        vmin, vmax = -lim, lim
     max_rw = max((text_w(str(r), 12.0) for r in rows), default=80)
     max_cw = max((text_w(str(c), 11.5) for c in cols), default=56)
     cell_w = max(62, min(116, max(int(560 / max(1, len(cols))), int(min(max_cw + 12, 116)))))
@@ -1399,15 +1472,7 @@ def _build_heatmap(spec, ch):
                       "role": "text", "layer": "layer-chrome", "_id": f"rowlabel-{ri}"})
         for ci, clbl in enumerate(cols):
             raw_v = vals[ri][ci] if ci < len(vals[ri]) else None
-            is_na = raw_v is None or str(raw_v).strip().lower() in ("", "na", "nan", "none")
-            v = None
-            if not is_na:
-                try:
-                    fv = float(raw_v)
-                    if not math.isnan(fv):
-                        v = fv
-                except Exception:
-                    v = None
+            v = _opt_float(raw_v)
             x0, y0 = m["l"] + ci * cell_w, m["t"] + ri * cell_h
             if v is None:
                 prims.append({"op": "rect", "x": x0, "y": y0, "w": cell_w, "h": cell_h, "rx": 2,
@@ -1451,6 +1516,11 @@ def _build_heatmap(spec, ch):
                   "role": "legend", "layer": "layer-legend"})
     prims.append({"op": "text", "x": cbx + 25, "y": cby + 4, "s": _fmt(vmax), "size": 11.0,
                   "anchor": "start", "fill": "#334155", "role": "legend", "layer": "layer-legend"})
+    if is_diverging(pal) and vmin < 0.0 < vmax:
+        y_zero = cby + cbh * (vmax / ((vmax - vmin) or 1.0))
+        if cby + 16.0 <= y_zero <= cby + cbh - 16.0:
+            prims.append({"op": "text", "x": cbx + 25, "y": y_zero, "s": "0", "size": 11.0,
+                          "anchor": "start", "fill": "#334155", "role": "legend", "layer": "layer-legend"})
     prims.append({"op": "text", "x": cbx + 25, "y": cby + cbh - 4, "s": _fmt(vmin), "size": 11.0,
                   "anchor": "start", "fill": "#334155", "role": "legend", "layer": "layer-legend"})
     if ch.get("cbar_label"):
@@ -1477,9 +1547,9 @@ def _build_dotplot(spec, ch):
         _draw_chrome(prims, spec, ch, W, H, m)
         return prims, W, H, [], []
 
-    xs = [float(it.get("x", 0)) for it in items]
-    szs = [float(it.get("size", 10)) for it in items]
-    cols = [float(it.get("color", it.get("x", 1))) for it in items]
+    xs = [_sfloat(it.get("x"), 0.0) for it in items]
+    szs = [_sfloat(it.get("size"), 10.0) for it in items]
+    cols = [_sfloat(it.get("color", it.get("x")), 1.0) for it in items]
     x_lo, x_hi = min(xs), max(xs)
     x_pad = max(0.08 * (x_hi - x_lo), 0.15 * max(abs(x_hi), 1.0))
     xticks, left, right = _nice_ticks(x_lo - x_pad if x_lo < 0 else max(0.0, x_lo - x_pad), x_hi + x_pad, 5)
@@ -1510,9 +1580,9 @@ def _build_dotplot(spec, ch):
         prims.append({"op": "polyline", "pts": [[m["l"], cy], [m["l"] + gw, cy]],
                       "stroke": "#f1f5f9", "stroke_w": 1.0, "dashed": True,
                       "role": "deco", "layer": "layer-compartments"})
-        xv = float(it.get("x", 0))
-        sv = float(it.get("size", 10))
-        cv = float(it.get("color", xv))
+        xv = _sfloat(it.get("x"), 0.0)
+        sv = _sfloat(it.get("size"), 10.0)
+        cv = _sfloat(it.get("color", xv), xv)
         ts = (sv - smin) / ((smax - smin) or 1.0)
         tc = (cv - cmin) / ((cmax - cmin) or 1.0)
         r = 6.5 + 9.0 * min(1.0, max(0.0, ts))
@@ -1587,7 +1657,7 @@ def _build_stacked_bar(spec, ch):
 
     totals = []
     for ci in range(n_c):
-        tot = sum(max(0.0, float((s.get("values") or [0])[ci])) if ci < len(s.get("values") or []) else 0.0 for s in series)
+        tot = sum(max(0.0, _sfloat((s.get("values") or [0])[ci], 0.0)) if ci < len(s.get("values") or []) else 0.0 for s in series)
         totals.append(tot or 1.0)
     ymax = 100.0 if norm else max(totals or [1.0]) * 1.12
     ticks, bot, top = _nice_ticks(0.0, ymax, 5)
@@ -1614,7 +1684,7 @@ def _build_stacked_bar(spec, ch):
         acc = 0.0
         for si, s in enumerate(series):
             vs = s.get("values") or []
-            raw_v = max(0.0, float(vs[ci])) if ci < len(vs) else 0.0
+            raw_v = max(0.0, _sfloat(vs[ci], 0.0)) if ci < len(vs) else 0.0
             v = (100.0 * raw_v / totals[ci]) if norm else raw_v
             if v <= 0:
                 continue
@@ -1662,7 +1732,7 @@ def _build_box(spec, ch):
     gw, gh = W - m["l"] - m["r"], H - m["t"] - m["b"]
     prims = [{"op": "rect", "x": 0, "y": 0, "w": W, "h": H, "fill": "#ffffff",
               "stroke": "none", "stroke_w": 0, "role": "bg", "layer": "layer-backdrop"}]
-    all_v = [float(v) for g in groups for v in (g.get("values") or [])] or [0.0, 1.0]
+    all_v = [fv for g in groups for v in (g.get("values") or []) if (fv := _opt_float(v)) is not None] or [0.0, 1.0]
     lo_v, hi_v = min(all_v), max(all_v)
     pad = max((hi_v - lo_v) * 0.14, 0.5)
     y_max_need = hi_v + pad * (1.0 + 0.6 * len(brks))
@@ -1685,7 +1755,7 @@ def _build_box(spec, ch):
     bw = min(slot * 0.44, 64.0)
     cxs, tops_y = [], []
     for i, g in enumerate(groups):
-        vs = sorted(float(v) for v in (g.get("values") or []))
+        vs = sorted(fv for v in (g.get("values") or []) if (fv := _opt_float(v)) is not None)
         cx = m["l"] + slot * (i + 0.5)
         cxs.append(cx)
         col = g.get("color") or q[i % len(q)]

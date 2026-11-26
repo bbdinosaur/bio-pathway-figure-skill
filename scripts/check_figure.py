@@ -9,6 +9,11 @@ import sys, re, json, argparse
 from pathlib import Path
 from html import unescape
 
+_SCRIPTS_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+from render_preview import parse_svg_dimensions
+
 def _attr(tag, name):
     m = re.search(r'(?:^|\s)' + name + r'''=(["'])([^"']*)\1''', tag)
     return m.group(2) if m else None
@@ -35,14 +40,9 @@ def _translate_of(attrs):
     return float(m.group(1)), float(m.group(2) or 0.0)
 
 def audit(svg_text):
-    vb = _attr(svg_text, "viewBox")
-    if vb:
-        parts = [p for p in re.split(r"[\s,]+", vb.strip()) if p]
-        W = _num(parts[2], 1000) if len(parts) >= 4 else 1000.0
-        H = _num(parts[3], 800) if len(parts) >= 4 else 800.0
-    else:
-        W = _num(_attr(svg_text, "width"), 1000)
-        H = _num(_attr(svg_text, "height"), 800)
+    dims = parse_svg_dimensions(svg_text)
+    vx0, vy0 = dims["user_x"], dims["user_y"]
+    W, H = dims["user_w"], dims["user_h"]
 
     layers = []
     panel_groups = []
@@ -124,7 +124,7 @@ def audit(svg_text):
                 bb = [x0, y - h / 2.0, x0 + w, y + h / 2.0]
 
         boxes.append((tag, bb, drole))
-        if bb[0] < -2 or bb[1] < -2 or bb[2] > W + 2 or bb[3] > H + 2:
+        if bb[0] < vx0 - 2 or bb[1] < vy0 - 2 or bb[2] > vx0 + W + 2 or bb[3] > vy0 + H + 2:
             v.append({"code": "out_of_canvas", "tag": tag, "role": drole,
                       "bbox": [round(q, 1) for q in bb]})
         if drole.startswith("legend"):
@@ -137,9 +137,12 @@ def audit(svg_text):
             if not (a[2] <= b[0] + 0.5 or b[2] <= a[0] + 0.5 or a[3] <= b[1] + 0.5 or b[3] <= a[1] + 0.5):
                 v.append({"code": "text_overlap", "a": [round(q, 1) for q in a], "b": [round(q, 1) for q in b]})
 
-    return {"canvas": [W, H], "elements": len(boxes), "layers_found": layers,
-            "panel_groups": panel_groups, "layers_named": len(layers) >= 2,
-            "legend_marks": legend_marks, "violations": v, "n_violations": len(v)}
+    out = {"canvas": [W, H], "elements": len(boxes), "layers_found": layers,
+           "panel_groups": panel_groups, "layers_named": len(layers) >= 2,
+           "legend_marks": legend_marks, "violations": v, "n_violations": len(v)}
+    if dims["css_w"] > 0 and dims["css_h"] > 0:
+        out["css_size"] = [round(dims["css_w"], 2), round(dims["css_h"], 2)]
+    return out
 
 def pixel_audit(png_path):
     """Real pixel-level verification of a rendered PNG (dimensions, ink coverage, border clipping)."""

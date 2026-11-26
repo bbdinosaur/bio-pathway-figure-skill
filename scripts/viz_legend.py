@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from viz_style import EDGE_STYLES, NODE_STYLES, ramp, text_w
+from viz_style import EDGE_STYLES, NODE_STYLES, ramp, text_w, wrap_text, is_diverging
 from viz_geom import norm
 from viz_nodes import MOD_COLORS, hex_pts
 
@@ -189,29 +189,24 @@ def build_legend(prims, used_edges, placed, spec, lx, top, opts=None):
         lo, hi = dm.get("min", "low"), dm.get("max", "high")
         prims.append({"op": "text", "x": lx + 4, "y": y + 17, "s": str(lo), "size": 11.0,
                       "anchor": "start", "fill": "#475569", "role": "legend", "layer": "layer-legend"})
+        if is_diverging(name) and isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
+            mid_v = 0 if (float(lo) < 0 < float(hi) and abs(float(lo) + float(hi)) <= 0.15 * (float(hi) - float(lo))) else round(0.5 * (float(lo) + float(hi)), 2)
+            mid_s = "0" if mid_v == 0 else f"{mid_v:g}"
+            prims.append({"op": "text", "x": lx + 136, "y": y + 17, "s": mid_s, "size": 11.0,
+                          "anchor": "middle", "fill": "#475569", "role": "legend", "layer": "layer-legend"})
         prims.append({"op": "text", "x": lx + 268, "y": y + 17, "s": str(hi), "size": 11.0,
                       "anchor": "end", "fill": "#475569", "role": "legend", "layer": "layer-legend"})
         cy2 = y + 34
         if dm.get("size_caption"):
-            prims.append({"op": "text", "x": lx + 4, "y": cy2, "s": str(dm["size_caption"]),
-                          "size": 11.0, "anchor": "start", "fill": "#475569",
-                          "role": "legend", "layer": "layer-legend"})
-            cy2 += 16
-        ccap = str(dm.get("caption", ""))
-        cur = ""
-        for word in ccap.split(" "):
-            t = (cur + " " + word).strip()
-            if text_w(t, 11.0) <= 290 or not cur:
-                cur = t
-            else:
-                prims.append({"op": "text", "x": lx + 4, "y": cy2, "s": cur, "size": 11.0,
-                              "anchor": "start", "fill": "#475569", "role": "legend", "layer": "layer-legend"})
-                cy2 += 15
-                cur = word
-        if cur:
-            prims.append({"op": "text", "x": lx + 4, "y": cy2, "s": cur, "size": 11.0,
+            for ln in wrap_text(str(dm["size_caption"]), 290, 11.0):
+                prims.append({"op": "text", "x": lx + 4, "y": cy2, "s": ln,
+                              "size": 11.0, "anchor": "start", "fill": "#475569",
+                              "role": "legend", "layer": "layer-legend"})
+                cy2 += 16
+        for ln in wrap_text(str(dm.get("caption", "")), 290, 11.0):
+            prims.append({"op": "text", "x": lx + 4, "y": cy2, "s": ln, "size": 11.0,
                           "anchor": "start", "fill": "#475569", "role": "legend", "layer": "layer-legend"})
-            cy2 += 14
+            cy2 += 15
         y = max(cy2, y + 42)
 
     wm = spec.get("width_map")
@@ -222,36 +217,28 @@ def build_legend(prims, used_edges, placed, spec, lx, top, opts=None):
         wm = wm or {}
         wlo = wm.get("min", min(wvals) if wvals else "low")
         whi = wm.get("max", max(wvals) if wvals else "high")
+        wmid = (f"{round(0.5 * (float(wlo) + float(whi)), 2):g}"
+                if isinstance(wlo, (int, float)) and isinstance(whi, (int, float)) else "mid")
         y += 6
         prims.append({"op": "text", "x": lx, "y": y, "s": "Edge width", "size": 12.0,
                       "anchor": "start", "fill": "#475569", "weight": "bold",
                       "role": "legend", "layer": "layer-legend"})
         y += 20
-        for sw_px, lbl_w, ox in ((1.5, str(wlo), 4), (3.0, "mid", 96), (4.6, str(whi), 186)):
-            prims.append({"op": "polyline", "pts": [[lx + ox, y], [lx + ox + 36, y]],
+        for sw_px, lbl_w, ox in ((1.5, str(wlo), 4), (3.0, wmid, 100), (4.6, str(whi), 196)):
+            prims.append({"op": "polyline", "pts": [[lx + ox, y], [lx + ox + 34, y]],
                           "stroke": "#334155", "stroke_w": sw_px,
                           "role": "legend_edge", "layer": "layer-legend"})
-            prims.append({"op": "text", "x": lx + ox + 42, "y": y, "s": lbl_w, "size": 10.5,
+            prims.append({"op": "text", "x": lx + ox + 40, "y": y, "s": lbl_w, "size": 10.5,
                           "anchor": "start", "fill": "#475569",
                           "role": "legend", "layer": "layer-legend"})
         y += 18
         if wm.get("caption"):
-            cur = ""
-            for word in str(wm["caption"]).split(" "):
-                t = (cur + " " + word).strip()
-                if text_w(t, 11.0) <= 290 or not cur:
-                    cur = t
-                else:
-                    prims.append({"op": "text", "x": lx + 4, "y": y, "s": cur, "size": 11.0,
-                                  "anchor": "start", "fill": "#475569",
-                                  "role": "legend", "layer": "layer-legend"})
-                    y += 15
-                    cur = word
-            if cur:
-                prims.append({"op": "text", "x": lx + 4, "y": y, "s": cur, "size": 11.0,
+            for ln in wrap_text(str(wm["caption"]), 290, 11.0):
+                prims.append({"op": "text", "x": lx + 4, "y": y, "s": ln, "size": 11.0,
                               "anchor": "start", "fill": "#475569",
                               "role": "legend", "layer": "layer-legend"})
-                y += 16
+                y += 15
+            y += 1
 
     sm = spec.get("size_map")
     if sm and not (dm and dm.get("size_caption")):
@@ -272,20 +259,11 @@ def build_legend(prims, used_edges, placed, spec, lx, top, opts=None):
                       "anchor": "start", "fill": "#475569", "role": "legend", "layer": "layer-legend"})
         y += 20
         if sm.get("caption"):
-            cur = ""
-            for word in str(sm["caption"]).split(" "):
-                t = (cur + " " + word).strip()
-                if text_w(t, 11.0) <= 290 or not cur:
-                    cur = t
-                else:
-                    prims.append({"op": "text", "x": lx + 4, "y": y, "s": cur, "size": 11.0,
-                                  "anchor": "start", "fill": "#475569", "role": "legend", "layer": "layer-legend"})
-                    y += 15
-                    cur = word
-            if cur:
-                prims.append({"op": "text", "x": lx + 4, "y": y, "s": cur, "size": 11.0,
+            for ln in wrap_text(str(sm["caption"]), 290, 11.0):
+                prims.append({"op": "text", "x": lx + 4, "y": y, "s": ln, "size": 11.0,
                               "anchor": "start", "fill": "#475569", "role": "legend", "layer": "layer-legend"})
-                y += 16
+                y += 15
+            y += 1
 
     card_h = max(60, (y + 10) - (top - 20))
     prims[sh_idx]["h"] = card_h

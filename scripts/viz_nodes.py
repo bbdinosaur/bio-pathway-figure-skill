@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from viz_style import NODE_STYLES, ramp, contrast_text
+from viz_style import NODE_STYLES, ramp, contrast_text, text_w
 
 MOD_COLORS = {"P": "#b45309", "Ub": "#92400e", "Ac": "#7c3aed", "GTP": "#0f766e",
               "Me": "#a21caf", "SUMO": "#0369a1"}
@@ -110,8 +110,7 @@ def draw_nodes(placed, prims, spec=None):
         italic = bool(st.get("italic")) or bool(n.get("italic"))
         size = float(n.get("label_size") or 14.5)
         maxw = n["w"] - 16
-        longest = max((len(ln) for ln in label.split("\n")), default=1)
-        while size > 10.5 and 0.62 * size * longest > maxw:
+        while size > 10.5 and text_w(label, size) > maxw:
             size -= 0.5
         ink = n.get("label_fill") or (contrast_text(fill) if auto_fill else "#1e293b")
         use_halo = (ink == "#1e293b")
@@ -136,7 +135,7 @@ def draw_nodes(placed, prims, spec=None):
                           "halo": use_halo, "role": "node_label", "layer": "layer-nodes",
                           "_id": f"label-{n['id']}"})
         if subunits:
-            pill_ws = [max(36.0, min(88.0, len(u) * 6.5 + 12.0)) for u in subunits]
+            pill_ws = [max(36.0, min(96.0, text_w(u, 9.5) + 14.0)) for u in subunits]
             tot_pw = sum(pill_ws) + 6.0 * max(0, len(subunits) - 1)
             px_cur = n["cx"] - tot_pw / 2.0
             py_pill = y0 + n["h"] - 23.0

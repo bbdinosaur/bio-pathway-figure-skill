@@ -105,6 +105,12 @@ COMP_STYLES = {
     "custom":    {"fill": "#f8fafc", "border": "#cbd5e1"},
 }
 
+def is_diverging(name) -> bool:
+    key = str(name or "blues").strip().lower()
+    if key.endswith("_r") and len(key) > 2:
+        key = key[:-2]
+    return PALETTE_ALIASES.get(key, key) == "fold"
+
 def text_w(s, size):
     """Estimate rendered text width in px (latin ~0.60em, CJK 1.0em). Multi-line aware."""
     lines = str(s).split("\n")
@@ -116,5 +122,37 @@ def text_w(s, size):
         if w > best:
             best = w
     return best
+
+def wrap_text(s, maxpx, size):
+    """CJK-aware word wrapper that preserves explicit newlines and breaks wide unspaced CJK runs cleanly."""
+    out = []
+    for para in str(s or "").split("\n"):
+        if not para:
+            continue
+        words = para.split(" ")
+        cur = ""
+        for w in words:
+            t = (cur + " " + w).strip() if cur else w
+            if text_w(t, size) <= maxpx:
+                cur = t
+            elif not cur or text_w(w, size) > maxpx:
+                if cur:
+                    out.append(cur)
+                    cur = ""
+                # Break overly long token (e.g. unspaced Chinese sentence or long ID) char-by-char
+                buf = ""
+                for ch in w:
+                    if buf and text_w(buf + ch, size) > maxpx and ch not in "）)】》。.,，；;:：":
+                        out.append(buf)
+                        buf = ch
+                    else:
+                        buf += ch
+                cur = buf
+            else:
+                out.append(cur)
+                cur = w
+        if cur:
+            out.append(cur)
+    return out
 
 SCALES = {"compact": 60, "regular": 88, "roomy": 124}

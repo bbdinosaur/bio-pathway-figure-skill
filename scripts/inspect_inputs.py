@@ -15,20 +15,27 @@ from pathlib import Path
 
 def _preview_csv(path: Path, delim: str, max_rows: int = 45, max_scan: int = 5000):
     try:
-        cols, data = [], []
-        n_total = 0
         raw_lines = path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
-        first_ln = next((ln for ln in raw_lines if ln.strip()), "")
+        banner_notes = []
+        clean_lines = []
+        for ln in raw_lines:
+            s = ln.strip()
+            if not s:
+                continue
+            if not clean_lines and s.startswith("#"):
+                banner_notes.append(s.lstrip("#").strip()[:160])
+                continue
+            clean_lines.append(ln)
+        first_ln = clean_lines[0] if clean_lines else ""
         if delim == "," and first_ln.count(";") >= 2 and first_ln.count(",") == 0:
             delim = ";"
-        rdr = csv.reader(raw_lines, delimiter=delim)
-        for ri, row in enumerate(rdr):
-            if ri == 0:
-                cols = [c.strip() for c in row]
-            else:
-                n_total += 1
-                if len(data) < max_scan:
-                    data.append(row)
+        all_rows = list(csv.reader(clean_lines, delimiter=delim))
+        h_idx, b_notes = _detect_header_row(all_rows)
+        banner_notes.extend(b_notes)
+        cols = [c.strip() for c in all_rows[h_idx]] if h_idx < len(all_rows) else []
+        data_all = all_rows[h_idx + 1:] if h_idx < len(all_rows) else []
+        n_total = len(data_all)
+        data = data_all[:max_scan]
         take = len(data) if n_total <= 70 else max_rows
         num_stats, cat_prev = _table_stats(cols, data)
         res_t = {
@@ -38,11 +45,27 @@ def _preview_csv(path: Path, delim: str, max_rows: int = 45, max_scan: int = 500
             "head": data[:take],
             "truncated": n_total > take,
         }
+        if banner_notes:
+            res_t["banner_notes"] = banner_notes[:3]
         if cat_prev:
             res_t["categorical_preview"] = cat_prev
         return res_t
     except Exception as e:
         return {"error": str(e)}
+
+def _parse_num_cell(raw: str):
+    s = str(raw or "").strip()
+    if not s or s.lower() in ("na", "nan", "none", "null", "-"):
+        return None
+    if "," in s and re.fullmatch(r"[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?%?", s):
+        s = s.replace(",", "")
+    if s.endswith("%"):
+        s = s[:-1].strip()
+    try:
+        fv = float(s)
+        return None if (fv != fv) else fv
+    except Exception:
+        return None
 
 def _table_stats(cols, data):
     num_stats = {}
@@ -56,15 +79,19 @@ def _table_stats(cols, data):
                 raw = str(r[ci]).strip()
                 if not raw:
                     continue
-                try:
-                    vals.append(float(raw))
-                except Exception:
+                fv = _parse_num_cell(raw)
+                if fv is not None:
+                    vals.append(fv)
+                else:
                     if raw not in seen_c:
                         seen_c.add(raw)
                         if len(cats) < 6:
                             cats.append(raw[:40])
         if vals:
-            num_stats[str(cname)] = {"n": len(vals), "min": min(vals), "max": max(vals)}
+            num_stats[str(cname)] = {
+                "n": len(vals), "min": min(vals), "max": max(vals),
+                "mean": round(sum(vals) / len(vals), 4),
+            }
         elif cats and len(seen_c) <= max(12, len(data) // 2 + 2):
             cat_prev[str(cname)] = {"n_unique": len(seen_c), "sample": cats}
     return num_stats, cat_prev
@@ -138,6 +165,24 @@ def _read_xlsx_stdlib(path: Path, max_scan: int = 5000):
             out[sheet_names.get(nm, Path(nm).stem)] = rows
     return out
 
+def _detect_header_row(rows: list) -> tuple[int, list[str]]:
+    """Skip leading 1-cell title banners (e.g. 'Table S1. ...') in supplementary Excel sheets."""
+    if not rows:
+        return 0, []
+    def _nonempty(r):
+        return [c for c in r if str(c).strip() != ""]
+    ne0 = _nonempty(rows[0])
+    if len(ne0) <= 1 and len(rows) > 1:
+        for i in range(1, min(8, len(rows))):
+            nei = _nonempty(rows[i])
+            if len(nei) >= 2:
+                # Prefer a row with mostly string column labels
+                n_str = sum(1 for c in nei if not isinstance(c, (int, float)))
+                if n_str >= max(2, len(nei) // 2):
+                    notes = [" ".join(str(x).strip() for x in _nonempty(r)) for r in rows[:i] if _nonempty(r)]
+                    return i, notes
+    return 0, []
+
 def _preview_xlsx(path: Path, max_rows: int = 45, max_scan: int = 5000):
     sheets_raw = None
     try:
@@ -174,8 +219,9 @@ def _preview_xlsx(path: Path, max_rows: int = 45, max_scan: int = 5000):
             return {"error": str(e)}
     out = {}
     for name, rows in sheets_raw.items():
-        cols = rows[0] if rows else []
-        data = rows[1:]
+        h_idx, banner_notes = _detect_header_row(rows)
+        cols = [str(c).strip() for c in rows[h_idx]] if h_idx < len(rows) else []
+        data = rows[h_idx + 1:] if h_idx < len(rows) else []
         take = len(data) if len(data) <= 70 else max_rows
         num_stats, cat_prev = _table_stats(cols, data)
         sh_obj = {
@@ -185,6 +231,8 @@ def _preview_xlsx(path: Path, max_rows: int = 45, max_scan: int = 5000):
             "head": data[:take],
             "truncated": len(data) > take,
         }
+        if banner_notes:
+            sh_obj["banner_notes"] = banner_notes[:3]
         if cat_prev:
             sh_obj["categorical_preview"] = cat_prev
         out[name] = sh_obj
@@ -196,13 +244,36 @@ def _preview_docx(path: Path, max_chars: int = 12000):
             if "word/document.xml" not in zf.namelist():
                 return ""
             root = ET.fromstring(zf.read("word/document.xml"))
-            paras = []
-            for p in root.iter():
-                if p.tag.split("}")[-1] == "p":
-                    t = "".join(ch.text or "" for ch in p.iter() if ch.tag.split("}")[-1] == "t").strip()
+            body = next((el for el in root if el.tag.split("}")[-1] == "body"), root)
+            blocks = []
+            for ch in body:
+                tag = ch.tag.split("}")[-1]
+                if tag == "p":
+                    t = "".join(x.text or "" for x in ch.iter() if x.tag.split("}")[-1] == "t").strip()
                     if t:
-                        paras.append(t)
-            return "\n".join(paras)[:max_chars]
+                        blocks.append(t)
+                elif tag == "tbl":
+                    for tr in ch:
+                        if tr.tag.split("}")[-1] != "tr":
+                            continue
+                        cells = []
+                        for tc in tr:
+                            if tc.tag.split("}")[-1] != "tc":
+                                continue
+                            ct = " ".join(
+                                "".join(x.text or "" for x in p.iter() if x.tag.split("}")[-1] == "t").strip()
+                                for p in tc if p.tag.split("}")[-1] == "p"
+                            ).strip()
+                            cells.append(ct)
+                        if any(cells):
+                            blocks.append(" | ".join(cells))
+            if not blocks:
+                for p in root.iter():
+                    if p.tag.split("}")[-1] == "p":
+                        t = "".join(ch.text or "" for ch in p.iter() if ch.tag.split("}")[-1] == "t").strip()
+                        if t:
+                            blocks.append(t)
+            return "\n".join(blocks)[:max_chars]
     except Exception as e:
         return f"[docx inspect error: {e}]"
 
@@ -223,7 +294,8 @@ def _preview_svg(path: Path):
             eid = el.attrib.get("id")
             cur_g = parent_g
             if tag == "g" and eid:
-                info["layers"].append(eid)
+                ilbl = next((v for k, v in el.attrib.items() if k.endswith("}label") or k == "inkscape:label"), None)
+                info["layers"].append(f"{eid} ({ilbl})" if (ilbl and ilbl != eid) else eid)
                 cur_g = eid
             elif tag == "text":
                 t = " ".join(s.strip() for s in el.itertext() if s and s.strip())
@@ -252,6 +324,20 @@ def _preview_svg(path: Path):
         _walk(root, None)
     except Exception as e:
         info["parse_error"] = str(e)
+        try:
+            _sd = str(Path(__file__).resolve().parent)
+            if _sd not in sys.path:
+                sys.path.insert(0, _sd)
+            from render_preview import parse_svg_dimensions
+            d = parse_svg_dimensions(txt)
+            info["width"] = d["width_raw"]
+            info["height"] = d["height_raw"]
+            if d["viewbox"]:
+                info["viewBox"] = " ".join(f"{x:g}" for x in d["viewbox"])
+            if d["css_w"] > 0 and d["css_h"] > 0:
+                info["css_size_px"] = [round(d["css_w"], 2), round(d["css_h"], 2)]
+        except Exception:
+            pass
     if not info["css_classes"]:
         info.pop("css_classes", None)
     return info
@@ -292,16 +378,26 @@ def _extract_pdf_pages(path: Path):
     return None, None
 
 def _extract_target_refs(blob: str) -> list[str]:
-    """Extract target Figure/Table numbers (EN & ZH) referenced in task.md / workorder (e.g. figure03, 图3 -> '3')."""
+    """Extract target Figure/Table numbers (EN & ZH, incl. Fig. S3 / Extended Data Fig. 3)."""
     refs = []
-    pat = r"(?:\b(?:fig(?:ure)?\.?\s*0*(\d+)|table\s*s?0*(\d+))\b|(?:附图|图|表\s*S?)\s*0*(\d+))"
+    pat = r"(?:\b(?:(?:extended\s+data\s+|supplementary\s+)?fig(?:ure)?\.?\s*s?0*(\d+)|(?:supplementary\s+)?table\s*s?0*(\d+))\b|(?:附图|附表|图|表)\s*S?0*(\d+))"
     for m in re.finditer(pat, blob or "", re.I):
         num = m.group(1) or m.group(2) or m.group(3)
         if num and num not in refs:
             refs.append(num)
     return refs[:8]
 
-def _preview_pdf(path: Path, max_chars: int, dump_dir: Path | None = None, target_refs=None):
+def _bound_caption_end(text: str, c0: int, max_len: int) -> int:
+    """End a figure/table caption cleanly before the next Figure/Table/Section heading."""
+    c1 = min(len(text), c0 + max_len)
+    tail = text[c0 + 40:c1]
+    nxt = re.search(
+        r"\n\s*(?:(?:Extended\s+Data\s+|Supplementary\s+)?(?:Fig(?:ure)?\.?|Table)\s*S?\d+(?:\s*[\.:\|\-\u2013\u2014]|\s*\n)|(?:附图|附表|图|表)\s*S?\d+(?:\s*[\.:\|\-\u2013\u2014：]|\s*\n)|(?:References|Bibliography|Methods|Acknowledgements?)\b)",
+        tail, re.I,
+    )
+    return (c0 + 40 + nxt.start()) if nxt else c1
+
+def _preview_pdf(path: Path, max_chars: int, dump_dir: Path | None = None, target_refs=None, dump_name: str | None = None):
     pages_txt, backend = _extract_pdf_pages(path)
     if pages_txt is None:
         return {"warning": "No PDF text extractor available (pymupdf/fitz/pdfplumber/pypdf/pdftotext)"}
@@ -313,16 +409,21 @@ def _preview_pdf(path: Path, max_chars: int, dump_dir: Path | None = None, targe
     full_buf = []
     snippets = []
     snip_chars = 0
+    target_captions = []
+    tcap_chars = 0
     captions = []
     cap_chars = 0
     t_snips = []
     t_chars = 0
     mech_snips = []
     mech_chars = 0
-    t_pat = (re.compile(r"(?:\b(?:Fig(?:ure)?\.?|Table\s*S?)|(?:附图|图|表\s*S?))\s*0*(?:" + "|".join(re.escape(r) for r in target_refs) + r")[A-Za-z]?(?:\b|(?=\D|$))", re.I)
-             if target_refs else None)
-    cap_pat = re.compile(r"(?:\b(?:Fig(?:ure)?\.?\s*\d+[A-Za-z]?|Table\s*S?\d+|Extended\s+Data\s+Fig(?:ure)?\.?\s*\d+)\b|(?:附图|图|表\s*S?)\s*\d+[A-Za-z]?)", re.I)
-    cap_start_pat = re.compile(r"(?:^|\n)\s*((?:(?:Fig(?:ure)?\.?\s*\d+|Table\s*S?\d+|Extended\s+Data\s+Fig(?:ure)?\.?\s*\d+)\s*[\.:\|\-\u2013\u2014]|(?:附图|图|表\s*S?)\s*\d+\s*[\.:\|\-\u2013\u2014：])[^\n]{10,})", re.I)
+    ref_alt = "|".join(re.escape(r) for r in (target_refs or []))
+    t_pat = (re.compile(r"(?:\b(?:(?:Extended\s+Data\s+|Supplementary\s+)?Fig(?:ure)?\.?\s*S?|(?:Supplementary\s+)?Table\s*S?)|(?:附图|附表|图|表)\s*S?)\s*0*(?:" + ref_alt + r")[A-Za-z]?(?:\b|(?=\D|$))", re.I)
+             if ref_alt else None)
+    t_cap_pat = (re.compile(r"(?:^|\n)\s*((?:(?:(?:Extended\s+Data\s+|Supplementary\s+)?Fig(?:ure)?\.?\s*S?|(?:Supplementary\s+)?Table\s*S?)\s*0*(?:" + ref_alt + r")(?:\s*[\.:\|\-\u2013\u2014]\s*(?:\n\s*)?|\s*\n\s*)|(?:附图|附表|图|表)\s*S?0*(?:" + ref_alt + r")(?:\s*[\.:\|\-\u2013\u2014：]\s*(?:\n\s*)?|\s*\n\s*))[^\n]{8,})", re.I)
+                 if ref_alt else None)
+    cap_pat = re.compile(r"(?:\b(?:(?:Extended\s+Data\s+|Supplementary\s+)?Fig(?:ure)?\.?\s*S?\d+[A-Za-z]?|(?:Supplementary\s+)?Table\s*S?\d+)\b|(?:附图|附表|图|表)\s*S?\d+[A-Za-z]?)", re.I)
+    cap_start_pat = re.compile(r"(?:^|\n)\s*((?:(?:(?:Extended\s+Data\s+|Supplementary\s+)?Fig(?:ure)?\.?\s*S?\d+|(?:Supplementary\s+)?Table\s*S?\d+)(?:\s*[\.:\|\-\u2013\u2014]\s*(?:\n\s*)?|\s*\n\s*)|(?:附图|附表|图|表)\s*S?\d+(?:\s*[\.:\|\-\u2013\u2014：]\s*(?:\n\s*)?|\s*\n\s*))[^\n]{10,})", re.I)
     mech_pat = re.compile(r"(?:^|\n)\s*(?:[0-9]+\.?\s+)?(?:Results|Discussion|Mechanism|Working\s+model|Proposed\s+model|Pathway|Signaling|Conclusions?)\b[^\n]*", re.I)
     ref_pat = re.compile(r"(?:^|\n)\s*(?:References|Bibliography|Acknowledgements?|Author\s+Contributions|参考文献)\s*(?:\n|$)", re.I)
     in_refs = False
@@ -342,6 +443,16 @@ def _preview_pdf(path: Path, max_chars: int, dump_dir: Path | None = None, targe
                 page_tags.append(key)
         tag_str = f" [{', '.join(page_tags)}]" if page_tags else ""
         pages.append(f"p{pno} ({len(t)}c){tag_str}: {head_ln}")
+        # Priority 1: Complete target Figure/Table captions (up to 2600 chars each, even after References!)
+        if t_cap_pat and tcap_chars < 6000:
+            for cm in t_cap_pat.finditer(t):
+                c0 = cm.start(1)
+                c1 = _bound_caption_end(t, c0, 2600)
+                cwin = f"[p.{pno}] " + " ".join(t[c0:c1].split())
+                if tcap_chars + len(cwin) <= 6000:
+                    target_captions.append(cwin)
+                    tcap_chars += len(cwin)
+        # Priority 2: Target ref discussion snippets across Results/Discussion
         if t_pat and t_chars < 5500:
             seen_t = -999
             for tm in t_pat.finditer(t):
@@ -354,15 +465,19 @@ def _preview_pdf(path: Path, max_chars: int, dump_dir: Path | None = None, targe
                 if t_chars + len(twin) <= 5500:
                     t_snips.append(twin)
                     t_chars += len(twin)
-        if cap_chars < 5500:
+        # Priority 3: General Figure/Table captions (excluding already-captured target captions)
+        if cap_chars < 4800:
             for cm in cap_start_pat.finditer(t):
                 c0 = cm.start(1)
-                c1 = min(len(t), c0 + 820)
+                c1 = _bound_caption_end(t, c0, 950)
                 cwin = f"[p.{pno}] " + " ".join(t[c0:c1].split())
-                if cap_chars + len(cwin) <= 5500:
+                if any(cwin[:80] in tc for tc in target_captions):
+                    continue
+                if cap_chars + len(cwin) <= 4800:
                     captions.append(cwin)
                     cap_chars += len(cwin)
         full_buf.append(f"=== PAGE {pno} ===\n{t}")
+        added_to_excerpt = False
         if pno >= 3 and not in_refs:
             rm = ref_pat.search(t)
             if rm:
@@ -372,12 +487,13 @@ def _preview_pdf(path: Path, max_chars: int, dump_dir: Path | None = None, targe
                     take = t_body[:max(0, max_chars - total_chars)]
                     buf.append(f"=== PAGE {pno} (pre-References) ===\n{take}")
                     total_chars += len(take)
-                continue
-        if total_chars < max_chars and t and not in_refs:
+                    added_to_excerpt = True
+        if not added_to_excerpt and total_chars < max_chars and t and not in_refs:
             take = t[:max(0, max_chars - total_chars)]
             buf.append(f"=== PAGE {pno} ===\n{take}")
             total_chars += len(take)
-        else:
+            added_to_excerpt = True
+        if not added_to_excerpt:
             if hits and snip_chars < 5000:
                 seen_pos = -999
                 for m in hits:
@@ -401,7 +517,7 @@ def _preview_pdf(path: Path, max_chars: int, dump_dir: Path | None = None, targe
     dumped_to = None
     if dump_dir is not None:
         dump_dir.mkdir(parents=True, exist_ok=True)
-        out_txt = dump_dir / f"{path.stem}.txt"
+        out_txt = dump_dir / f"{dump_name or path.stem}.txt"
         out_txt.write_text("\n\n".join(full_buf), encoding="utf-8")
         dumped_to = str(out_txt)
     is_trunc = total_doc_chars > max_chars
@@ -418,6 +534,8 @@ def _preview_pdf(path: Path, max_chars: int, dump_dir: Path | None = None, targe
         "truncated": is_trunc,
         "text_excerpt": "\n\n".join(buf),
     }
+    if target_captions:
+        res_pdf["target_figure_captions"] = target_captions
     if t_snips:
         res_pdf["target_ref_snippets"] = t_snips
     if mech_snips:
@@ -439,7 +557,8 @@ def inspect_dir(root: Path, max_pdf_chars: int = 28000, dump_dir: Path | None = 
         "pdfs": {},
         "other_texts": {},
     }
-    # Pass 1: read case.json, task.md, workorders first so PDF retrieval can prioritize target figures/tables
+    # Pass 1: read case.json, task.md, workorders & brief docs first so PDF retrieval can prioritize target figures/tables
+    brief_blobs = []
     for p in files:
         rel = str(p.relative_to(root))
         low = p.name.lower()
@@ -451,19 +570,25 @@ def inspect_dir(root: Path, max_pdf_chars: int = 28000, dump_dir: Path | None = 
                 summary["task_md"] = p.read_text(encoding="utf-8", errors="replace")[:12000]
             elif "workorder" in low and suf == ".json":
                 summary["workorders"][rel] = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+            elif suf in (".md", ".txt", ".yaml", ".yml") and p.stat().st_size <= 24000 and any(k in low for k in ("workorder", "brief", "instruction", "spec", "rubric", "prompt")):
+                txt_b = p.read_text(encoding="utf-8", errors="replace")[:6000]
+                summary["other_texts"][rel] = txt_b
+                brief_blobs.append(txt_b)
         except Exception as e:
             summary["other_texts"][rel] = f"[inspect error: {e}]"
 
-    blob = (summary.get("task_md") or "") + " " + json.dumps(summary.get("workorders") or {}, ensure_ascii=False)
+    blob = ((summary.get("task_md") or "") + " " + json.dumps(summary.get("workorders") or {}, ensure_ascii=False)
+            + " " + " ".join(brief_blobs))
     target_refs = _extract_target_refs(blob)
     ref_images = []
+    used_pdf_stems = set()
 
     # Pass 2: inspect tables, SVGs, PDFs (with workorder-targeted retrieval), DOCX, and reference images
     for p in files:
         rel = str(p.relative_to(root))
         low = p.name.lower()
         suf = p.suffix.lower()
-        if low in ("case.json", "task.md") or ("workorder" in low and suf == ".json"):
+        if low in ("case.json", "task.md") or ("workorder" in low and suf == ".json") or rel in summary["other_texts"]:
             continue
         try:
             if suf == ".csv":
@@ -475,7 +600,9 @@ def inspect_dir(root: Path, max_pdf_chars: int = 28000, dump_dir: Path | None = 
             elif suf == ".svg":
                 summary["svgs"][rel] = _preview_svg(p)
             elif suf == ".pdf":
-                summary["pdfs"][rel] = _preview_pdf(p, max_pdf_chars, dump_dir=dump_dir, target_refs=target_refs)
+                dnm = p.stem if p.stem not in used_pdf_stems else re.sub(r"[^A-Za-z0-9_.-]+", "_", rel[:-4])
+                used_pdf_stems.add(dnm)
+                summary["pdfs"][rel] = _preview_pdf(p, max_pdf_chars, dump_dir=dump_dir, target_refs=target_refs, dump_name=dnm)
             elif suf == ".docx":
                 summary["other_texts"][rel] = _preview_docx(p)
             elif suf in (".png", ".jpg", ".jpeg", ".webp"):
@@ -497,7 +624,18 @@ def inspect_dir(root: Path, max_pdf_chars: int = 28000, dump_dir: Path | None = 
         except Exception as e:
             summary["other_texts"][rel] = f"[inspect error: {e}]"
 
-    stems = sorted(set(re.findall(r"\b(figure\d+[a-z]?|fig_?\d+[a-z]?|pathway_?[a-z0-9_]*)\b", blob, re.I)))
+    stems = []
+    for wo in (summary.get("workorders") or {}).values():
+        if isinstance(wo, dict):
+            for wk in ("output_basename", "basename", "figure_id", "target_figure", "target_file"):
+                wv = wo.get(wk)
+                if isinstance(wv, str) and wv.strip():
+                    st = Path(wv.strip()).stem
+                    if re.fullmatch(r"[A-Za-z][\w-]{1,40}", st) and st not in stems:
+                        stems.append(st)
+    for st in sorted(set(re.findall(r"\b(figure\d+[a-z]?|fig_?\d+[a-z]?|pathway_?[a-z0-9_]*)\b", blob, re.I))):
+        if st not in stems:
+            stems.append(st)
     in_stems = {p.stem.lower() for p in files}
     for m_fn in re.finditer(r"\b([A-Za-z][\w-]{2,40})\.(?:svg|png|pdf)\b", blob):
         st = m_fn.group(1)
