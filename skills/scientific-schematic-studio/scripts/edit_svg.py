@@ -427,6 +427,22 @@ def _collect_node_anchors(root, pmap):
             bb = (xy[0] - hw, xy[1] - 10.0, xy[0] + hw, xy[1] + 6.0)
         cx, cy = (bb[0] + bb[2]) / 2.0, (bb[1] + bb[3]) / 2.0
         anchors.append({"label": lbl[:60], "bbox": bb, "center": (cx, cy), "gid": t.get("id")})
+    # Filter out compartment/background containers whose bbox encloses >= 2 other node centers
+    if len(anchors) >= 3:
+        filtered = []
+        for idx_a, anc in enumerate(anchors):
+            ab = anc["bbox"]
+            encl = sum(
+                1 for idx_b, ob in enumerate(anchors) if idx_b != idx_a
+                and ab[0] - 2.0 <= ob["center"][0] <= ab[2] + 2.0
+                and ab[1] - 2.0 <= ob["center"][1] <= ab[3] + 2.0
+                and (ob["bbox"][2] - ob["bbox"][0]) * (ob["bbox"][3] - ob["bbox"][1])
+                    < 0.65 * max((ab[2] - ab[0]) * (ab[3] - ab[1]), 1.0)
+            )
+            if encl >= 2:
+                continue
+            filtered.append(anc)
+        anchors = filtered
     return anchors
 
 
@@ -498,6 +514,21 @@ def inspect_svg(path):
             named_shapes.append("%s:%s" % (el.tag.split("}")[-1], eid))
         elif el.tag == q("marker") and eid:
             markers.append(eid)
+        elif el.tag == q("foreignObject"):
+            full_fo = " ".join("".join(el.itertext()).split()).strip()
+            if full_fo:
+                pgid = eid
+                cur = pmap.get(el)
+                while not pgid and cur is not None:
+                    if cur.get("id"):
+                        pgid = cur.get("id")
+                    cur = pmap.get(cur)
+                bb_fo = _shape_bbox(el, pmap=pmap)
+                texts.append({
+                    "id": eid, "group_id": pgid, "text": full_fo[:120],
+                    "x": round((bb_fo[0] + bb_fo[2]) / 2.0, 1) if bb_fo else None,
+                    "y": round((bb_fo[1] + bb_fo[3]) / 2.0, 1) if bb_fo else None,
+                })
         elif el.tag == q("text"):
             full = "".join(el.itertext()).strip()
             if full:
@@ -729,6 +760,14 @@ def op_replace_text(root, o, log, errs):
                 if find_s in joined:
                     _set_text_preserve_tspan(t, joined.replace(find_s, rep_s))
                     hits += 1
+                else:
+                    # Whitespace-normalized cross-tspan match (e.g. Illustrator split lines)
+                    norm_j = re.sub(r"\s+", " ", " ".join(
+                        (s.strip() for s in t.itertext() if s and s.strip()))).strip()
+                    norm_f = re.sub(r"\s+", " ", find_s).strip()
+                    if norm_f and norm_f in norm_j:
+                        _set_text_preserve_tspan(t, norm_j.replace(norm_f, rep_s))
+                        hits += 1
     if hits == 0:
         errs.append("replace_text: %r not found in SVG text" % find_s)
     else:
@@ -815,17 +854,27 @@ def op_set_attr(root, o, log, errs):
                             if has_stroke:
                                 _set_style_prop(hsh, "stroke", val)
     # Auto-contrast node text when changing node box fill to dark/light color (unless auto_contrast=False)
-    if attr.lower() == "fill" and o.get("auto_contrast", True) and val.startswith("#"):
+    if attr.lower() == "fill" and o.get("auto_contrast", True) and val.lower() not in ("", "none", "transparent"):
         want_tc = _svg_contrast_color(val)
         pmap_c = build_parent_map(root)
         txt_cands = []
         if el.tag == q("g"):
-            for te in el.findall(".//%s" % q("text")):
-                txt_cands.append(te)
+            if _is_single_node_group(el, pmap_c):
+                txt_cands.extend(el.findall(".//%s" % q("text")))
+            else:
+                # Compartment/multi-node group: only adjust direct header <text>, never child nodes!
+                txt_cands.extend(ch for ch in el if ch.tag == q("text"))
         elif o.get("by_text"):
             t_hit = _find_by_text(root, o["by_text"], want_shape=False)
-            if t_hit is not None and t_hit.tag == q("text"):
-                txt_cands.append(t_hit)
+            if t_hit is not None:
+                if t_hit.tag == q("text"):
+                    txt_cands.append(t_hit)
+                elif t_hit.tag == q("g") and _is_single_node_group(t_hit, pmap_c):
+                    txt_cands.extend(t_hit.findall(".//%s" % q("text")))
+        else:
+            par_c = pmap_c.get(el)
+            if par_c is not None and par_c.tag == q("g") and _is_single_node_group(par_c, pmap_c):
+                txt_cands.extend(par_c.findall(".//%s" % q("text")))
         for te in txt_cands:
             cur_f = (te.get("fill") or "").strip()
             if not cur_f:
@@ -1235,17 +1284,28 @@ def op_swap_edge(root, o, log, errs):
     log.append("swap_edge %s (endpoints reversed, arrowhead follows reversed path)" % ref)
 
 
+_MARKER_ALIASES = {
+    "arrow": "arrow", "activates": "arrow", "catalyzes": "arrow", "flows": "arrow",
+    "solid": "arrow", "triangle": "arrow",
+    "tbar": "tbar", "t-bar": "tbar", "inhibits": "tbar", "inhibits_dashed": "tbar",
+    "blunt": "tbar", "bar": "tbar", "flat": "tbar",
+    "open": "open", "hollow": "open", "translocates": "open",
+    "none": "none", "plain": "none", "": "none",
+}
+
+
 def op_set_marker(root, o, log, errs):
     el, ref = _resolve_edge(root, o)
     if el is None:
         errs.append("set_marker: target %s not found" % ref)
         return
     gid = str(o.get("gid") or ref)
-    mk = o.get("marker", "none")
+    mk_raw = str(o.get("marker", "none")).strip().lower()
+    mk = _MARKER_ALIASES.get(mk_raw, mk_raw)
     mapping = {"arrow": "url(#mh-arrow)", "tbar": "url(#mh-tbar)",
                "open": "url(#mh-open)", "none": ""}
     if mk not in mapping:
-        errs.append("set_marker: unknown marker %r" % mk)
+        errs.append("set_marker: unknown marker %r" % o.get("marker"))
         return
     # Remove any split matplotlib -head group or unnamed tip polygon arrowhead so old head does not remain
     base = gid[:-5] if gid.endswith("-line") else gid
@@ -1258,11 +1318,12 @@ def op_set_marker(root, o, log, errs):
         if ep_pre:
             tip_pre = _apply_affine(ep_pre[-1][0], ep_pre[-1][1], _accum_affine(target_pre, pmap_pre))
             _remove_tip_arrowheads(root, target_pre, tip_pre)
+    mcol = str(o.get("color") or "")
     if mk != "none":
         target_tmp = first_shape(el) if el.tag == q("g") else el
         st_tmp = (target_tmp.get("style", "") if target_tmp is not None else "")
         m_sc = re.search(r"stroke\s*:\s*([^;]+)", st_tmp)
-        mcol = o.get("color") or (target_tmp.get("stroke") if target_tmp is not None else None) or (
+        mcol = mcol or (target_tmp.get("stroke") if target_tmp is not None else None) or (
             m_sc.group(1).strip() if m_sc else "#2C3A47")
         mids = _ensure_marker_defs(root, color=mcol)
         mapping = {"arrow": "url(#%s)" % mids["arrow"], "tbar": "url(#%s)" % mids["tbar"],
@@ -1279,7 +1340,41 @@ def op_set_marker(root, o, log, errs):
     else:
         for obj in (el, target):
             _set_style_prop(obj, "marker-end", "")
-    log.append("set_marker %s -> %s" % (ref, mk))
+    if o.get("dash") is not None:
+        preset_d = {"solid": "", "none": "", "dashed": "5,3", "dotted": "2,2"}
+        raw_d = str(o["dash"])
+        _set_style_prop(target, "stroke-dasharray", preset_d.get(raw_d.lower(), raw_d))
+    if o.get("label"):
+        pmap_l = build_parent_map(root)
+        ep_l = _element_endpoints(target)
+        if ep_l:
+            mat_l = _accum_affine(target, pmap_l)
+            pa = _apply_affine(ep_l[0][0], ep_l[0][1], mat_l)
+            pb = _apply_affine(ep_l[-1][0], ep_l[-1][1], mat_l)
+            fs_l = float(o.get("fs", 10))
+            lab_s = str(o["label"])
+            est_w = len(lab_s) * fs_l * 0.62
+            is_vert = abs(pb[1] - pa[1]) > abs(pb[0] - pa[0])
+            lx_t = (pa[0] + pb[0]) / 2.0 + (7.0 if is_vert else 0.0)
+            ly_t = (pa[1] + pb[1]) / 2.0 + (3.5 if is_vert else -7.0)
+            bx0 = (lx_t - 2.0) if is_vert else (lx_t - est_w / 2.0 - 2.5)
+            by0, bw, bh = ly_t - fs_l * 0.92, est_w + 5.0, fs_l * 1.25
+            _expand_viewbox_if_needed(root, bx0, by0, bx0 + bw, by0 + bh, pad=8.0)
+            lg_id = "edge-label-%s" % re.sub(r"[^A-Za-z0-9_-]", "_", str(ref))[:28]
+            _remove_id(root, lg_id)
+            lg = ET.SubElement(root, q("g"))
+            lg.set("id", lg_id)
+            pill = ET.SubElement(lg, q("rect"))
+            pill.set("x", "%.2f" % bx0); pill.set("y", "%.2f" % by0)
+            pill.set("width", "%.2f" % bw); pill.set("height", "%.2f" % bh)
+            pill.set("rx", "2.5"); pill.set("fill", "#FFFFFF"); pill.set("fill-opacity", "0.92")
+            te = ET.SubElement(lg, q("text"))
+            te.set("x", "%.2f" % lx_t); te.set("y", "%.2f" % ly_t)
+            te.set("text-anchor", "start" if is_vert else "middle")
+            te.set("font-family", "sans-serif"); te.set("font-size", "%.1f" % fs_l)
+            te.set("fill", mcol or "#2C3A47")
+            te.text = lab_s
+    log.append("set_marker %s -> %s%s" % (ref, mk, (" (dash=%s)" % o["dash"]) if o.get("dash") else ""))
 
 
 def op_set_dash(root, o, log, errs):
@@ -1297,13 +1392,51 @@ def op_set_dash(root, o, log, errs):
     log.append("set_dash %s -> %s" % (ref, raw))
 
 
+def _prune_edges_touching_box(root, bb, tol=14.0):
+    """Remove edges whose start or end touches a deleted node's world bbox (plus detached arrowheads)."""
+    if not bb:
+        return 0
+    pmap = build_parent_map(root)
+    raw_edges = _list_svg_edges(root)
+    pruned = 0
+    for ed in raw_edges:
+        ep0, ep1 = ed["p0"], ed["p1"]
+        if _point_to_box_dist(ep0, bb) <= tol or _point_to_box_dist(ep1, bb) <= tol:
+            eel = ed["el"]
+            par = pmap.get(eel)
+            if par is None:
+                continue
+            _remove_tip_arrowheads(root, eel, ep1)
+            eid_e = ed.get("group_id") or ed.get("id") or ""
+            if eid_e:
+                base_e = eid_e[:-5] if eid_e.endswith("-line") else eid_e
+                _remove_id(root, base_e + "-head")
+                _remove_id(root, base_e + "-head-b")
+            try:
+                par.remove(eel)
+                pruned += 1
+            except ValueError:
+                pass
+    return pruned
+
+
 def op_delete(root, o, log, errs):
+    prune_edges = bool(o.get("prune_edges", True))
     if o.get("gid"):
+        el_g = find_by_id(root, o["gid"])
+        bb_g = None
+        if el_g is not None and prune_edges and not str(o["gid"]).startswith("edge-"):
+            pmap_g = build_parent_map(root)
+            sh_g = first_shape(el_g) if el_g.tag == q("g") else el_g
+            if sh_g is not None:
+                bb_g = _shape_bbox(sh_g, pmap=pmap_g)
         if _remove_id(root, o["gid"]):
             base = str(o["gid"])[:-5] if str(o["gid"]).endswith("-line") else str(o["gid"])
             _remove_id(root, base + "-head")
             _remove_id(root, base + "-head-b")
-            log.append("delete %s" % o["gid"])
+            n_pr = _prune_edges_touching_box(root, bb_g) if bb_g else 0
+            extra = (" (pruned %d connected edge(s))" % n_pr) if n_pr else ""
+            log.append("delete %s%s" % (o["gid"], extra))
             return
     if o.get("edge_idx") is not None or (o.get("from_text") and o.get("to_text")):
         el, ref = _resolve_edge(root, o)
@@ -1329,6 +1462,11 @@ def op_delete(root, o, log, errs):
             pmap = build_parent_map(root)
             par = pmap.get(el)
             if par is not None:
+                bb_del = None
+                if el.tag == q("g"):
+                    sh_g = first_shape(el)
+                    if sh_g is not None:
+                        bb_del = _shape_bbox(sh_g, pmap=pmap)
                 # If deleting an ungrouped <text> inside a layer <g>, also remove its tightly enclosing sibling node shape!
                 if el.tag == q("text"):
                     sh_sib = _find_by_text(root, o["by_text"], want_shape=True)
@@ -1336,18 +1474,38 @@ def op_delete(root, o, log, errs):
                         wxy = _text_world_xy(el, pmap)
                         sb = _shape_bbox(sh_sib, pmap=pmap)
                         if wxy and sb and _point_to_box_dist(wxy, sb) <= 12.0 and (sb[2] - sb[0]) < 260 and (sb[3] - sb[1]) < 140:
+                            bb_del = sb
                             try:
                                 par.remove(sh_sib)
                             except ValueError:
                                 pass
                 par.remove(el)
-                log.append("delete by_text=%r" % o["by_text"])
+                n_pr = _prune_edges_touching_box(root, bb_del) if (prune_edges and bb_del) else 0
+                extra = (" (pruned %d connected edge(s))" % n_pr) if n_pr else ""
+                log.append("delete by_text=%r%s" % (o["by_text"], extra))
                 return
     errs.append("delete: target %s not found" % (o.get("gid") or o.get("by_text") or o.get("edge_idx") or o.get("from_text")))
 
 
-def _svg_contrast_color(bg_hex):
-    s = str(bg_hex or "").strip().lstrip("#")
+_NAMED_RGB = {
+    "black": (0, 0, 0), "navy": (0, 0, 128), "darkblue": (0, 0, 139), "midnightblue": (25, 25, 112),
+    "blue": (0, 0, 255), "crimson": (220, 20, 60), "darkred": (139, 0, 0), "maroon": (128, 0, 0),
+    "darkgreen": (0, 100, 0), "green": (0, 128, 0), "teal": (0, 128, 128), "purple": (128, 0, 128),
+    "indigo": (75, 0, 130), "darkslategray": (47, 79, 79), "dimgray": (105, 105, 105),
+    "white": (255, 255, 255), "ivory": (255, 255, 240), "yellow": (255, 255, 0),
+}
+
+
+def _svg_contrast_color(bg_col):
+    raw = str(bg_col or "").strip().lower()
+    if raw in _NAMED_RGB:
+        r, g, b = (c / 255.0 for c in _NAMED_RGB[raw])
+        return "#FFFFFF" if (0.2126 * r + 0.7152 * g + 0.0722 * b) < 0.45 else "#10243B"
+    m_rgb = re.match(r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)", raw)
+    if m_rgb:
+        r, g, b = int(m_rgb.group(1)) / 255.0, int(m_rgb.group(2)) / 255.0, int(m_rgb.group(3)) / 255.0
+        return "#FFFFFF" if (0.2126 * r + 0.7152 * g + 0.0722 * b) < 0.45 else "#10243B"
+    s = raw.lstrip("#")
     if len(s) == 3:
         s = "".join(c * 2 for c in s)
     if len(s) != 6:
@@ -1365,18 +1523,28 @@ def _resolve_box_ref(root, ref_s):
     el = find_by_id(root, str(ref_s))
     if el is not None:
         pmap = build_parent_map(root)
-        bb = _shape_bbox(el, pmap=pmap)
+        sh = first_shape(el) if el.tag == q("g") else el
+        bb = _shape_bbox(sh, pmap=pmap) if sh is not None else None
         if bb:
             return bb
     return _box_for_text(root, str(ref_s))
 
 
 def op_add_node(root, o, log, errs):
-    w = float(o.get("w", 96))
-    h = float(o.get("h", 40 if o.get("sublabel") else 34))
+    fs = float(o.get("fs", 12))
+    raw_lbl = str(o.get("label", "new"))
+    lbl_lines = [ln.strip() for ln in raw_lbl.split("\n") if ln.strip()] or ["new"]
+    sub = o.get("sublabel")
+    longest_ch = max(len(ln) for ln in lbl_lines)
+    if sub:
+        longest_ch = max(longest_ch, int(len(str(sub)) * 0.82))
+    auto_w = max(96.0, longest_ch * fs * 0.64 + 24.0)
+    auto_h = max(34.0, len(lbl_lines) * (fs * 1.25) + (fs * 1.15 if sub else 0.0) + 14.0)
+    w = float(o.get("w", auto_w))
+    h = float(o.get("h", auto_h))
     gap = float(o.get("gap", 46.0))
-    # Smart relative placement (right_of / left_of / below / above) removes coordinate guesswork!
-    x, y = None, None
+    # Smart relative placement (right_of / left_of / below / above) with automatic collision nudging!
+    x, y, used_rel = None, None, None
     for rel_k in ("right_of", "left_of", "below", "above"):
         if o.get(rel_k):
             rb = _resolve_box_ref(root, o[rel_k])
@@ -1390,7 +1558,27 @@ def op_add_node(root, o, log, errs):
                     x, y = rcx - w / 2.0, rb[3] + gap
                 elif rel_k == "above":
                     x, y = rcx - w / 2.0, rb[1] - gap - h
+                used_rel = rel_k
                 break
+    if x is not None and used_rel:
+        pmap_n = build_parent_map(root)
+        occ_bbs = [anc["bbox"] for anc in _collect_node_anchors(root, pmap_n) if anc.get("bbox")]
+        for _ in range(6):
+            cand = (x, y, x + w, y + h)
+            hit = next((ob for ob in occ_bbs
+                        if min(cand[2], ob[2]) > max(cand[0], ob[0]) - 6.0
+                        and min(cand[3], ob[3]) > max(cand[1], ob[1]) - 6.0), None)
+            if not hit:
+                break
+            nudge = max(gap, 44.0)
+            if used_rel == "right_of":
+                x = hit[2] + nudge
+            elif used_rel == "left_of":
+                x = hit[0] - nudge - w
+            elif used_rel == "below":
+                y = hit[3] + nudge
+            elif used_rel == "above":
+                y = hit[1] - nudge - h
     if x is None:
         x, y = float(o.get("x", 40)), float(o.get("y", 40))
     _expand_viewbox_if_needed(root, x, y, x + w, y + h, pad=8.0)
@@ -1425,19 +1613,31 @@ def op_add_node(root, o, log, errs):
         el2.set("width", "%.2f" % max(w - 5.0, 2.0)); el2.set("height", "%.2f" % max(h - 5.0, 2.0))
         el2.set("rx", "4"); el2.set("fill", "none"); el2.set("stroke", stroke); el2.set("stroke-width", "0.9")
     tcol = o.get("text_color") or _svg_contrast_color(fill)
-    fs = float(o.get("fs", 12))
-    sub = o.get("sublabel")
+    cx_t = x + w / 2.0
     t = ET.SubElement(g, q("text"))
-    t.set("x", "%.2f" % (x + w / 2.0))
-    t.set("y", "%.2f" % (y + h * (0.42 if sub else 0.50) + fs * 0.34))
+    t.set("x", "%.2f" % cx_t)
     t.set("text-anchor", "middle"); t.set("font-family", "sans-serif")
     t.set("font-size", str(fs)); t.set("font-weight", "bold")
     t.set("fill", tcol)
-    t.text = str(o.get("label", "new"))
+    if len(lbl_lines) == 1:
+        t.set("y", "%.2f" % (y + h * (0.42 if sub else 0.50) + fs * 0.34))
+        t.text = lbl_lines[0]
+    else:
+        lh_px = fs * 1.18
+        blk_h = len(lbl_lines) * lh_px
+        y_center_lbl = y + h * (0.38 if sub else 0.50)
+        y0_lbl = y_center_lbl - blk_h / 2.0 + fs * 0.85
+        t.set("y", "%.2f" % y0_lbl)
+        for li_t, ltxt in enumerate(lbl_lines):
+            tsp = ET.SubElement(t, q("tspan"))
+            tsp.set("x", "%.2f" % cx_t)
+            if li_t > 0:
+                tsp.set("dy", "%.2f" % lh_px)
+            tsp.text = ltxt
     if sub:
         ts = ET.SubElement(g, q("text"))
-        ts.set("x", "%.2f" % (x + w / 2.0))
-        ts.set("y", "%.2f" % (y + h * 0.76 + fs * 0.22))
+        ts.set("x", "%.2f" % cx_t)
+        ts.set("y", "%.2f" % (y + h * 0.80 + fs * 0.20))
         ts.set("text-anchor", "middle"); ts.set("font-family", "sans-serif")
         ts.set("font-size", "%.1f" % (fs * 0.78))
         ts.set("fill", "#E6EEF8" if tcol == "#FFFFFF" else "#4A5B6D")
@@ -1478,12 +1678,14 @@ def _connect_boxes(b1, b2):
 
 
 def op_add_edge(root, o, log, errs):
+    b1_ref, b2_ref = None, None
     raw_pts = o.get("points")
     if raw_pts and len(raw_pts) >= 2:
         pts = [(float(p[0]), float(p[1])) for p in raw_pts]
     elif (o.get("from_text") or o.get("from_gid")) and (o.get("to_text") or o.get("to_gid")):
         b1 = _resolve_box_ref(root, o.get("from_gid") or o.get("from_text"))
         b2 = _resolve_box_ref(root, o.get("to_gid") or o.get("to_text"))
+        b1_ref, b2_ref = b1, b2
         if not b1 or not b2:
             errs.append("add_edge: could not resolve from=%r / to=%r" % (
                 o.get("from_gid") or o.get("from_text"), o.get("to_gid") or o.get("to_text")))
@@ -1548,7 +1750,8 @@ def op_add_edge(root, o, log, errs):
     xs_p = [p[0] for p in pts]
     ys_p = [p[1] for p in pts]
     _expand_viewbox_if_needed(root, min(xs_p), min(ys_p), max(xs_p), max(ys_p), pad=10.0)
-    mk = str(o.get("marker", "arrow"))
+    mk_raw = str(o.get("marker", "arrow")).strip().lower()
+    mk = _MARKER_ALIASES.get(mk_raw, mk_raw)
     def_col = "#C0392B" if mk == "tbar" else ("#0072B2" if mk == "open" else "#1E3A5F")
     col = str(o.get("color", def_col))
     if mk != "none":
@@ -1591,8 +1794,10 @@ def op_add_edge(root, o, log, errs):
         else:
             lx_t = (pa[0] + pb[0]) / 2.0
             span_h = abs(pb[0] - pa[0])
-            # Lift label cleanly above tight horizontal spans so it never clips node boxes
+            # Lift label cleanly above tight horizontal spans & tall neighbor boxes so it never clips them
             ly_t = (pa[1] + pb[1]) / 2.0 - (24.0 if est_w > span_h * 0.85 else 7.0)
+            if est_w > span_h * 0.85 and b1_ref and b2_ref:
+                ly_t = min(ly_t, min(b1_ref[1], b2_ref[1]) - 6.0)
             bx0, by0, bw, bh = lx_t - est_w / 2.0 - 2.5, ly_t - fs_l * 0.92, est_w + 5.0, fs_l * 1.25
             _expand_viewbox_if_needed(root, bx0, by0, bx0 + bw, by0 + bh, pad=8.0)
         # SVG 1.1-safe opaque white pill behind edge label (works in rsvg/cairo/Inkscape/Illustrator)
@@ -1615,11 +1820,23 @@ def op_add_edge(root, o, log, errs):
 
 
 def op_add_legend(root, o, log, errs):
-    """Append a clean auto-wrapping vector legend box below current viewBox without disturbing art."""
+    """Append or replace a clean auto-wrapping vector legend box (supports edges + node shape swatches)."""
     items = o.get("items") or []
     if not items:
         errs.append("add_legend: empty items")
         return
+    leg_id = str(o.get("id", "legend-added"))
+    # Avoid duplicate IDs and optionally replace existing legend groups in place
+    if o.get("replace_existing"):
+        pmap_l = build_parent_map(root)
+        to_del = [el for el in root.iter(q("g"))
+                  if re.match(r"^(?:legend|fig-legend)(?:$|[-_])", (el.get("id") or "").lower())]
+        for el in to_del:
+            par = pmap_l.get(el)
+            if par is not None:
+                par.remove(el)
+    elif find_by_id(root, leg_id) is not None:
+        _remove_id(root, leg_id)
     vb = _parse_viewbox(root) or [0.0, 0.0, 420.0, 220.0]
     vx, vy, vw, vh = vb
     fs = float(o.get("fs", 10.0))
@@ -1630,7 +1847,7 @@ def op_add_legend(root, o, log, errs):
     rows_plan, cur_row, cur_x = [], [], 0.0
     inner_w = lw_box - 20.0
     for it in items:
-        lab = str(it.get("label", it.get("kind", "item")))
+        lab = str(it.get("label", it.get("kind", it.get("shape", "item"))))
         need = 30.0 + max(len(lab) * fs * 0.58, 36.0) + 12.0
         if cur_row and cur_x + need > inner_w:
             rows_plan.append(cur_row)
@@ -1643,7 +1860,7 @@ def op_add_legend(root, o, log, errs):
     ly = vy + vh + 6.0
     _expand_viewbox_if_needed(root, lx, ly, lx + lw_box, ly + box_h, pad=8.0)
     g = ET.SubElement(root, q("g"))
-    g.set("id", o.get("id", "legend-added"))
+    g.set("id", leg_id)
     bg = ET.SubElement(g, q("rect"))
     bg.set("x", "%.2f" % lx); bg.set("y", "%.2f" % ly)
     bg.set("width", "%.2f" % lw_box); bg.set("height", "%.2f" % box_h)
@@ -1664,15 +1881,34 @@ def op_add_legend(root, o, log, errs):
         xi = lx + 10.0
         yi = ly + 25.0 + ri * row_h
         for it, need in row_items:
+            is_swatch = (str(it.get("kind", "")).lower() == "swatch") or (
+                bool(it.get("shape") or it.get("fill")) and not it.get("kind"))
             kind = str(it.get("kind", "activates"))
             col = str(it.get("color", sem_col.get(kind, "#2C3A47")))
-            lab = str(it.get("label", kind))
-            if kind == "swatch":
-                sw = ET.SubElement(g, q("rect"))
-                sw.set("x", "%.2f" % xi); sw.set("y", "%.2f" % (yi - 6.0))
-                sw.set("width", "16"); sw.set("height", "10"); sw.set("rx", "2")
-                sw.set("fill", it.get("fill", col)); sw.set("stroke", it.get("stroke", "#2E5E8C"))
-                sw.set("stroke-width", "1.0")
+            lab = str(it.get("label", it.get("shape", kind)))
+            if is_swatch:
+                sh_k = str(it.get("shape", "rect")).lower()
+                s_fill = str(it.get("fill", col))
+                s_ec = str(it.get("stroke", "#2E5E8C"))
+                if sh_k == "ellipse":
+                    sw = ET.SubElement(g, q("ellipse"))
+                    sw.set("cx", "%.2f" % (xi + 9.0)); sw.set("cy", "%.2f" % (yi - 1.0))
+                    sw.set("rx", "9.0"); sw.set("ry", "5.5")
+                elif sh_k == "hexagon":
+                    pts_h = [(xi + 3.5, yi - 6.0), (xi + 14.5, yi - 6.0), (xi + 18.0, yi - 1.0),
+                             (xi + 14.5, yi + 4.0), (xi + 3.5, yi + 4.0), (xi, yi - 1.0)]
+                    sw = ET.SubElement(g, q("polygon"))
+                    sw.set("points", " ".join("%.1f,%.1f" % p for p in pts_h))
+                elif sh_k == "diamond":
+                    pts_d = [(xi + 9.0, yi - 6.5), (xi + 18.0, yi - 1.0), (xi + 9.0, yi + 4.5), (xi, yi - 1.0)]
+                    sw = ET.SubElement(g, q("polygon"))
+                    sw.set("points", " ".join("%.1f,%.1f" % p for p in pts_d))
+                else:
+                    sw = ET.SubElement(g, q("rect"))
+                    sw.set("x", "%.2f" % xi); sw.set("y", "%.2f" % (yi - 6.0))
+                    sw.set("width", "18"); sw.set("height", "10")
+                    sw.set("rx", "5" if sh_k == "stadium" else ("0" if sh_k == "rect" else "2.5"))
+                sw.set("fill", s_fill); sw.set("stroke", s_ec); sw.set("stroke-width", "1.0")
             else:
                 mk_k = mk_kind_map.get(kind)
                 mids = _ensure_marker_defs(root, color=col) if mk_k else {}
@@ -1892,7 +2128,8 @@ def main():
     groups_before = sum(1 for el in root.iter(q("g")) if el.get("id"))
     texts_before = ["".join(t.itertext()).strip() for t in root.iter(q("text")) if "".join(t.itertext()).strip()]
     vb_before = root.get("viewBox")
-    ops = json.load(open(a.ops, encoding="utf-8")).get("ops", [])
+    raw_ops = json.load(open(a.ops, encoding="utf-8"))
+    ops = raw_ops if isinstance(raw_ops, list) else raw_ops.get("ops", [])
     log, errs = [], []
     dispatch = {
         "retext": op_retext, "replace_text": op_replace_text,

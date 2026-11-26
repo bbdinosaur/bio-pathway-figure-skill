@@ -86,6 +86,24 @@
           {"id": "nuc", "label": "Nucleus", "members": ["H", "F", "E1", "E2"], "membrane": true}
         ]
       }
+    },
+    "source_preserving_svg_edit_recipe": {
+      "description": "Reusable source-preserving SVG editing recipe covering cross-tspan text update, auto-contrast recolor, marker+dash change, edge-pruning deletion, collision-free relative node addition, obstacle-aware edge connection, compartment grouping, and legend replacement.",
+      "mode": "edit",
+      "ops_skeleton": [
+        {"op": "replace_text", "find": "<Old Label>", "replace": "<New Label>"},
+        {"op": "set_attr", "by_text": "<Node>", "attr": "fill", "value": "#0072B2"},
+        {"op": "set_marker", "from_text": "<Src>", "to_text": "<Dst>", "marker": "tbar", "dash": "dashed"},
+        {"op": "delete", "by_text": "<Obsolete Node>"},
+        {"op": "add_node", "id": "node-new", "label": "<New Factor>\n(<PTM>)", "shape": "stadium", "right_of": "<Anchor>", "fill": "#D5F5E3"},
+        {"op": "add_edge", "id": "edge-new", "from_text": "<Anchor>", "to_gid": "node-new", "marker": "arrow", "label": "activates"},
+        {"op": "add_group", "id": "group-new", "label": "<Compartment>", "members_text": ["<Anchor>", "<New Factor>"]},
+        {"op": "add_legend", "replace_existing": true, "items": [
+          {"kind": "activates", "label": "Activation"},
+          {"kind": "inhibits_dashed", "label": "Indirect inhibition"},
+          {"shape": "stadium", "fill": "#D5F5E3", "label": "Effector"}
+        ]}
+      ]
     }
   }
 }

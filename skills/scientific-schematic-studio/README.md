@@ -5,7 +5,7 @@
 
 ## 适用条件与边界
 - **平台契约**：Harbor Skill（输入 `/input/case.json` + `task.md`，输出 `/app/output/result.json` 与可编辑/导出文件；预算 64 请求 / 900s / 16k tokens）。
-- **适用图型**：分子机制与信号通路（含嵌套亚细胞区室与双层膜顶边）、实验流程图、结构关系图、多面板网格组合图、源数据直连定量图（`bar`/`barh`/`stacked_bar`/`line`/`scatter`/`box`/`heatmap`，支持长表/宽表多列重复自动汇总 `mean±SD/SEM` + 原始散点 + 显著性括号 + 同 sheet 多子表/分列块切片）、外部 SVG 保源精改。
+- **适用图型**：分子机制与信号通路（含嵌套亚细胞区室与双层膜顶边）、实验流程图、结构关系图、多面板网格组合图（支持顶层图题与自动双列排布）、源数据直连定量图（`bar`/`barh`/`stacked_bar`/`line`/`step` 生存曲线/`scatter`/`box`/`heatmap` 及常见别名，支持长表/宽表多列重复自动汇总 `mean±SD/SEM`、`mean (SD)`、`×10^n` + 原始散点 + 显著性括号 + 同 sheet 多子表/分列块切片）、外部 SVG 保源精改。
 - **明确不负责**：统计检验方法选择与假设检验推导、封面艺术插画、论文正文综述写作。
 
 ## 依赖、路径与字体配置
@@ -18,7 +18,7 @@
 | 路径 | 用途 |
 |------|------|
 | `assets/journal_presets.json` | 运行时加载的期刊导出预设（`nature_single`/`nature_double`/`cell_double`/`science_double`/`pnas_double`/`grant_figure`/`slide_16_9`）、Okabe-Ito 色盲安全色板与关系图形语法 |
-| `assets/templates.json` | 3 套领域无关可复用图稿骨架模板（`signaling_pathway_tb` / `experimental_workflow_lr` / `mechanism_plus_source_data_grid`） |
+| `assets/templates.json` | 5 套领域无关可复用图稿与保源编辑模板（`signaling_pathway_tb` / `experimental_workflow_lr` / `mechanism_plus_source_data_grid` / `multi_branch_feedback_signaling` / `source_preserving_svg_edit_recipe`） |
 | `references/layout_rules.md` | 分层排布、避障路由、边距与防重叠规则 |
 | `references/style_tokens.md` | 字号层级、语义配色与命名图层规范 |
 | `references/export_presets.md` | 期刊物理尺寸、DPI、嵌字与合规检查标准 |
@@ -58,4 +58,4 @@
 4. **一步吃透原论文 + 双审计闭环**：`prepare` 置顶目标 `Fig. N`/`Table N` 完整图注与全文结果段引用、抽取 PDF 内嵌结构化表格（`[TABLE p.N]`）、打印 XLSX `A|B|C` 列标；几何/穿节点边/分组误包/溯源/数据审计 + 期刊导出合规检查（含 SVG 复合图层与 XML ID 唯一性）；失败与边界如实记入 `limits`/`uncertainty`。
 
 ## 自查与维护
-- 一键回归自检：`python3 scripts/self_test.py`（涵盖 47 项端到端检查：机制图/自反馈环/邻层双向平行反馈/TB 同层非邻避障弧/折行多排 LR 零穿节点路由/LR+TB 双向多区室防撞与非成员自动外推/区室边框感知边标签避障/均衡无孤字标签换行/节点造型图例/标题序号去重/水平+垂直合并单元格+重复列名+后缀编号重复列自动聚合+`col_groups`+Unicode 负号科学计数法+`section_match` 跨列区+对数显著性括号+长标签 `barh` 散点+散点避障标注+零剂量 `symlog` 护栏+`"mean ± SD"`+部分缺失误差棒容错+长表多子表扫描/SHA-256 均值+误差棒核验/LLM Schema 容错规范化/复合 SVG 图层与干净 XML 命名空间/Illustrator CSS+`matrix()`+弯曲贝塞尔+孤立多边形箭头清理+外部 `<marker>` 克隆同步换色+暗底自动高对比白字+`move` 连边弹性跟随+相对定位 `add_node`+自动避障 `add_edge`+编辑后几何审计+`from_text`+`to_text` 语义边定位与关系图收割+SVG 1.1 安全白底胶囊标签+`add_group` 区室保源编辑/多 PDF 零页码冲突+4000字完整主图注+扫描 PDF OCR 兜底+中文 PDF 探针+`[PDF_READ_HINT]`+`EDIT_ERRORS` 强拦截/十六进制 `legend_mapping`+`provenance_summary`+`source_manifest`+对立边与悬空组审计/纯文本实绘数值核验/两步极速管线）。
+- 一键回归自检：`python3 scripts/self_test.py`（涵盖 60 项端到端检查：机制图/自反馈环/邻层双向平行反馈/TB 同层非邻避障弧/折行多排 LR 零穿节点路由/LR+TB 双向多区室防撞与逆序嵌套区室排序/区室边框感知边标签避障/均衡无孤字标签换行/≥0.70 印刷可读缩放护栏/自动边+节点造型双态图例/顶层图题与副标题横幅/多图无 `row` 智能双列网格排布/标题序号去重/水平+垂直合并单元格+重复列名+后缀编号重复列+长表 `hue_col` 透视聚合+散点 `label_col`/`top_labels` 火山着色+组内 `sig_brackets`(`x`+`s1`/`s2`)+窄栏长标签自适应换行旋转+`line`/`step` 生存曲线自动排 X+图表类型别名归一+`col_groups`+Unicode 负号/`mean (SD)`/`×10^n` 解析+`section_match` 跨列区+对数显著性括号+长标签 `barh` 散点+零剂量 `symlog` 护栏+`"mean ± SD"`+部分缺失误差棒容错+长表多子表扫描+`STRUCTURE_HINT`/SHA-256 均值+误差棒核验/LLM Schema 容错规范化/复合 SVG 图层与干净 XML 命名空间/Illustrator CSS+`matrix()`+Draw.io `foreignObject`+跨 `<tspan>` `replace_text`+弯曲贝塞尔+孤立多边形箭头清理+外部 `<marker>` 克隆同步换色+区室安全暗底/RGB/命名色自适配白字+`set_marker` 语义别名与带白底边标签+`move` 连边弹性跟随+`delete` 自动清连边+相对避障多行 `add_node`+自动避障 `add_edge`+`replace_existing` 造型图例更新+编辑后几何审计+`from_text`+`to_text` 语义边定位与关系图收割+SVG 1.1 安全白底胶囊标签+`add_group` 区室保源编辑+`edit_summary` 落盘/多 PDF 零页码冲突+独立行 `Fig. 3` 跨页续接主图注+`prepare` 总输出防截断预算护栏+`_guess_task_type` 词边界修正+扫描 PDF OCR 兜底+中文 PDF 探针+`[PDF_READ_HINT]`+`EDIT_ERRORS` 强拦截/十六进制 `legend_mapping`+`provenance_summary.verification_checklist`+`source_manifest`+对立边与悬空组审计/纯文本实绘数值核验/两步极速管线）。

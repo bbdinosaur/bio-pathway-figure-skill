@@ -249,19 +249,29 @@ def main():
     ent_list = man.get("entity_inventory", [])
     rel_list = man.get("relation_inventory", [])
     dv_map = audit.get("data_verification") or {}
+    pdf_chk = checks.get("pdf") or {}
+    png_chk = checks.get("png") or {}
+    svg_chk = checks.get("svg") or {}
+    n_dv_ok = sum(1 for v in dv_map.values() if isinstance(v, dict) and v.get("verified"))
     prov_summary = {
         "entities_sourced": "%d/%d" % (sum(1 for e in ent_list if e.get("source")), len(ent_list)),
         "relations_sourced": "%d/%d" % (sum(1 for r in rel_list if r.get("source")), len(rel_list)),
-        "charts_sha256_verified": "%d/%d" % (
-            sum(1 for v in dv_map.values() if isinstance(v, dict) and v.get("verified")),
-            len(dv_map)),
-        "editable_text_verified": bool((checks.get("svg") or {}).get("editable_text")),
+        "charts_sha256_verified": "%d/%d" % (n_dv_ok, len(dv_map)),
+        "editable_text_verified": bool(svg_chk.get("editable_text")),
         "source_preserved": bool(
             isinstance(deliv.get("editable_source"), dict) and (
                 deliv["editable_source"].get("original_preserved")
                 or deliv["editable_source"].get("path")
             )
         ),
+        "verification_checklist": {
+            "svg_editable_text": bool(svg_chk.get("editable_text")),
+            "pdf_fonts_embedded": bool(pdf_chk.get("fonts_embedded")) and not bool(pdf_chk.get("fonts_not_embedded")),
+            "png_dpi_compliant": bool(png_chk.get("dpi_x") and float(png_chk.get("dpi_x", 0)) >= 295.0),
+            "geometry_zero_errors": bool(audit.get("n_errors", 0) == 0),
+            "export_zero_errors": bool(checks.get("n_errors", 0) == 0),
+            "charts_all_sha256_verified": (n_dv_ok == len(dv_map)) if dv_map else None,
+        },
     }
     result = {
         "case_id": a.case_id,

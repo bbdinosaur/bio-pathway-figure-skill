@@ -130,6 +130,59 @@ def _col_idx_to_letter(idx):
     return s
 
 
+def _table_structure_hint(rows):
+    """Emit a 1-line chart-binding hint if suffixed replicates or tidy long-format hue columns are detected."""
+    if not rows or len(rows) < 3:
+        return ""
+    hdr = [str(c).strip() for c in rows[0]]
+    body = rows[1:min(len(rows), 40)]
+    non_empty_h = [h for h in hdr if h]
+    if len(non_empty_h) < 2:
+        return ""
+    rep_re = re.compile(r"^(?P<pfx>.+?)(?:[_\-\s]+(?:rep(?:licate)?|r|#)?\s*\d+|\(\s*(?:rep\s*)?\d+\s*\))$", re.I)
+    pfxs = {}
+    for h in non_empty_h[1:]:
+        m = rep_re.match(h)
+        if m and m.group("pfx").strip():
+            pfxs.setdefault(m.group("pfx").strip(), []).append(h)
+    rep_groups = [k for k, v in pfxs.items() if len(v) >= 2]
+    if rep_groups:
+        return "HINT: suffixed replicates %s -> use y_cols=%s, agg='mean_sd'" % (rep_groups[:4], rep_groups[:4])
+    # Check tidy long-format (x_col, hue_col, value_col)
+    if len(non_empty_h) >= 3:
+        def _is_num(s):
+            t = str(s or "").strip().replace(",", "").rstrip("%")
+            if not t:
+                return False
+            try:
+                float(re.sub(r"[−–](?=\s*\d|\.)", "-", t))
+                return True
+            except ValueError:
+                return False
+        text_cols, num_cols = [], []
+        for ci, h in enumerate(hdr):
+            if not h:
+                continue
+            vals = [str(r[ci]).strip() for r in body if len(r) > ci and str(r[ci]).strip()]
+            if not vals:
+                continue
+            n_num = sum(1 for v in vals if _is_num(v))
+            if n_num >= max(1, int(len(vals) * 0.75)):
+                num_cols.append((ci, h))
+            else:
+                text_cols.append((ci, h, len(set(vals)), len(vals)))
+        if len(text_cols) >= 2 and num_cols:
+            c0_i, c0_h, c0_u, c0_n = text_cols[0]
+            c1_i, c1_h, c1_u, c1_n = text_cols[1]
+            if 2 <= c1_u <= 8 and c0_u < c0_n:
+                return "HINT: long-format grouped table -> use x_col=%r, hue_col=%r, y_cols=[%r], agg='mean_sd'" % (
+                    c0_h, c1_h, num_cols[0][1])
+            if len(num_cols) >= 2 and 2 <= c1_u <= 6 and c0_u == c0_n:
+                return "HINT: scatter/volcano table -> use x_col=%r, y_cols=[%r], hue_col=%r, label_col=%r" % (
+                    num_cols[0][1], num_cols[1][1], c1_h, c0_h)
+    return ""
+
+
 def _read_table_preview(path, max_rows=28, task_hint="", full_dump_out=None):
     ext = os.path.splitext(path)[1].lower()
     if ext == ".xlsx":
@@ -196,6 +249,9 @@ def _read_table_preview(path, max_rows=28, task_hint="", full_dump_out=None):
                     if max_cols:
                         hdr_cols = " | ".join(_col_idx_to_letter(ci) for ci in range(max_cols))
                         lines.append("    COLS: " + hdr_cols)
+                    sh_hint = _table_structure_hint(all_rows)
+                    if sh_hint:
+                        lines.append("    " + sh_hint)
                     for r in rows:
                         # Trim trailing empty cells per row to keep preview compact
                         tr = list(r[:max_cols])
@@ -234,6 +290,9 @@ def _read_table_preview(path, max_rows=28, task_hint="", full_dump_out=None):
             max_cols = min(max((len(r) for r in all_rows[:max_rows]), default=0), 16)
             if max_cols:
                 lines.append("    COLS: " + " | ".join(_col_idx_to_letter(ci) for ci in range(max_cols)))
+            sh_hint = _table_structure_hint(all_rows)
+            if sh_hint:
+                lines.append("    " + sh_hint)
             for r in all_rows[:max_rows]:
                 tr = [c.strip()[:34] for c in r[:max_cols]]
                 while tr and not tr[-1]:
@@ -306,9 +365,9 @@ def _extract_target_pdf_excerpts(full_txt, task_hint, budget=6500):
             if kind == "fig":
                 # Main Fig. N caption strictly outranks Extended Data Fig. N unless Extended Data was requested
                 has_main_cap = bool(re.search(
-                    r'(?:^|\n)\s*Fig(?:ure)?\.?\s*0*%s(?:\s*[\|\.\:\-]|[A-Za-z]\b)' % re.escape(num), body, re.I))
+                    r'(?:^|\n)\s*Fig(?:ure)?\.?\s*0*%s(?:\s*[\|\.\:\-]|\s*(?:\n|$)|[A-Za-z]\b)' % re.escape(num), body, re.I))
                 has_ext_cap = bool(re.search(
-                    r'(?:^|\n)\s*Extended Data\s+Fig(?:ure)?\.?\s*0*%s(?:\s*[\|\.\:\-]|[A-Za-z]\b)' % re.escape(num), body, re.I))
+                    r'(?:^|\n)\s*Extended Data\s+Fig(?:ure)?\.?\s*0*%s(?:\s*[\|\.\:\-]|\s*(?:\n|$)|[A-Za-z]\b)' % re.escape(num), body, re.I))
                 if has_main_cap:
                     score += 30
                 elif has_ext_cap:
@@ -328,8 +387,9 @@ def _extract_target_pdf_excerpts(full_txt, task_hint, budget=6500):
             score += 2
         scored.append((score, ftag, pno, block))
     scored.sort(key=lambda t: (-t[0], t[1], t[2]))
+    block_by_key = {(ftag, pno): blk for _, ftag, pno, blk in scored}
     chosen = []
-    # 1) Pin full verbatim matching Figure/Table captions (allows blank lines inside multi-panel captions a-g!)
+    # 1) Pin full verbatim matching Figure/Table captions (allows blank lines & cross-page continuation!)
     caps = []
     if targets:
         for sc, ftag, pno, blk in scored:
@@ -339,12 +399,12 @@ def _extract_target_pdf_excerpts(full_txt, task_hint, budget=6500):
             blk_lines = blk.splitlines()
             for kind, num in sorted(targets):
                 start_re = (
-                    re.compile(r'^\s*(?:Extended Data\s+)?Fig(?:ure)?\.?\s*0*%s(?:\s*[\|\.\:\-]|[A-Za-z]\b)' % re.escape(num), re.I)
+                    re.compile(r'^\s*(?:Extended Data\s+)?Fig(?:ure)?\.?\s*0*%s(?:\s*[\|\.\:\-]|\s*$|[A-Za-z]\b)' % re.escape(num), re.I)
                     if kind == "fig" else
-                    re.compile(r'^\s*Table\s*0*%s(?:\s*[\|\.\:\-])' % re.escape(num), re.I)
+                    re.compile(r'^\s*Table\s*0*%s(?:\s*[\|\.\:\-]|\s*$)' % re.escape(num), re.I)
                 )
                 stop_re = re.compile(
-                    r'^\s*(?:(?:Extended Data\s+)?Fig(?:ure)?\.?\s*\d+(?:\s*[\|\.\:\-])|Table\s*\d+(?:\s*[\|\.\:\-])|Methods\b|References\b|Reporting summary\b|Acknowledgements\b|Data availability\b|--- PAGE )',
+                    r'^\s*(?:(?:Extended Data\s+)?Fig(?:ure)?\.?\s*\d+(?:\s*[\|\.\:\-]|\s*$)|Table\s*\d+(?:\s*[\|\.\:\-]|\s*$)|Methods\b|References\b|Reporting summary\b|Acknowledgements\b|Data availability\b|--- PAGE )',
                     re.I,
                 )
                 for li_c, ln_c in enumerate(blk_lines):
@@ -352,18 +412,38 @@ def _extract_target_pdf_excerpts(full_txt, task_hint, budget=6500):
                         continue
                     buf = [ln_c.strip()]
                     blank_run = 0
+                    stopped = False
                     for ln_next in blk_lines[li_c + 1:li_c + 64]:
                         if stop_re.match(ln_next):
+                            stopped = True
                             break
                         if not ln_next.strip():
                             blank_run += 1
                             if blank_run >= 2:
+                                stopped = True
                                 break
                             continue
                         blank_run = 0
                         buf.append(ln_next.strip())
                         if sum(len(x) + 1 for x in buf) >= 4000:
+                            stopped = True
                             break
+                    # Cross-page caption continuation when caption reaches end of page without stop marker
+                    if not stopped and (ftag, pno + 1) in block_by_key and sum(len(x) + 1 for x in buf) < 3800:
+                        nxt_lines = block_by_key[(ftag, pno + 1)].splitlines()[1:28]
+                        b_run2 = 0
+                        for ln_n2 in nxt_lines:
+                            if stop_re.match(ln_n2):
+                                break
+                            if not ln_n2.strip():
+                                b_run2 += 1
+                                if b_run2 >= 2:
+                                    break
+                                continue
+                            b_run2 = 0
+                            buf.append(ln_n2.strip())
+                            if sum(len(x) + 1 for x in buf) >= 4000:
+                                break
                     cblk = "[%s CAPTION] %s" % (ptag, "\n".join(buf)[:4000])
                     if cblk not in caps:
                         caps.append(cblk)
@@ -412,11 +492,15 @@ def _extract_target_pdf_excerpts(full_txt, task_hint, budget=6500):
 
 def _guess_stem(brief, task_type):
     txt = (brief.get("task_text", "") + " " + brief.get("task_md_head", ""))
-    m_file = re.search(r'\b([A-Za-z0-9][A-Za-z0-9_\-]{2,40})\.svg\b', txt)
-    if m_file:
-        return m_file.group(1)
+    m_out = re.search(r'(?:/app/output/|save\s+(?:to|as)\s+["`\' ]?)([A-Za-z0-9][A-Za-z0-9_\-]{2,40})\.svg\b', txt, re.I)
+    if m_out:
+        return m_out.group(1)
+    if task_type != "edit":
+        m_file = re.search(r'\b([A-Za-z0-9][A-Za-z0-9_\-]{2,40})\.svg\b', txt)
+        if m_file:
+            return m_file.group(1)
     m_fig = re.search(r'\b(figure\s*0*\d+|fig\s*0*\d+)\b', txt, re.I)
-    if m_fig:
+    if m_fig and task_type != "edit":
         return re.sub(r'\s+', '', m_fig.group(1).lower())
     if task_type == "edit":
         for m in brief.get("materials", []):
@@ -428,8 +512,10 @@ def _guess_stem(brief, task_type):
 def _guess_task_type(brief):
     txt = (brief.get("task_text", "") + " " + brief.get("task_md_head", "")).lower()
     has_svg = any(m.get("type") == "svg" for m in brief.get("materials", []))
-    edit_words = ("edit", "modify", "revise", "update existing", "preserve", "修改", "编辑已有", "保源")
-    if has_svg and any(w in txt for w in edit_words):
+    edit_re = re.compile(
+        r"(?:\b(?:edit(?:ing|ed)?|modify|modifying|revise|revising|update\s+existing|source[- ]preserving)\b|修改|编辑已有|保源)"
+    )
+    if has_svg and edit_re.search(txt):
         return "edit"
     return "generate"
 
@@ -564,8 +650,8 @@ def cmd_prepare(a):
             lines.append("    group_ids: %s" % ins.get("groups", [])[:40])
             if ins.get("node_boxes"):
                 lines.append("    node_boxes: %s" % [
-                    "%s@%s" % (nb.get("label", "?")[:28], nb.get("bbox"))
-                    for nb in ins.get("node_boxes", [])[:30]])
+                    "%s@%s" % (nb.get("label", "?")[:24], nb.get("bbox"))
+                    for nb in ins.get("node_boxes", [])[:18]])
             if ins.get("named_shapes"):
                 lines.append("    named_shapes: %s" % ins.get("named_shapes", [])[:30])
             if ins.get("edges"):
@@ -611,12 +697,15 @@ def cmd_prepare(a):
         full_txt = open(pdf_extract_path, encoding="utf-8").read()
         lines.append("pdf_extract: %s (%d chars, %d lines)" % (
             pdf_extract_path, len(full_txt), len(full_txt.splitlines())))
-        if len(full_txt) <= 10500:
+        cur_bytes = sum(len(x.encode("utf-8")) + 1 for x in lines)
+        # Keep total prepare stdout cleanly below harness truncation limits (~22 KB) while preserving captions & tables
+        pdf_budget = max(4000, min(9500, 21000 - cur_bytes))
+        if len(full_txt) <= pdf_budget:
             lines.append("pdf_text_inline:\n%s" % full_txt)
         else:
-            pidx, excerpts = _extract_target_pdf_excerpts(full_txt, task_hint_full, budget=10500)
+            pidx, excerpts = _extract_target_pdf_excerpts(full_txt, task_hint_full, budget=pdf_budget)
             if pidx:
-                lines.append("pdf_page_index: " + " | ".join(pidx[:35]))
+                lines.append("pdf_page_index: " + " | ".join(pidx[:30]))
             lines.append("target_pdf_excerpts (read %s with offset/limit for full page text):\n%s"
                          % (pdf_extract_path, excerpts))
     print("\n".join(lines))
@@ -754,6 +843,12 @@ def cmd_deliver(a):
             "canvas": plan.get("canvas", {"width_mm": 180}),
             "panels": plan.get("panels", []),
         }
+        if plan.get("title"):
+            spec["title"] = plan["title"]
+        if plan.get("subtitle"):
+            spec["subtitle"] = plan["subtitle"]
+        if plan.get("style"):
+            spec["style"] = plan["style"]
         if plan.get("footnote"):
             spec["footnote"] = plan["footnote"]
         if plan.get("preset"):
@@ -771,17 +866,20 @@ def cmd_deliver(a):
             "compare": "Comparison",
         }
         import fig_style as _FS
+        import fig_chart as _FC
         # Pre-normalize LLM schema variations BEFORE auto-legend & spec_path write so make_result/audit see canonical keys!
         _DIR_AL = {
             "VERTICAL": "TB", "TOP-DOWN": "TB", "TOP_DOWN": "TB", "TOP_TO_BOTTOM": "TB", "TD": "TB", "DOWN": "TB",
             "HORIZONTAL": "LR", "LEFT-TO-RIGHT": "LR", "LEFT_TO_RIGHT": "LR", "RIGHT": "LR",
         }
-        _CH_TYPES = {"bar", "barh", "stacked_bar", "line", "scatter", "box", "heatmap"}
+        _CH_TYPES = set(_FC._CHART_KIND_ALIASES.keys())
         for p in spec.get("panels", []):
-            pt_l = str(p.get("type", "schematic")).strip().lower()
+            pt_l = str(p.get("type", "schematic")).strip().lower().replace(" ", "_")
             if pt_l in _CH_TYPES:
                 p["type"] = "chart"
-                p.setdefault("chart", {}).setdefault("kind", pt_l)
+                p.setdefault("chart", {}).setdefault("kind", _FC.canonical_chart_kind(pt_l))
+            elif pt_l == "chart" and isinstance(p.get("chart"), dict) and p["chart"].get("kind"):
+                p["chart"]["kind"] = _FC.canonical_chart_kind(p["chart"]["kind"])
             if p.get("direction"):
                 d_u = str(p["direction"]).strip().upper()
                 p["direction"] = _DIR_AL.get(d_u, d_u)
@@ -828,10 +926,57 @@ def cmd_deliver(a):
                     k = _FS.canonical_edge_kind(e.get("kind", "activates"))
                     if k not in seen_k:
                         seen_k.append(k)
-                if seen_k:
+                leg_items = [{"kind": k, "label": _KIND_LABELS.get(k, k)} for k in seen_k]
+                # Also synthesize node shape/color swatches when >= 2 distinct visual classes exist
+                _SH_LABELS = {
+                    "ellipse": "Ligand / Signal",
+                    "complex": "Receptor / Complex",
+                    "hexagon": "Inhibitor / Drug",
+                    "gene": "Gene / Transcript",
+                    "stadium": "Effector / Output",
+                    "diamond": "Decision / Gate",
+                }
+                node_classes = []
+                seen_nc = set()
+                for n in p.get("nodes", []):
+                    sh_n = _FS.canonical_shape(n.get("shape", "round"))
+                    fl_n = str(n.get("fill") or _FS.STYLE["node_fill"]).strip().upper()
+                    key_nc = (sh_n, fl_n)
+                    if key_nc in seen_nc:
+                        continue
+                    seen_nc.add(key_nc)
+                    custom_lbl = n.get("role_class") or n.get("etype")
+                    if custom_lbl and str(custom_lbl).strip().lower() not in ("entity", "node", sh_n):
+                        lbl_nc = str(custom_lbl).strip()[:24]
+                    elif sh_n in _SH_LABELS:
+                        lbl_nc = _SH_LABELS[sh_n]
+                    elif fl_n in ("#0072B2", "#1E3A5F", "#2B5B84", "#0B5394"):
+                        lbl_nc = "Core Regulator"
+                    elif fl_n in ("#FADBD8", "#F5B7B1"):
+                        lbl_nc = "Inhibitor / Stress"
+                    elif fl_n in ("#D5F5E3", "#ABEBC6"):
+                        lbl_nc = "Target / Outcome"
+                    elif fl_n in ("#FDEBD0", "#F9E79F"):
+                        lbl_nc = "Stimulus / Input"
+                    else:
+                        lbl_nc = "Signaling Factor"
+                    node_classes.append({"shape": sh_n, "fill": fl_n, "label": lbl_nc})
+                if len(node_classes) >= 2:
+                    # Deduplicate by label and keep up to 4 most informative swatches
+                    used_nl = set()
+                    added_sw = 0
+                    for nc in node_classes:
+                        if nc["label"] in used_nl:
+                            continue
+                        used_nl.add(nc["label"])
+                        leg_items.append(nc)
+                        added_sw += 1
+                        if added_sw >= 4:
+                            break
+                if leg_items:
                     p["legend"] = {
                         "title": "Legend",
-                        "items": [{"kind": k, "label": _KIND_LABELS.get(k, k)} for k in seen_k],
+                        "items": leg_items,
                     }
         # Resolve data_file against work/input_dir (incl. smart basename & unique-ext fallback)
         input_files = []
@@ -1051,6 +1196,19 @@ def cmd_deliver(a):
         "change_records": change_records,
         "notes": plan.get("notes", ""),
     }
+    if is_edit and edit_info:
+        manifest["edit_summary"] = {
+            "source_preserved": bool(edit_info.get("source_preserved")),
+            "original_preserved_path": edit_info.get("original_copy"),
+            "groups_before": edit_info.get("groups_before"),
+            "groups_after": edit_info.get("groups_after"),
+            "viewBox_before": edit_info.get("viewBox_before"),
+            "viewBox_after": edit_info.get("viewBox_after"),
+            "texts_added": edit_info.get("texts_added", []),
+            "texts_removed": edit_info.get("texts_removed", []),
+            "applied_ops": edit_info.get("applied_ops", []),
+            "n_ops": edit_info.get("n_ops", 0),
+        }
     for k, v in plan.items():
         if k not in SPEC_ONLY_KEYS and k not in manifest:
             manifest[k] = v

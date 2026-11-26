@@ -487,8 +487,9 @@ def panel_layout_pass(p, meas, style, avail_w, prefer_cjk=False):
     wrapped = False
     s = 1.0
     if met["content_w"] > avail_w:
-        # First try clean unwrapped scaling down to 0.62 (keeps 5-6 rank multi-compartment cascades on one axis)
-        s_try = max(min(avail_w / met["content_w"] * 0.96, 0.95), 0.62)
+        # First try clean unwrapped scaling while preserving legible >= 6.0 pt print text
+        s_floor = 0.74 if float(style.get("fontsize", 9.0)) <= 8.0 else 0.70
+        s_try = max(min(avail_w / met["content_w"] * 0.96, 0.95), s_floor)
         for _ in range(3):
             st_u = scaled_style(style, s_try)
             m_u = S.Measurer(st_u["fontsize"], prefer_cjk=prefer_cjk)
@@ -496,9 +497,9 @@ def panel_layout_pass(p, meas, style, avail_w, prefer_cjk=False):
             m_u.close()
             if met_u["content_w"] <= avail_w:
                 return met_u["total_inner_h"], s_try, False
-            if s_try <= 0.625:
+            if s_try <= s_floor + 0.005:
                 break
-            s_try = max(s_try * (avail_w / met_u["content_w"]) * 0.97, 0.62)
+            s_try = max(s_try * (avail_w / met_u["content_w"]) * 0.97, s_floor)
         # Still too wide -> use group-atomic row wrap
         s = style.get("min_scale", 0.78)
         st2 = scaled_style(style, s)
@@ -671,13 +672,15 @@ def main():
             "VERTICAL": "TB", "TOP-DOWN": "TB", "TOP_DOWN": "TB", "TOP_TO_BOTTOM": "TB", "TD": "TB", "DOWN": "TB",
             "HORIZONTAL": "LR", "LEFT-TO-RIGHT": "LR", "LEFT_TO_RIGHT": "LR", "RIGHT": "LR",
         }
-        _CHART_TYPES = {"bar", "barh", "stacked_bar", "line", "scatter", "box", "heatmap"}
+        _CHART_TYPES = set(C._CHART_KIND_ALIASES.keys())
         for p in spec.get("panels", []):
-            ptype_l = str(p.get("type", "schematic")).strip().lower()
+            ptype_l = str(p.get("type", "schematic")).strip().lower().replace(" ", "_")
             if ptype_l in _CHART_TYPES:
                 p["type"] = "chart"
                 ch_d = p.setdefault("chart", {})
-                ch_d.setdefault("kind", ptype_l)
+                ch_d.setdefault("kind", C.canonical_chart_kind(ptype_l))
+            elif ptype_l == "chart" and isinstance(p.get("chart"), dict) and p["chart"].get("kind"):
+                p["chart"]["kind"] = C.canonical_chart_kind(p["chart"]["kind"])
             if p.get("direction"):
                 d_up = str(p["direction"]).strip().upper()
                 p["direction"] = _DIR_ALIASES.get(d_up, d_up)
@@ -769,18 +772,41 @@ def main():
     avail = max(width_mm - 2.0 * m, 20.0)
     gap = style["panel_gap_mm"]
 
-    # Group panels into layout rows (optional panel.row enables side-by-side multi-panel grids)
+    # Group panels into layout rows (optional panel.row enables side-by-side multi-panel grids;
+    # when >=3 panels omit row on a wide canvas, auto-pair consecutive charts 2-per-row for compact publication grids)
     row_groups = []
     row_map = {}
-    for i, p in enumerate(panels):
-        rk = p.get("row")
-        if rk is None:
-            row_groups.append([i])
-        else:
-            if rk not in row_map:
-                row_map[rk] = []
-                row_groups.append(row_map[rk])
-            row_map[rk].append(i)
+    any_explicit_row = any(p.get("row") is not None for p in panels)
+    if (not any_explicit_row) and len(panels) >= 3 and width_mm >= 150.0:
+        cur_pair = []
+        for i, p in enumerate(panels):
+            is_pairable_chart = (
+                p.get("type") == "chart"
+                and not p.get("full_width")
+                and C.canonical_chart_kind((p.get("chart") or {}).get("kind", "bar")) != "barh"
+            )
+            if is_pairable_chart:
+                cur_pair.append(i)
+                if len(cur_pair) == 2:
+                    row_groups.append(cur_pair)
+                    cur_pair = []
+            else:
+                if cur_pair:
+                    row_groups.append(cur_pair)
+                    cur_pair = []
+                row_groups.append([i])
+        if cur_pair:
+            row_groups.append(cur_pair)
+    else:
+        for i, p in enumerate(panels):
+            rk = p.get("row")
+            if rk is None:
+                row_groups.append([i])
+            else:
+                if rk not in row_map:
+                    row_map[rk] = []
+                    row_groups.append(row_map[rk])
+                row_map[rk].append(i)
 
     # Compute per-panel horizontal slot (x0_mm, w_mm) within its row
     col_gap = gap
@@ -842,15 +868,45 @@ def main():
             scales[pid], wraps[pid] = s, wrapped
 
     row_heights = [max(hdr_hs[idx] + inner_hs[idx] for idx in grp) for grp in row_groups]
+    fig_title_raw = str(spec.get("title") or spec.get("canvas", {}).get("title") or "").strip()
+    fig_sub_raw = str(spec.get("subtitle") or spec.get("canvas", {}).get("subtitle") or "").strip()
+    if fig_title_raw and len(panels) == 1 and str(panels[0].get("title") or "").strip().lower() == fig_title_raw.lower():
+        fig_title_raw = ""
+    fig_title_txt, fig_title_fs, fig_hdr_h = "", 10.8, 0.0
+    if fig_title_raw:
+        tw_ft = meas.text_mm(fig_title_raw, fontsize=fig_title_fs, weight="bold")[0]
+        if tw_ft > avail:
+            if tw_ft <= avail * 1.15:
+                fig_title_fs = max(9.2, fig_title_fs * (avail / tw_ft) * 0.96)
+                fig_title_txt = fig_title_raw
+            else:
+                fig_title_fs = 9.8
+                mc_ft = max(int(avail / 2.0), 28)
+                fig_title_txt = S.wrap_label(fig_title_raw, max_chars=mc_ft)
+        else:
+            fig_title_txt = fig_title_raw
+        n_ftl = fig_title_txt.count("\n") + 1
+        fig_hdr_h = (5.4 * n_ftl + 2.2) + (4.2 if fig_sub_raw else 0.0)
     footnote = spec.get("footnote") or spec.get("canvas", {}).get("footnote")
     foot_h = 5.0 if footnote else 0.0
-    total_h = (2.0 * m + sum(row_heights) + gap * max(len(row_groups) - 1, 0) + foot_h) if panels else 40.0
+    total_h = (2.0 * m + fig_hdr_h + sum(row_heights) + gap * max(len(row_groups) - 1, 0) + foot_h) if panels else 40.0
 
     fig = plt.figure(figsize=(width_mm / S.MM_PER_INCH, total_h / S.MM_PER_INCH), dpi=100)
     fig.patch.set_facecolor("white")
 
     geoms = {}
     y_top = total_h - m
+    if fig_title_txt:
+        y_ft = y_top - (fig_hdr_h - (4.2 if fig_sub_raw else 0.0)) / 2.0
+        ft_el = fig.text(m / width_mm, y_ft / total_h, fig_title_txt,
+                         fontsize=fig_title_fs, fontweight="bold", color=style["title_color"],
+                         va="center", ha="left", linespacing=1.15)
+        ft_el.set_gid("figure-title")
+        if fig_sub_raw:
+            fs_el = fig.text(m / width_mm, (y_top - fig_hdr_h + 1.8) / total_h, fig_sub_raw,
+                             fontsize=7.6, color="#4A5568", va="center", ha="left")
+            fs_el.set_gid("figure-subtitle")
+        y_top -= fig_hdr_h
     for grp, rh in zip(row_groups, row_heights):
         for i in grp:
             p = panels[i]
@@ -908,8 +964,11 @@ def main():
                     inset_b = 14.0 if max_cat_len > 8 else 10.0
                 else:
                     inset_l = 13.5
-                    inset_b = 17.0 if (not ch_pre.get("x_values") and max_cat_len > 14) else (
-                        15.0 if (not ch_pre.get("x_values") and max_cat_len > 10) else 10.5)
+                    n_cp = len(cats_pre)
+                    need_rot_b = (not ch_pre.get("x_values")) and (
+                        max_cat_len > 10 or (n_cp >= 5 and max_cat_len * 1.45 > (pw - 16.5) / max(n_cp, 1) * 0.92))
+                    inset_b = 18.5 if (not ch_pre.get("x_values") and (max_cat_len > 14 or (need_rot_b and n_cp >= 6))) else (
+                        15.5 if need_rot_b else 10.5)
                 inset_r = 12.5 if ckind == "heatmap" else 3.0
                 inset_t = 9.8 if C.effective_legend_loc(ch_pre) == "top" else 2.2
                 ax_x = px0 + inset_l

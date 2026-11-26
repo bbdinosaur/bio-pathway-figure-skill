@@ -1187,6 +1187,339 @@ def main():
           r26b.returncode == 0 and r26a.returncode == 0 and aud26.get("n_errors") == 0,
           (r26b.stderr or "") + str(aud26.get("errors")))
 
+    # 41) v27: tidy long-format hue_col pivot + within-category grouped-bar sig_brackets + SHA-256 audit
+    v27_long = os.path.join(wd, "v27_long.csv")
+    open(v27_long, "w", encoding="utf-8").write(
+        "Gene,Genotype,Expression\n"
+        "Ifnb1,WT,8.1\nIfnb1,WT,8.6\nIfnb1,WT,8.5\n"
+        "Ifnb1,KO,1.5\nIfnb1,KO,1.7\nIfnb1,KO,1.6\n"
+        "Isg15,WT,6.2\nIsg15,WT,6.8\nIsg15,WT,6.5\n"
+        "Isg15,KO,1.9\nIsg15,KO,2.1\nIsg15,KO,2.0\n"
+    )
+    v27_sp1 = os.path.join(wd, "v27_bar.json")
+    json.dump({
+        "preset": "nature_single",
+        "panels": [{
+            "id": "p1", "type": "chart", "title": "Long-format qPCR", "height_mm": 54,
+            "chart": {
+                "kind": "bar", "data_file": v27_long, "x_col": "Gene", "hue_col": "Genotype",
+                "y_cols": ["Expression"], "agg": "mean_sd", "show_points": True, "y_label": "mRNA", "unit": "fold",
+                "sig_brackets": [
+                    {"x": "Ifnb1", "s1": "WT", "s2": "KO", "label": "***"},
+                    {"x": "Isg15", "label": "**"},
+                ],
+            }
+        }]
+    }, open(v27_sp1, "w", encoding="utf-8"))
+    v27_g1, v27_a1 = os.path.join(wd, "v27_g1.json"), os.path.join(wd, "v27_a1.json")
+    r27b1 = run([os.path.join(HERE, "build_figure.py"), v27_sp1, "--out-dir", wd, "--stem", "v27b1", "--geom", v27_g1])
+    r27a1 = run([os.path.join(HERE, "audit_figure.py"), v27_g1, "--spec", v27_sp1, "--out", v27_a1])
+    aud27_1 = json.load(open(v27_a1, encoding="utf-8")) if os.path.exists(v27_a1) else {}
+    dv27_1 = (aud27_1.get("data_verification") or {}).get("p1") or {}
+    check("v27: tidy long-format hue_col pivot + within-category sig_brackets passes SHA-256 audit",
+          r27b1.returncode == 0 and r27a1.returncode == 0 and aud27_1.get("n_errors") == 0
+          and dv27_1.get("verified") is True and dv27_1.get("n_values_checked") == 4,
+          (r27b1.stderr or "") + str(aud27_1))
+
+    # 42) v27: hue-colored volcano scatter (hue_col + label_col + top_labels) passes audit with 0 errors
+    v27_volc = os.path.join(wd, "v27_volcano.csv")
+    open(v27_volc, "w", encoding="utf-8").write(
+        "Gene,Status,log2FC,negLog10P\n"
+        "Ifnb1,Up,3.4,6.8\nIsg15,Up,2.9,5.9\nRipk3,Up,2.2,4.8\n"
+        "Bcl2,Down,-2.5,5.1\nMcl1,Down,-2.1,4.4\n"
+        "Actb,NS,0.1,0.4\nGapdh,NS,-0.2,0.6\n"
+    )
+    v27_sp2 = os.path.join(wd, "v27_volc.json")
+    json.dump({
+        "preset": "nature_single",
+        "panels": [{
+            "id": "p1", "type": "scatter", "title": "Volcano Hue", "height_mm": 54,
+            "chart": {
+                "data_file": v27_volc, "x_col": "log2FC", "y_cols": ["negLog10P"],
+                "hue_col": "Status", "label_col": "Gene", "top_labels": 5,
+                "x_label": "log2FC", "y_label": "-log10(padj)", "unit": "-log10",
+                "hlines": [{"y": 1.3, "label": "p=0.05"}], "vlines": [{"x": -1.0}, {"x": 1.0}],
+            }
+        }]
+    }, open(v27_sp2, "w", encoding="utf-8"))
+    v27_g2, v27_a2 = os.path.join(wd, "v27_g2.json"), os.path.join(wd, "v27_a2.json")
+    r27b2 = run([os.path.join(HERE, "build_figure.py"), v27_sp2, "--out-dir", wd, "--stem", "v27b2", "--geom", v27_g2])
+    r27a2 = run([os.path.join(HERE, "audit_figure.py"), v27_g2, "--spec", v27_sp2, "--out", v27_a2])
+    aud27_2 = json.load(open(v27_a2, encoding="utf-8")) if os.path.exists(v27_a2) else {}
+    dv27_2 = (aud27_2.get("data_verification") or {}).get("p1") or {}
+    check("v27: hue-colored volcano scatter (hue_col + label_col + top_labels) passes audit with 0 errors",
+          r27b2.returncode == 0 and r27a2.returncode == 0 and aud27_2.get("n_errors") == 0
+          and dv27_2.get("verified") is True and dv27_2.get("n_values_checked") == 7,
+          (r27b2.stderr or "") + str(aud27_2))
+
+    # 43) v27: op_delete prunes connected edges + collision-free multiline add_node + set_marker dash + foreignObject inspect
+    v27_svg = os.path.join(wd, "v27_del.svg")
+    open(v27_svg, "w", encoding="utf-8").write(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 140" width="480" height="140">'
+        '<g id="node-A"><rect x="20" y="45" width="90" height="40" rx="6" fill="#EAF2FB" stroke="#1E3A5F"/>'
+        '<text x="65" y="69" text-anchor="middle" font-size="13" fill="#10243B">TLR4</text></g>'
+        '<g id="node-B"><rect x="180" y="45" width="90" height="40" rx="6" fill="#EAF2FB" stroke="#1E3A5F"/>'
+        '<text x="225" y="69" text-anchor="middle" font-size="13" fill="#10243B">TRIF</text></g>'
+        '<g id="node-C"><rect x="340" y="45" width="90" height="40" rx="6" fill="#FADBD8" stroke="#C0392B"/>'
+        '<text x="385" y="69" text-anchor="middle" font-size="13" fill="#10243B">Decoy</text></g>'
+        '<foreignObject x="10" y="10" width="120" height="20"><div>DrawioNote</div></foreignObject>'
+        '<line id="e-ab" x1="110" y1="65" x2="180" y2="65" stroke="#1E3A5F" stroke-width="2"/>'
+        '<line id="e-bc" x1="270" y1="65" x2="340" y2="65" stroke="#1E3A5F" stroke-width="2"/>'
+        '</svg>'
+    )
+    r27ins = run([os.path.join(HERE, "edit_svg.py"), v27_svg, "--inspect"])
+    ins27 = json.loads(r27ins.stdout) if r27ins.returncode == 0 else {}
+    v27_ops = os.path.join(wd, "v27_ops.json")
+    json.dump({"ops": [
+        {"op": "delete", "by_text": "Decoy"},
+        {"op": "set_marker", "from_text": "TLR4", "to_text": "TRIF", "marker": "open", "dash": "dashed"},
+        {"op": "add_node", "id": "node-IRF3", "label": "Phospho-IRF3\n(Ser396)", "right_of": "TLR4", "gap": 30},
+    ]}, open(v27_ops, "w", encoding="utf-8"))
+    r27e = run([os.path.join(HERE, "edit_svg.py"), v27_svg, v27_ops, "--out-dir", wd, "--stem", "v27_ed", "--no-render"])
+    j27e = json.loads(r27e.stdout) if r27e.returncode == 0 else {}
+    s27 = open(os.path.join(wd, "v27_ed.svg"), encoding="utf-8").read() if os.path.exists(os.path.join(wd, "v27_ed.svg")) else ""
+    check("v27: op_delete prunes connected edge + collision-free multiline add_node + set_marker dash + foreignObject",
+          r27e.returncode == 0
+          and any("DrawioNote" in t.get("text", "") for t in ins27.get("texts", []))
+          and any("pruned 1 connected edge" in op for op in j27e.get("applied_ops", []))
+          and 'id="e-bc"' not in s27
+          and "stroke-dasharray:5,3" in s27
+          and "<tspan" in s27 and not j27e.get("audit_warnings"),
+          str(j27e.get("applied_ops")) + " warns=" + str(j27e.get("audit_warnings")))
+
+    # 44) v27: standalone Fig. 3 line + cross-page caption continuation + table STRUCTURE_HINT
+    import run_pipeline as _RP27
+    p27_txt = (
+        "=== FILE: /input/paper.pdf ===\n"
+        "--- PAGE 1 ---\nIntro text mentioning Fig. 3.\n"
+        "--- PAGE 2 ---\nFig. 3\nSTING-TBK1 signaling cascade.\na, Model of cGAMP activation.\n"
+        "--- PAGE 3 ---\nb, Quantitative RT-PCR of Ifnb1 (n=3).\n\n\nMethods\nMouse lines...\n"
+    )
+    _, ex27 = _RP27._extract_target_pdf_excerpts(p27_txt, "Generate figure03", budget=2000)
+    sh27 = _RP27._table_structure_hint([
+        ["Gene", "Genotype", "Expression"],
+        ["Ifnb1", "WT", "8.1"], ["Ifnb1", "WT", "8.5"], ["Ifnb1", "KO", "1.6"],
+    ])
+    check("v27: standalone Fig. 3 + cross-page caption continuation + table STRUCTURE_HINT",
+          "TARGET CAPTIONS (VERBATIM)" in ex27 and "Quantitative RT-PCR of Ifnb1" in ex27
+          and "hue_col='Genotype'" in sh27,
+          repr(ex27[:220]) + " | " + repr(sh27))
+
+    # 45) v28: dual-modal auto-legend (edges + node shape/color swatches) & >=0.70 scale readability floor
+    v28_in, v28_wk, v28_out = os.path.join(wd, "v28_in"), os.path.join(wd, "v28_wk"), os.path.join(wd, "v28_out")
+    os.makedirs(v28_in, exist_ok=True)
+    json.dump({"case_id": "v28-dual", "task": "Generate editable SVG schematic"}, open(os.path.join(v28_in, "case.json"), "w", encoding="utf-8"))
+    v28_p1 = os.path.join(wd, "v28_plan1.json")
+    json.dump({
+        "case_id": "v28-dual", "stem": "v28_dual", "preset": "nature_double",
+        "panels": [{
+            "id": "p1", "type": "schematic", "direction": "LR", "title": "Dual Legend Cascade",
+            "nodes": [
+                {"id": "L", "label": "cGAMP", "shape": "ellipse", "fill": "#FDEBD0", "rank": 0, "source": {"file": "p.pdf", "locator": "p.2"}},
+                {"id": "R", "label": "STING", "shape": "complex", "fill": "#EAF2FB", "rank": 1, "source": {"file": "p.pdf", "locator": "p.2"}},
+                {"id": "K", "label": "TBK1", "shape": "round", "fill": "#0072B2", "rank": 2, "source": {"file": "p.pdf", "locator": "p.2"}},
+                {"id": "I", "label": "H-151", "shape": "hexagon", "fill": "#FADBD8", "rank": 1, "source": {"file": "p.pdf", "locator": "p.2"}},
+                {"id": "G", "label": "IFNB1", "shape": "gene", "fill": "#D5F5E3", "rank": 3, "source": {"file": "p.pdf", "locator": "p.2"}},
+            ],
+            "edges": [
+                {"from": "L", "to": "R", "kind": "binds", "source": {"file": "p.pdf", "locator": "p.2"}},
+                {"from": "I", "to": "R", "kind": "inhibits", "source": {"file": "p.pdf", "locator": "p.2"}},
+                {"from": "R", "to": "K", "kind": "activates", "source": {"file": "p.pdf", "locator": "p.2"}},
+                {"from": "K", "to": "G", "kind": "translocates", "source": {"file": "p.pdf", "locator": "p.2"}},
+            ],
+        }]
+    }, open(v28_p1, "w", encoding="utf-8"))
+    r28_1 = run([os.path.join(HERE, "run_pipeline.py"), "deliver", v28_p1, "--input", v28_in, "--work", v28_wk, "--out", v28_out])
+    rj28_1 = json.load(open(os.path.join(v28_out, "result.json"), encoding="utf-8")) if os.path.exists(os.path.join(v28_out, "result.json")) else {}
+    lm28 = ((rj28_1.get("legend_mapping") or {}).get("p1") or {}).get("entries") or []
+    g28_1 = json.load(open(os.path.join(v28_wk, "geometry.json"), encoding="utf-8")) if os.path.exists(os.path.join(v28_wk, "geometry.json")) else {}
+    sc28_1 = ((g28_1.get("panels") or {}).get("p1") or {}).get("scale", 0.0)
+    check("v28: dual-modal auto-legend synthesizes edges + node shape swatches with legible scale >= 0.70",
+          r28_1.returncode == 0 and rj28_1.get("status") == "ok"
+          and any(e.get("symbol_type") == "edge" for e in lm28)
+          and sum(1 for e in lm28 if e.get("symbol_type") == "node") >= 3
+          and sc28_1 >= 0.70,
+          "status=%s scale=%s lm=%s" % (rj28_1.get("status"), sc28_1, lm28))
+
+    # 46) v28: narrow side-by-side 6-category long-label bar chart wraps/rotates x-ticks cleanly
+    v28_csv = os.path.join(wd, "v28_narrow.csv")
+    open(v28_csv, "w", encoding="utf-8").write(
+        "Treatment,Signal\n"
+        "Vehicle Control,1.0\nLPS Only (10 ng/mL),4.2\ncGAMP Stimulation,7.8\n"
+        "STING Knockout,1.5\nTBK1 Inhibitor (1 uM),2.1\nH-151 + cGAMP,1.8\n"
+    )
+    v28_sp2 = os.path.join(wd, "v28_narrow.json")
+    json.dump({
+        "preset": "nature_double",
+        "panels": [
+            {"id": "p1", "row": 0, "type": "chart", "title": "Narrow Left", "height_mm": 56,
+             "chart": {"kind": "bar", "data_file": v28_csv, "x_col": "Treatment", "y_cols": ["Signal"], "y_label": "IFNb", "unit": "fold"}},
+            {"id": "p2", "row": 0, "type": "chart", "title": "Narrow Right", "height_mm": 56,
+             "chart": {"kind": "bar", "data_file": v28_csv, "x_col": "Treatment", "y_cols": ["Signal"], "y_label": "IFNb", "unit": "fold"}},
+        ]
+    }, open(v28_sp2, "w", encoding="utf-8"))
+    v28_g2, v28_a2 = os.path.join(wd, "v28_g2.json"), os.path.join(wd, "v28_a2.json")
+    r28b2 = run([os.path.join(HERE, "build_figure.py"), v28_sp2, "--out-dir", wd, "--stem", "v28_n", "--geom", v28_g2])
+    r28a2 = run([os.path.join(HERE, "audit_figure.py"), v28_g2, "--spec", v28_sp2, "--out", v28_a2])
+    aud28_2 = json.load(open(v28_a2, encoding="utf-8")) if os.path.exists(v28_a2) else {}
+    check("v28: narrow side-by-side 6-category long-label bar chart passes audit with 0 errors",
+          r28b2.returncode == 0 and r28a2.returncode == 0 and aud28_2.get("n_errors") == 0
+          and ((aud28_2.get("data_verification") or {}).get("p1") or {}).get("verified") is True,
+          (r28b2.stderr or "") + str(aud28_2))
+
+    # 47) v28: cross-tspan replace_text + add_legend replace_existing w/ shape swatches + edit_summary in result.json
+    v28_e_in, v28_e_wk, v28_e_out = os.path.join(wd, "v28_ein"), os.path.join(wd, "v28_ewk"), os.path.join(wd, "v28_eout")
+    os.makedirs(v28_e_in, exist_ok=True)
+    v28_esvg = os.path.join(v28_e_in, "split_tspan.svg")
+    open(v28_esvg, "w", encoding="utf-8").write(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 140" width="320" height="140">'
+        '<g id="node-1"><rect x="20" y="30" width="110" height="44" rx="6" fill="#EAF2FB" stroke="#1E3A5F"/>'
+        '<text x="75" y="50" text-anchor="middle" font-size="12" fill="#10243B">'
+        '<tspan x="75" dy="0">Phospho-</tspan><tspan x="75" dy="14">IRF3</tspan></text></g>'
+        '<g id="legend-old"><rect x="10" y="100" width="140" height="24" fill="#FFF" stroke="#CCC"/>'
+        '<text x="16" y="116" font-size="10">OldLegend</text></g></svg>'
+    )
+    json.dump({"case_id": "v28-ed", "task": "Edit split_tspan.svg"}, open(os.path.join(v28_e_in, "case.json"), "w", encoding="utf-8"))
+    v28_ep = os.path.join(wd, "v28_eplan.json")
+    json.dump({
+        "case_id": "v28-ed", "mode": "edit", "edit_svg": "split_tspan.svg", "stem": "split_edited",
+        "ops": [
+            {"op": "replace_text", "find": "Phospho- IRF3", "replace": "p-IRF3 (S396)"},
+            {"op": "add_legend", "replace_existing": True, "items": [
+                {"kind": "activates", "label": "Activation"},
+                {"shape": "hexagon", "fill": "#FADBD8", "label": "Inhibitor"},
+            ]},
+        ]
+    }, open(v28_ep, "w", encoding="utf-8"))
+    r28_e = run([os.path.join(HERE, "run_pipeline.py"), "deliver", v28_ep, "--input", v28_e_in, "--work", v28_e_wk, "--out", v28_e_out])
+    rj28_e = json.load(open(os.path.join(v28_e_out, "result.json"), encoding="utf-8")) if os.path.exists(os.path.join(v28_e_out, "result.json")) else {}
+    s28_e = open(os.path.join(v28_e_out, "split_edited.svg"), encoding="utf-8").read() if os.path.exists(os.path.join(v28_e_out, "split_edited.svg")) else ""
+    check("v28: cross-tspan replace_text + replace_existing swatch legend + result.json edit_summary",
+          r28_e.returncode == 0 and rj28_e.get("status") == "ok"
+          and "p-IRF3 (S396)" in s28_e and "OldLegend" not in s28_e and "<polygon" in s28_e
+          and isinstance(rj28_e.get("edit_summary"), dict) and rj28_e["edit_summary"].get("source_preserved") is True,
+          str(rj28_e.get("edit_summary")) + " status=" + str(rj28_e.get("status")))
+
+    # 48) v28: _guess_task_type word-boundary fix ("editable SVG" must stay generate, not edit)
+    tt_gen = _RP27._guess_task_type({"task_text": "Generate an editable SVG schematic from paper.pdf",
+                                     "task_md_head": "", "materials": [{"type": "svg", "path": "ref.svg"}]})
+    tt_ed = _RP27._guess_task_type({"task_text": "Edit existing pathway.svg to update labels",
+                                    "task_md_head": "", "materials": [{"type": "svg", "path": "pathway.svg"}]})
+    check("v28: _guess_task_type distinguishes 'editable SVG' (generate) vs 'edit existing' (edit)",
+          tt_gen == "generate" and tt_ed == "edit",
+          "gen=%r ed=%r" % (tt_gen, tt_ed))
+
+    # 49-51) v29: top-level title/subtitle + auto-grid 5-panel pairing + chart aliases (grouped_bar/volcano/survival step) + verification_checklist
+    v29_in, v29_wk, v29_out = os.path.join(wd, "v29_in"), os.path.join(wd, "v29_wk"), os.path.join(wd, "v29_out")
+    os.makedirs(v29_in, exist_ok=True)
+    open(os.path.join(v29_in, "km.csv"), "w", encoding="utf-8").write(
+        "Day,WT,KO\n20,55,20\n0,100,100\n10,82,45\n5,95,70\n"
+    )
+    open(os.path.join(v29_in, "paren_sd.csv"), "w", encoding="utf-8").write(
+        "Cond,WT,KO\nCtrl,1.0 (0.1),1.0 (±0.1)\nStim,8.4 (SD 0.5),1.9 (0.2)\n"
+    )
+    json.dump({"case_id": "v29-auto", "task": "Generate Figure 3"}, open(os.path.join(v29_in, "case.json"), "w", encoding="utf-8"))
+    v29_plan = os.path.join(wd, "v29_plan.json")
+    json.dump({
+        "case_id": "v29-auto", "stem": "v29_fig03", "preset": "nature_double",
+        "title": "Figure 3. cGAS-STING Activation and Survival Outcome",
+        "subtitle": "Source: primary study & source CSV tables",
+        "panels": [
+            {"id": "p1", "type": "schematic", "direction": "LR", "title": "Pathway",
+             "nodes": [
+                 {"id": "A", "label": "cGAMP", "shape": "ellipse", "fill": "#FDEBD0", "rank": 0, "source": {"file": "p.pdf", "locator": "p.3"}},
+                 {"id": "B", "label": "STING", "shape": "complex", "fill": "#EAF2FB", "rank": 1, "source": {"file": "p.pdf", "locator": "p.3"}},
+                 {"id": "C", "label": "IRF3", "shape": "round", "fill": "#0072B2", "rank": 2, "source": {"file": "p.pdf", "locator": "p.3"}},
+             ],
+             "edges": [
+                 {"from": "A", "to": "B", "kind": "binds", "source": {"file": "p.pdf", "locator": "p.3"}},
+                 {"from": "B", "to": "C", "kind": "activates", "source": {"file": "p.pdf", "locator": "p.3"}},
+             ]},
+            # Intentionally OMIT "row" on all 4 charts and use LLM chart kind aliases!
+            {"id": "p2", "type": "grouped_bar", "title": "Expression", "height_mm": 50,
+             "chart": {"data_file": "paren_sd.csv", "x_col": "Cond", "y_cols": ["WT", "KO"], "y_label": "IFNb", "unit": "fold"}},
+            {"id": "p3", "type": "survival", "title": "Survival Curve", "height_mm": 50,
+             "chart": {"data_file": "km.csv", "x_col": "Day", "y_cols": ["WT", "KO"], "x_label": "Days", "y_label": "Survival", "unit": "%"}},
+            {"id": "p4", "type": "chart", "title": "Volcano", "height_mm": 50,
+             "chart": {"kind": "volcano", "categories": ["-2.1", "0.2", "3.4"], "x_label": "log2FC", "y_label": "-log10P", "unit": "score",
+                       "series": [{"name": "DEGs", "values": [5.2, 0.5, 6.8], "source": {"file": "p.pdf", "locator": "p.4"}}]}},
+            {"id": "p5", "type": "chart", "title": "Boxplot Alias", "height_mm": 50,
+             "chart": {"kind": "boxplot", "categories": ["WT", "KO"], "y_label": "Score", "unit": "a.u.",
+                       "series": [{"name": "Cohort", "values": [6.0, 2.0], "points": [[5.5, 6.0, 6.5], [1.6, 2.0, 2.4]], "source": {"file": "p.pdf", "locator": "p.4"}}]}},
+        ],
+    }, open(v29_plan, "w", encoding="utf-8"))
+    r29 = run([os.path.join(HERE, "run_pipeline.py"), "deliver", v29_plan, "--input", v29_in, "--work", v29_wk, "--out", v29_out])
+    rj29 = json.load(open(os.path.join(v29_out, "result.json"), encoding="utf-8")) if os.path.exists(os.path.join(v29_out, "result.json")) else {}
+    g29 = json.load(open(os.path.join(v29_wk, "geometry.json"), encoding="utf-8")) if os.path.exists(os.path.join(v29_wk, "geometry.json")) else {}
+    s29 = open(os.path.join(v29_out, "v29_fig03.svg"), encoding="utf-8").read() if os.path.exists(os.path.join(v29_out, "v29_fig03.svg")) else ""
+    check("v29: top-level title/subtitle banner + auto-grid 5-panel pairing keeps height <= 247mm",
+          r29.returncode == 0 and rj29.get("status") == "ok"
+          and 'id="figure-title"' in s29 and 'id="figure-subtitle"' in s29
+          and (g29.get("canvas_mm") or [0, 999])[1] <= 247.0,
+          "status=%s canvas=%s" % (rj29.get("status"), g29.get("canvas_mm")))
+    p3_cats = ((g29.get("panels") or {}).get("p3") or {}).get("categories")
+    p2_errs = ((((g29.get("panels") or {}).get("p2") or {}).get("series_data") or [{}])[0]).get("errors")
+    check("v29: chart kind aliases (grouped_bar/survival step/volcano/boxplot) + auto-sorted KM + paren SD",
+          ((g29.get("panels") or {}).get("p3") or {}).get("kind") == "step"
+          and p3_cats == ["0", "5", "10", "20"] and p2_errs == [0.1, 0.5]
+          and ((rj29.get("checks") or {}).get("geometry_audit") or {}).get("data_verification", {}).get("p3", {}).get("verified") is True,
+          "p3_cats=%s p2_errs=%s" % (p3_cats, p2_errs))
+    vc29 = (rj29.get("provenance_summary") or {}).get("verification_checklist") or {}
+    check("v29: result.json provenance_summary.verification_checklist verified booleans",
+          vc29.get("svg_editable_text") is True and vc29.get("pdf_fonts_embedded") is True
+          and vc29.get("png_dpi_compliant") is True and vc29.get("geometry_zero_errors") is True
+          and vc29.get("charts_all_sha256_verified") is True,
+          str(vc29))
+
+    # 52) v29: extended _parse_val_err handles 'mean (SD)' and Unicode '1.5 × 10⁻⁵'
+    import fig_chart as _FC29
+    v_p1, e_p1 = _FC29._parse_val_err("4.2 (0.3)")
+    v_p2, e_p2 = _FC29._parse_val_err("1.5 × 10⁻⁵")
+    v_p3, e_p3 = _FC29._parse_val_err("2.4x10^-3")
+    check("v29: _parse_val_err parses 'mean (SD)' and Unicode/ASCII '× 10^-n'",
+          abs(v_p1 - 4.2) < 1e-6 and abs(e_p1 - 0.3) < 1e-6
+          and abs(v_p2 - 1.5e-5) < 1e-9 and abs(v_p3 - 2.4e-3) < 1e-9,
+          "p1=(%s,%s) p2=%s p3=%s" % (v_p1, e_p1, v_p2, v_p3))
+
+    # 53) v29: edit_svg compartment-safe auto_contrast + named/rgb color + set_marker alias 'inhibits' with label pill
+    v29_esvg = os.path.join(wd, "v29_comp.svg")
+    open(v29_esvg, "w", encoding="utf-8").write(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 150" width="360" height="150">'
+        '<g id="comp-cyto"><rect x="10" y="10" width="330" height="120" fill="#F4F4F4" stroke="#888"/>'
+        '<text x="20" y="26" font-size="11" fill="#10243B">Cytoplasm</text>'
+        '<g id="node-A"><rect x="30" y="50" width="80" height="40" fill="#EAF2FB" stroke="#1E3A5F"/>'
+        '<text x="70" y="74" text-anchor="middle" font-size="11" fill="#10243B">KinaseA</text></g>'
+        '<g id="node-B"><rect x="200" y="50" width="80" height="40" fill="#EAF2FB" stroke="#1E3A5F"/>'
+        '<text x="240" y="74" text-anchor="middle" font-size="11" fill="#10243B">TargetB</text></g></g>'
+        '<line id="e-ab" x1="110" y1="70" x2="200" y2="70" stroke="#1E3A5F" stroke-width="2"/></svg>'
+    )
+    v29_ops = os.path.join(wd, "v29_ops.json")
+    json.dump([
+        {"op": "set_attr", "gid": "comp-cyto", "attr": "fill", "value": "navy"},
+        {"op": "set_attr", "gid": "node-B", "attr": "fill", "value": "rgb(0, 114, 178)"},
+        {"op": "set_marker", "from_text": "KinaseA", "to_text": "TargetB", "marker": "inhibits", "color": "#C0392B", "label": "blocks"},
+    ], open(v29_ops, "w", encoding="utf-8"))
+    v29_edir = os.path.join(wd, "v29_eout")
+    v29_eout = os.path.join(v29_edir, "v29_comp_out.svg")
+    r29e = run([os.path.join(HERE, "edit_svg.py"), v29_esvg, v29_ops, "--out-dir", v29_edir, "--stem", "v29_comp_out", "--no-render"])
+    s29e = open(v29_eout, encoding="utf-8").read() if os.path.exists(v29_eout) else ""
+    import xml.etree.ElementTree as _ET29
+    rt29 = _ET29.fromstring(s29e) if s29e else None
+    na_txt_fill = None
+    nb_txt_fill = None
+    if rt29 is not None:
+        for gel in rt29.iter():
+            if gel.get("id") == "node-A":
+                t_a = next((x for x in gel.iter() if x.tag.endswith("}text")), None)
+                na_txt_fill = t_a.get("fill") if t_a is not None else None
+            elif gel.get("id") == "node-B":
+                t_b = next((x for x in gel.iter() if x.tag.endswith("}text")), None)
+                nb_txt_fill = t_b.get("fill") if t_b is not None else None
+    check("v29: compartment-safe auto_contrast + rgb/named color + set_marker alias 'inhibits' w/ label",
+          r29e.returncode == 0 and na_txt_fill == "#10243B" and nb_txt_fill == "#FFFFFF"
+          and "mh-tbar" in s29e and ">blocks<" in s29e,
+          "na=%r nb=%r out=%s" % (na_txt_fill, nb_txt_fill, r29e.stdout[:180]))
+
     ok = all(c for _, c, _ in results)
     print("== self_test %s ==" % ("PASS" if ok else "FAIL"))
     for name, cond, detail in results:

@@ -11,14 +11,43 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fig_style as S
 
 
+_CHART_KIND_ALIASES = {
+    "bar": "bar", "bars": "bar", "bar_chart": "bar", "barplot": "bar", "grouped_bar": "bar",
+    "column": "bar", "column_chart": "bar", "error_bar": "bar", "errorbar": "bar",
+    "barh": "barh", "horizontal_bar": "barh", "hbar": "barh", "barh_chart": "barh",
+    "stacked_bar": "stacked_bar", "stacked": "stacked_bar", "stacked_column": "stacked_bar",
+    "line": "line", "lineplot": "line", "line_chart": "line", "curve": "line",
+    "time_course": "line", "timecourse": "line", "kinetics": "line", "dose_response": "line",
+    "step": "step", "survival": "step", "kaplan_meier": "step", "kaplan-meier": "step", "km": "step",
+    "scatter": "scatter", "scatter_plot": "scatter", "scatterplot": "scatter",
+    "volcano": "scatter", "dot": "scatter", "dotplot": "scatter", "xy": "scatter",
+    "box": "box", "boxplot": "box", "box_plot": "box", "violin": "box", "strip": "box",
+    "heatmap": "heatmap", "heat_map": "heatmap", "matrix": "heatmap", "corr": "heatmap",
+}
+
+
+def canonical_chart_kind(kind):
+    k = str(kind or "bar").strip().lower().replace(" ", "_")
+    return _CHART_KIND_ALIASES.get(k, k)
+
+
 _PM_RE = re.compile(
     r"^\s*([-+]?\d+(?:,\d{3})*(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*(?:±|\+/-|\+-)\s*"
     r"([-+]?\d+(?:,\d{3})*(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*%?\s*$"
 )
+_PAREN_ERR_RE = re.compile(
+    r"^\s*([-+]?\d+(?:,\d{3})*(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*\(\s*(?:(?:SD|SEM|SE)\s*[:=]?\s*|±\s*|\+/-\s*)?"
+    r"(\d+(?:,\d{3})*(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*%?\s*\)\s*%?\s*$",
+    re.I,
+)
+_SCI_X10_RE = re.compile(
+    r"^\s*([-+]?\d+(?:\.\d+)?)\s*[×xX\*]\s*10\s*\^?\s*([−–\-+]?\d+)\s*$"
+)
+_SUP_TRANS = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻", "0123456789+-")
 
 
 def _parse_val_err(raw):
-    """Parse numeric cell or 'mean ± SD' / 'mean +/- SD' string into (val, err_or_None)."""
+    """Parse numeric cell, 'mean ± SD', 'mean (SD)', or '1.2 × 10^-5' into (val, err_or_None)."""
     if raw is None:
         return float("nan"), None
     if isinstance(raw, (int, float)):
@@ -26,11 +55,17 @@ def _parse_val_err(raw):
     s = str(raw).strip()
     if not s or s.lower() in ("na", "n/a", "nan", "nd", "n.d.", "none", "-", "—", "–", "−"):
         return float("nan"), None
-    # Normalize Unicode minus (−) and en-dash (–) used as negative sign in Nature/Cell tables
-    s_norm = re.sub(r"[−–](?=\s*\d|\.)", "-", s)
+    # Normalize Unicode superscripts and Unicode minus (−) / en-dash (–) used as negative sign
+    s_norm = re.sub(r"[−–](?=\s*\d|\.)", "-", s.translate(_SUP_TRANS))
     m = _PM_RE.match(s_norm)
     if m:
         return float(m.group(1).replace(",", "")), abs(float(m.group(2).replace(",", "")))
+    mp = _PAREN_ERR_RE.match(s_norm)
+    if mp:
+        return float(mp.group(1).replace(",", "")), abs(float(mp.group(2).replace(",", "")))
+    ms = _SCI_X10_RE.match(s_norm)
+    if ms:
+        return float(ms.group(1)) * (10.0 ** int(ms.group(2).replace("−", "-").replace("–", "-"))), None
     s2 = s_norm.replace(",", "")
     if s2.endswith("%"):
         s2 = s2[:-1].strip()
@@ -266,6 +301,9 @@ def _summarize_group(vs, agg="mean_sd"):
 
 def load_chart_table(ch, spec_dir=None):
     """Hydrate categories & series from data_file (CSV/TSV/XLSX) when specified."""
+    ch = dict(ch)
+    if ch.get("kind"):
+        ch["kind"] = canonical_chart_kind(ch["kind"])
     df = ch.get("data_file")
     if not df:
         return ch
@@ -514,8 +552,17 @@ def load_chart_table(ch, spec_dir=None):
 
     x_col = want_x or header[0].strip()
     xi = _lookup_col(col_idx, x_col)
+    hue_col = ch.get("hue_col") or ch.get("group_col") or ch.get("series_col") or ch.get("color_col")
+    lbl_col = ch.get("label_col") or ch.get("point_label_col") or ch.get("name_col")
+    hi = _lookup_col(col_idx, hue_col) if hue_col else None
+    li = _lookup_col(col_idx, lbl_col) if lbl_col else None
     valid_rows = [r for r in body if len(r) > xi and r[xi].strip() != ""]
-    y_cols = want_y or [h.strip() for h in header if h.strip() and h.strip() != x_col]
+    excl = {x_col}
+    if hue_col:
+        excl.add(str(hue_col).strip())
+    if lbl_col:
+        excl.add(str(lbl_col).strip())
+    y_cols = want_y or [h.strip() for h in header if h.strip() and h.strip() not in excl]
     err_cols = ch.get("err_cols") or {}
     y_indices = [_lookup_col(col_idx, yc) for yc in y_cols]
     # Keep numeric rows; stop cleanly if a second stacked sub-table header begins in the same sheet
@@ -526,6 +573,120 @@ def load_chart_table(ch, spec_dir=None):
         elif data_rows and ch.get("stop_on_subtable", True):
             break
     raw_cats = [_clean_cat_str(r[xi]) for r in data_rows]
+
+    def _select_point_labels(all_xs, all_ys, all_lbls, top_n):
+        if not all_lbls:
+            return all_lbls
+        if not top_n or len(all_lbls) <= int(top_n):
+            return all_lbls
+        scored = []
+        for idx_p, (xp, yp, lp) in enumerate(zip(all_xs, all_ys, all_lbls)):
+            if lp and not math.isnan(yp):
+                fx = abs(xp) if not math.isnan(xp) else 1.0
+                scored.append((yp * (1.0 + 0.35 * fx), idx_p))
+        scored.sort(reverse=True)
+        keep = {idx_p for _, idx_p in scored[:int(top_n)]}
+        return [lp if idx_p in keep else "" for idx_p, lp in enumerate(all_lbls)]
+
+    # Tidy long-format grouped pivot when hue_col / group_col / series_col is specified
+    if hi is not None and y_indices:
+        yi0 = y_indices[0]
+        yc0 = y_cols[0]
+        hues = []
+        for r in data_rows:
+            hv = _clean_cat_str(r[hi] if len(r) > hi else "")
+            if hv and hv not in hues:
+                hues.append(hv)
+        if ch.get("kind") == "scatter":
+            all_x_num = [_parse_float(c) for c in raw_cats]
+            all_y_num = [_parse_float(r[yi0] if len(r) > yi0 else None) for r in data_rows]
+            all_lbls = [str(r[li]).strip() if (li is not None and len(r) > li) else "" for r in data_rows]
+            top_n = ch.get("top_labels") or (14 if len(data_rows) > 18 else None)
+            filt_lbls = _select_point_labels(all_x_num, all_y_num, all_lbls, top_n) if li is not None else None
+            series = []
+            for hv in hues:
+                s_xs, s_ys, s_ls = [], [], []
+                for idx_r, r in enumerate(data_rows):
+                    if _clean_cat_str(r[hi] if len(r) > hi else "") != hv:
+                        continue
+                    xv, yv = all_x_num[idx_r], all_y_num[idx_r]
+                    if not math.isnan(xv) and not math.isnan(yv):
+                        s_xs.append(xv); s_ys.append(yv)
+                        if filt_lbls is not None:
+                            s_ls.append(filt_lbls[idx_r])
+                ser = {
+                    "name": hv, "x_values": s_xs, "values": s_ys,
+                    "source": {"file": os.path.basename(path),
+                               "locator": "%s%s=%s (%s vs %s)" % (sheet_loc, hue_col, hv, x_col, yc0)},
+                }
+                if filt_lbls is not None:
+                    ser["point_labels"] = s_ls
+                hl_low = hv.lower()
+                if hl_low in ("ns", "not sig", "not significant", "unchanged", "neutral"):
+                    ser["color"] = "#9AA5B1"
+                elif hl_low in ("up", "upregulated", "induced", "enriched"):
+                    ser["color"] = "#D55E00"
+                elif hl_low in ("down", "downregulated", "repressed", "depleted"):
+                    ser["color"] = "#0072B2"
+                series.append(ser)
+            out = dict(ch)
+            out["categories"] = raw_cats
+            out["x_values"] = [v for v in all_x_num if not math.isnan(v)]
+            out["series"] = series
+            out["_source_sha256"] = src_sha
+            return out
+        # Pivot long-format table into (categories x hue series) with mean±SD/SEM/median + points
+        cats = []
+        for c in raw_cats:
+            if c not in cats:
+                cats.append(c)
+        series = []
+        for hv in hues:
+            vals, errs, pts_list, ns = [], [], [], []
+            for c in cats:
+                vs = []
+                for r, rc in zip(data_rows, raw_cats):
+                    if rc == c and _clean_cat_str(r[hi] if len(r) > hi else "") == hv:
+                        fv = _parse_float(r[yi0] if len(r) > yi0 else None)
+                        if not math.isnan(fv):
+                            vs.append(fv)
+                pts_list.append(vs)
+                ns.append(len(vs))
+                c_v, e_v = _summarize_group(vs, agg or "mean_sd")
+                vals.append(c_v)
+                errs.append(e_v)
+            s = {
+                "name": hv, "values": vals,
+                "source": {"file": os.path.basename(path),
+                           "locator": "%s%s=%s col %s (%s)" % (sheet_loc, hue_col, hv, yc0, agg or "mean_sd")},
+            }
+            if any(nn > 1 for nn in ns):
+                s["errors"] = errs
+                s["points"] = pts_list
+                s["n"] = ns
+            series.append(s)
+        out = dict(ch)
+        out["categories"] = cats
+        out["series"] = series
+        out["_source_sha256"] = src_sha
+        if ch.get("kind", "bar") == "line" and ch.get("x_numeric", True) and not ch.get("x_values"):
+            num_xs = [_parse_float(c) for c in cats]
+            if len(num_xs) == len(cats) and len(num_xs) >= 2 and not any(math.isnan(v) for v in num_xs):
+                if ch.get("sort_x", True) and num_xs != sorted(num_xs):
+                    ord_i = sorted(range(len(num_xs)), key=lambda k: num_xs[k])
+                    num_xs = [num_xs[k] for k in ord_i]
+                    out["categories"] = [cats[k] for k in ord_i]
+                    for s in series:
+                        s["values"] = [s["values"][k] for k in ord_i]
+                        if s.get("errors"):
+                            s["errors"] = [s["errors"][k] for k in ord_i]
+                        if s.get("points"):
+                            s["points"] = [s["points"][k] for k in ord_i]
+                        if s.get("n"):
+                            s["n"] = [s["n"][k] for k in ord_i]
+                out["x_values"] = num_xs
+        return out
+
     # Auto-group replicate rows when agg is specified or kind=='box' with repeated categories
     do_group = bool(agg in ("mean_sd", "mean_sem", "median")) or (
         ch.get("kind") == "box" and len(set(raw_cats)) < len(raw_cats)
@@ -578,14 +739,28 @@ def load_chart_table(ch, spec_dir=None):
                     pass
             elif any(e is not None for e in inline_errs):
                 s["errors"] = [0.0 if e is None else e for e in inline_errs]
+            if li is not None and ch.get("kind") == "scatter" and not ch.get("point_labels"):
+                raw_pl = [str(r[li]).strip() if len(r) > li else "" for r in data_rows]
+                top_n = ch.get("top_labels") or (14 if len(data_rows) > 18 else None)
+                s["point_labels"] = _select_point_labels([_parse_float(c) for c in cats], vals, raw_pl, top_n)
             series.append(s)
     out = dict(ch)
     out["categories"] = cats
     out["series"] = series
     out["_source_sha256"] = src_sha
-    if ch.get("kind", "bar") in ("line", "scatter") and ch.get("x_numeric", True) and not ch.get("x_values"):
+    if ch.get("kind", "bar") in ("line", "step", "scatter") and ch.get("x_numeric", True) and not ch.get("x_values"):
         num_xs = [_parse_float(c) for c in cats]
         if len(num_xs) == len(cats) and len(num_xs) >= 2 and not any(math.isnan(v) for v in num_xs):
+            if ch.get("kind") in ("line", "step") and ch.get("sort_x", True) and num_xs != sorted(num_xs):
+                ord_i = sorted(range(len(num_xs)), key=lambda k: num_xs[k])
+                num_xs = [num_xs[k] for k in ord_i]
+                out["categories"] = [cats[k] for k in ord_i]
+                for s in series:
+                    s["values"] = [s["values"][k] for k in ord_i]
+                    if s.get("errors"):
+                        s["errors"] = [s["errors"][k] for k in ord_i]
+                    if s.get("points"):
+                        s["points"] = [s["points"][k] for k in ord_i]
             out["x_values"] = num_xs
             uniq_xs = sorted(set(num_xs))
             span_x = (uniq_xs[-1] - uniq_xs[0]) if len(uniq_xs) >= 2 else 0.0
@@ -598,7 +773,7 @@ def load_chart_table(ch, spec_dir=None):
 
 def draw_chart(ax, panel, colors, spec_dir=None):
     ch = load_chart_table(panel["chart"], spec_dir=spec_dir)
-    kind = ch.get("kind", "bar")
+    kind = canonical_chart_kind(ch.get("kind", "bar"))
     cats = ch.get("categories", [])
     x_vals = ch.get("x_values")
     series = ch.get("series", [])
@@ -821,50 +996,69 @@ def draw_chart(ax, panel, colors, spec_dir=None):
                 ln, = ax.plot(xs, vals, marker=mk, color=color, lw=1.8, ms=4.5,
                               label=s["name"], zorder=3.0)
                 ln.set_gid("series-%d" % i)
+        elif kind == "step":
+            if yerr:
+                lo_b = [v - e for v, e in zip(vals, yerr)]
+                hi_b = [v + e for v, e in zip(vals, yerr)]
+                ax.fill_between(xs, lo_b, hi_b, step="post", color=color, alpha=0.16, zorder=2.2)
+            mk_s = s.get("marker", "|")
+            ln, = ax.step(xs, vals, where="post", color=color, lw=1.8,
+                          marker=mk_s if mk_s not in ("none", "", None) else None,
+                          ms=4.5, label=s["name"], zorder=3.0)
+            ln.set_gid("series-%d" % i)
         else:
-            sc = ax.scatter(xs, vals, s=42, color=color, edgecolors="#333333",
+            s_xs = [float(v) for v in s["x_values"]] if s.get("x_values") else xs
+            sc = ax.scatter(s_xs, vals, s=42, color=color, edgecolors="#333333",
                             lw=0.6, label=s["name"], zorder=3.0)
             sc.set_gid("series-%d" % i)
-            plabs = s.get("point_labels") or ch.get("point_labels")
-            if plabs:
-                fin_xs = [v for v in xs if not math.isnan(v)]
-                fin_ys = [v for v in vals if not math.isnan(v)]
-                x_sp = max((max(fin_xs) - min(fin_xs)) if len(fin_xs) >= 2 else 1.0, 1e-6)
-                y_sp = max((max(fin_ys) - min(fin_ys)) if len(fin_ys) >= 2 else 1.0, 1e-6)
-                placed_pl = []
-                # Pre-register scatter dot positions so labels never sit on top of neighboring points
-                for x_d, y_d in zip(xs, vals):
-                    if not math.isnan(x_d) and not math.isnan(y_d):
-                        nx_d = (x_d - (min(fin_xs) if fin_xs else 0.0)) / x_sp
-                        ny_d = (y_d - (min(fin_ys) if fin_ys else 0.0)) / y_sp
-                        placed_pl.append((nx_d - 0.025, ny_d - 0.032, nx_d + 0.025, ny_d + 0.032))
-                cand_offs = [(5, 5), (-5, 5), (5, -11), (-5, -11), (11, 0), (-11, 0), (5, 14), (-5, 14), (5, -18), (-5, -18)]
-                for x_p, y_p, pl_t in zip(xs, vals, plabs):
-                    if pl_t and not math.isnan(y_p):
-                        txt_s = str(pl_t)
-                        lw_n = max(len(txt_s) * 0.026, 0.08)
-                        lh_n = 0.075
-                        best_off, best_ha, best_va = (5, 5), "left", "bottom"
-                        best_box = None
-                        for ox_pt, oy_pt in cand_offs:
-                            ha_c = "left" if ox_pt >= 0 else "right"
-                            va_c = "bottom" if oy_pt >= 0 else "top"
-                            nx_c = (x_p - (min(fin_xs) if fin_xs else 0.0)) / x_sp + (ox_pt / 135.0)
-                            ny_c = (y_p - (min(fin_ys) if fin_ys else 0.0)) / y_sp + (oy_pt / 105.0)
-                            bx0 = nx_c if ha_c == "left" else (nx_c - lw_n)
-                            by0 = ny_c if va_c == "bottom" else (ny_c - lh_n)
-                            if bx0 < -0.02 or (bx0 + lw_n) > 1.06:
-                                continue
-                            box_c = (bx0, by0, bx0 + lw_n, by0 + lh_n)
-                            if not any(min(box_c[2], ob[2]) > max(box_c[0], ob[0]) and min(box_c[3], ob[3]) > max(box_c[1], ob[1]) for ob in placed_pl):
-                                best_off, best_ha, best_va, best_box = (ox_pt, oy_pt), ha_c, va_c, box_c
-                                break
-                        if best_box is not None:
-                            placed_pl.append(best_box)
-                        ax.annotate(txt_s, (x_p, y_p), xytext=best_off,
-                                    textcoords="offset points", ha=best_ha, va=best_va,
-                                    fontsize=6.5, color="#222222")
         series_color_meta.append((color, cat_cols_used))
+
+    # Global cross-series collision-avoiding scatter point_labels (supports hue_col volcano plots!)
+    if kind not in ("bar", "box", "stacked_bar", "barh", "line", "step", "heatmap"):
+        all_sc_x, all_sc_y, lbl_items = [], [], []
+        for s in series:
+            s_xs = [float(v) for v in s["x_values"]] if s.get("x_values") else xs
+            s_ys = [_parse_float(v) for v in s["values"]]
+            plabs = s.get("point_labels") or (ch.get("point_labels") if len(series) == 1 else None)
+            for idx_p, (xp, yp) in enumerate(zip(s_xs, s_ys)):
+                if not math.isnan(xp) and not math.isnan(yp):
+                    all_sc_x.append(xp); all_sc_y.append(yp)
+                    if plabs and idx_p < len(plabs) and plabs[idx_p]:
+                        lbl_items.append((xp, yp, str(plabs[idx_p])))
+        if lbl_items:
+            x_min_g = min(all_sc_x) if all_sc_x else 0.0
+            y_min_g = min(all_sc_y) if all_sc_y else 0.0
+            x_sp = max((max(all_sc_x) - x_min_g) if len(all_sc_x) >= 2 else 1.0, 1e-6)
+            y_sp = max((max(all_sc_y) - y_min_g) if len(all_sc_y) >= 2 else 1.0, 1e-6)
+            placed_pl = []
+            for x_d, y_d in zip(all_sc_x, all_sc_y):
+                nx_d = (x_d - x_min_g) / x_sp
+                ny_d = (y_d - y_min_g) / y_sp
+                placed_pl.append((nx_d - 0.025, ny_d - 0.032, nx_d + 0.025, ny_d + 0.032))
+            cand_offs = [(5, 5), (-5, 5), (5, -11), (-5, -11), (11, 0), (-11, 0), (5, 14), (-5, 14), (5, -18), (-5, -18)]
+            for x_p, y_p, txt_s in lbl_items:
+                lw_n = max(len(txt_s) * 0.026, 0.08)
+                lh_n = 0.075
+                best_off, best_ha, best_va = (5, 5), "left", "bottom"
+                best_box = None
+                for ox_pt, oy_pt in cand_offs:
+                    ha_c = "left" if ox_pt >= 0 else "right"
+                    va_c = "bottom" if oy_pt >= 0 else "top"
+                    nx_c = (x_p - x_min_g) / x_sp + (ox_pt / 135.0)
+                    ny_c = (y_p - y_min_g) / y_sp + (oy_pt / 105.0)
+                    bx0 = nx_c if ha_c == "left" else (nx_c - lw_n)
+                    by0 = ny_c if va_c == "bottom" else (ny_c - lh_n)
+                    if bx0 < -0.02 or (bx0 + lw_n) > 1.06:
+                        continue
+                    box_c = (bx0, by0, bx0 + lw_n, by0 + lh_n)
+                    if not any(min(box_c[2], ob[2]) > max(box_c[0], ob[0]) and min(box_c[3], ob[3]) > max(box_c[1], ob[1]) for ob in placed_pl):
+                        best_off, best_ha, best_va, best_box = (ox_pt, oy_pt), ha_c, va_c, box_c
+                        break
+                if best_box is not None:
+                    placed_pl.append(best_box)
+                ax.annotate(txt_s, (x_p, y_p), xytext=best_off,
+                            textcoords="offset points", ha=best_ha, va=best_va,
+                            fontsize=6.5, color="#222222")
 
     if kind == "barh":
         import fig_style as _FS_ch
@@ -895,9 +1089,23 @@ def draw_chart(ax, panel, colors, spec_dir=None):
     else:
         if not x_vals:
             ax.set_xticks(xs)
-            rot = 25 if any(len(str(c)) > 10 for c in cats) else 0
-            ax.set_xticklabels(cats, fontsize=7.5, rotation=rot,
-                               ha="right" if rot else "center")
+            import fig_style as _FS_chx
+            ax_w_mm = ax.get_position().width * ax.figure.get_figwidth() * 25.4
+            n_cats = max(len(cats), 1)
+            slot_mm = ax_w_mm / float(n_cats)
+            disp_cats = [
+                _FS_chx.wrap_label(str(c), max_chars=16) if (len(str(c)) > 16 and " " in str(c)) else str(c)
+                for c in cats
+            ]
+            max_line_ch = max((max(len(ln) for ln in dc.split("\n")) for dc in disp_cats), default=0)
+            est_lbl_mm = max_line_ch * 1.45
+            if est_lbl_mm > slot_mm * 0.92 or any(len(str(c)) > 10 for c in cats):
+                rot = 35 if (n_cats >= 6 or est_lbl_mm > slot_mm * 1.35) else 25
+            else:
+                rot = 0
+            fs_x = 6.6 if (n_cats >= 6 or any("\n" in dc for dc in disp_cats)) else 7.5
+            ax.set_xticklabels(disp_cats, fontsize=fs_x, rotation=rot,
+                               ha="right" if rot else "center", linespacing=1.02)
         elif ch.get("_auto_xticks") and not ch.get("x_scale"):
             ax.set_xticks(ch["_auto_xticks"])
             ax.set_xticklabels([("%g" % v) for v in ch["_auto_xticks"]], fontsize=7.5)
@@ -961,48 +1169,95 @@ def draw_chart(ax, panel, colors, spec_dir=None):
             ax.text(xv, 0.98, " " + str(vl["label"]), transform=ax.get_xaxis_transform(),
                     ha="left", va="top", fontsize=6.5, color=vl.get("color", "#555555"), zorder=4.0)
 
-    # Statistical significance brackets (e.g. [{"x1": 0, "x2": 1, "label": "***"}])
+    # Statistical significance brackets: cross-category OR within-category grouped bars (x + s1/s2)
     sig_brackets = ch.get("sig_brackets") or []
     if sig_brackets and kind != "barh":
         cat_to_x = {str(c): xs[idx] for idx, c in enumerate(cats) if idx < len(xs)}
+        ser_to_i = {str(s.get("name", "")).strip().lower(): si for si, s in enumerate(series)}
+        bw_g = (0.78 / max(n, 1)) if kind == "bar" else ((0.72 / max(n, 1)) if kind == "box" else 0.0)
+
+        def _resolve_ser_off(s_ref, default_i):
+            if n <= 1 or bw_g <= 0:
+                return 0.0
+            if s_ref is None:
+                si = default_i
+            elif isinstance(s_ref, int):
+                si = max(0, min(n - 1, s_ref))
+            else:
+                si = ser_to_i.get(str(s_ref).strip().lower(), default_i)
+            return (si - (n - 1) / 2.0) * bw_g
+
+        def _local_peak(xa, xb):
+            lo_x, hi_x = min(xa, xb) - 0.35, max(xa, xb) + 0.35
+            pk = None
+            for si_p, s_p in enumerate(series):
+                s_xs_p = [float(v) for v in s_p["x_values"]] if s_p.get("x_values") else xs
+                off_p = ((si_p - (n - 1) / 2.0) * bw_g) if (n > 1 and bw_g > 0) else 0.0
+                errs_p = s_p.get("errors") or []
+                pts_p = s_p.get("points") or []
+                for idx_k, raw_v in enumerate(s_p.get("values", [])):
+                    if idx_k >= len(s_xs_p):
+                        continue
+                    px = s_xs_p[idx_k] + off_p
+                    if lo_x <= px <= hi_x:
+                        fv = _parse_float(raw_v)
+                        if not math.isnan(fv):
+                            ev = _parse_float(errs_p[idx_k]) if idx_k < len(errs_p) else 0.0
+                            top_k = fv + (0.0 if math.isnan(ev) else ev)
+                            if idx_k < len(pts_p) and pts_p[idx_k]:
+                                top_k = max([top_k] + [_parse_float(pv) for pv in pts_p[idx_k] if not math.isnan(_parse_float(pv))])
+                            pk = top_k if pk is None else max(pk, top_k)
+            return pk if pk is not None else (max_y if max_y is not None else 1.0)
+
         is_log_y = str(ch.get("y_scale", "")).lower() == "log"
-        if is_log_y:
-            base_y = max(max_y or 1.0, 1e-6) * (1.70 if ch.get("show_values") else 1.48)
-            for bi, br in enumerate(sig_brackets):
-                rx1, rx2 = br.get("x1", 0), br.get("x2", 1)
-                bx1 = cat_to_x[str(rx1)] if str(rx1) in cat_to_x else float(rx1)
-                bx2 = cat_to_x[str(rx2)] if str(rx2) in cat_to_x else float(rx2)
-                by = float(br["y"]) if br.get("y") is not None else (base_y * (1.42 ** bi))
+        placed_br = []
+        top_max_y = max_y if max_y is not None else 1.0
+        span = max(abs(max_y or 0.0), abs((max_y or 0.0) - (min_y or 0.0)), 1.0)
+        step = span * 0.105
+        for bi, br in enumerate(sig_brackets):
+            rx1 = br.get("x1", br.get("x", 0))
+            rx2 = br.get("x2", br.get("x", 1 if "x" not in br else rx1))
+            bx1 = cat_to_x[str(rx1)] if str(rx1) in cat_to_x else float(rx1)
+            bx2 = cat_to_x[str(rx2)] if str(rx2) in cat_to_x else float(rx2)
+            if abs(bx1 - bx2) < 1e-6 and n >= 2 and bw_g > 0:
+                bx1 += _resolve_ser_off(br.get("s1"), 0)
+                bx2 += _resolve_ser_off(br.get("s2"), n - 1)
+            else:
+                if br.get("s1") is not None:
+                    bx1 += _resolve_ser_off(br.get("s1"), 0)
+                if br.get("s2") is not None:
+                    bx2 += _resolve_ser_off(br.get("s2"), n - 1)
+            lo_b, hi_b = min(bx1, bx2), max(bx1, bx2)
+            loc_pk = _local_peak(lo_b, hi_b)
+            if is_log_y:
+                by = float(br["y"]) if br.get("y") is not None else (max(loc_pk, 1e-6) * (1.58 if ch.get("show_values") else 1.38))
+                for pb_lo, pb_hi, pb_y in placed_br:
+                    if min(hi_b + 0.08, pb_hi) > max(lo_b - 0.08, pb_lo) and by < pb_y * 1.38:
+                        by = pb_y * 1.42
                 ax.plot([bx1, bx1, bx2, bx2], [by * 0.88, by, by, by * 0.88],
                         color="#222222", lw=0.85, zorder=4.2)
                 ax.text(0.5 * (bx1 + bx2), by * 1.06, str(br.get("label", "*")),
                         ha="center", va="bottom", fontsize=7.2, fontweight="bold",
                         color="#222222", zorder=4.3)
-            if ch.get("y_lim") is None:
-                lo_cur, hi_cur = ax.get_ylim()
-                top_need = base_y * (1.42 ** len(sig_brackets)) * 1.15
-                if top_need > hi_cur:
-                    ax.set_ylim(bottom=lo_cur, top=top_need)
-        else:
-            span = max(abs(max_y or 0.0), abs((max_y or 0.0) - (min_y or 0.0)), 1.0)
-            step = span * 0.11
-            cur_y = (max_y if max_y is not None else 1.0) + span * (0.14 if ch.get("show_values") else 0.07)
-            for bi, br in enumerate(sig_brackets):
-                rx1, rx2 = br.get("x1", 0), br.get("x2", 1)
-                bx1 = cat_to_x[str(rx1)] if str(rx1) in cat_to_x else float(rx1)
-                bx2 = cat_to_x[str(rx2)] if str(rx2) in cat_to_x else float(rx2)
-                by = float(br["y"]) if br.get("y") is not None else (cur_y + bi * step)
-                tick_h = span * 0.028
+                placed_br.append((lo_b, hi_b, by))
+                top_max_y = max(top_max_y, by * 1.28)
+            else:
+                by = float(br["y"]) if br.get("y") is not None else (loc_pk + span * (0.14 if ch.get("show_values") else 0.075))
+                for pb_lo, pb_hi, pb_y in placed_br:
+                    if min(hi_b + 0.08, pb_hi) > max(lo_b - 0.08, pb_lo) and by < pb_y + step:
+                        by = pb_y + step
+                tick_h = span * 0.026
                 ax.plot([bx1, bx1, bx2, bx2], [by - tick_h, by, by, by - tick_h],
                         color="#222222", lw=0.85, zorder=4.2)
                 ax.text(0.5 * (bx1 + bx2), by + span * 0.012, str(br.get("label", "*")),
                         ha="center", va="bottom", fontsize=7.2, fontweight="bold",
                         color="#222222", zorder=4.3)
-            top_need = cur_y + len(sig_brackets) * step + span * 0.08
-            if ch.get("y_lim") is None and not ch.get("y_scale"):
-                lo_cur, hi_cur = ax.get_ylim()
-                if top_need > hi_cur:
-                    ax.set_ylim(bottom=lo_cur, top=top_need)
+                placed_br.append((lo_b, hi_b, by))
+                top_max_y = max(top_max_y, by + span * 0.11)
+        if ch.get("y_lim") is None:
+            lo_cur, hi_cur = ax.get_ylim()
+            if top_max_y > hi_cur:
+                ax.set_ylim(bottom=lo_cur, top=top_max_y)
 
     for ann in ch.get("annotations", []):
         ax.text(ann.get("x", 0), ann.get("y", 0), ann.get("text", ""),

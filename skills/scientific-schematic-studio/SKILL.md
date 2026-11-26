@@ -59,7 +59,7 @@ python3 ${SKILL_DIR:-/skills/weekly-skill}/scripts/run_pipeline.py deliver /app/
              "y_label": "Signal", "unit": "fold", "sig_brackets": [{"x1": "Ctrl", "x2": "Stim", "label": "***"}]}}],
  "uncertainty": [], "notes": "Grounded in primary paper and source table."}
 ```
-图表：`bar`/`barh`/`stacked_bar`/`line`/`scatter`/`box`/`heatmap`、`err_cols`（自动拆 `mean±SD`）、长表 `agg`/宽表 `orient:"columns"`/`col_groups`、`col_range`/`sheet_name`/`section_match`/`skip_rows`、`sig_brackets`、`hlines`/`vlines`；修订加 `"post_edit_ops"`；PPT 加 `"pptx":true`；`output_contract` 透传；缺图例/清单自动补。
+图表：`bar`/`barh`/`stacked_bar`/`line`/`scatter`/`box`/`heatmap`、`err_cols`（自拆 `mean±SD`）、长表 `hue_col`+`agg` / 散点 `label_col`+`top_labels` / 宽表 `orient:"columns"`/`col_groups`、`col_range`/`sheet_name`/`section_match`、`sig_brackets`（支持组内 `x`+`s1`/`s2`）、`hlines`/`vlines`；修订加 `"post_edit_ops"`；PPT 加 `"pptx":true`；`output_contract` 透传。
 
 **保源编辑模式（保留 `original_*.svg`，自动收割实体与关系）：**
 ```json
@@ -72,8 +72,8 @@ python3 ${SKILL_DIR:-/skills/weekly-skill}/scripts/run_pipeline.py deliver /app/
   {"op": "add_edge", "id": "edge-new", "from_text": "Target", "to_text": "mTORC1", "marker": "arrow", "label": "activates"},
   {"op": "add_legend", "items": [{"kind": "activates", "label": "Activation"}, {"kind": "inhibits", "label": "Inhibition"}]}]}
 ```
-ops：`retext`/`replace_text`/`set_attr`(暗底自适配白字)/`set_dash`/`move`(连边弹性跟随)/`swap_edge`/`set_marker`(`arrow|tbar|open|none`)/`add_node`(`right_of|below|x,y`)/`add_edge`(自动避障)/`add_group`/`add_legend`/`delete`/`add_note`（边支持 `gid`/`from_text`+`to_text`/`edge_idx`，超界扩 `viewBox`）。
+ops：`retext`/`replace_text`/`set_attr`(暗底自适配白字)/`set_dash`/`move`(连边跟随)/`swap_edge`/`set_marker`(`arrow|tbar|open|none`+`dash`)/`add_node`(相对避障/多行)/`add_edge`(避障)/`add_group`/`add_legend`/`delete`(自清连边)/`add_note`（支持 `gid`/`from_text`+`to_text`/`edge_idx`，超界扩 `viewBox`）。
 
 ## 无脚本兜底与资源
 仅 `run_pipeline.py` 连续失败才手写 SVG → `soffice --headless --convert-to pdf` + `pdftoppm -png -r 300` → `result.json`。
-资产：`assets/journal_presets.json` · `templates.json` · `references/`（`layout_rules`·`style_tokens`·`export_presets`·`result_schema`·`failure_playbook`）。
+资产：`assets/`(`journal_presets`·`templates`) · `references/`(`layout_rules`·`style_tokens`·`export_presets`·`result_schema`·`failure_playbook`)。

@@ -261,10 +261,10 @@ def assign_xy(nodes, edges, layers, sizes, direction, gap_x, gap_y, wrap_w=None,
 
     node_rank = {nid: r for r in order for nid in layers[r]}
     node_group = {}
-    # Reserve column width for single-rank groups with long header labels so boxes never collide
+    # Sort outermost-first (-len(members)) so nested inner compartments (e.g. Nucleus inside Cytoplasm) win
     extra_col_w = {}
     if groups:
-        for g in groups:
+        for g in sorted(groups, key=lambda x: -len(x.get("members", []))):
             gid = g.get("id", "")
             mem = [m for m in g.get("members", []) if m in node_rank]
             for m in mem:

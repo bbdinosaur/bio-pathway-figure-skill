@@ -90,7 +90,8 @@ def main():
                             % (pid, p["legend_entries"], p["n_series"]))
             slens = p.get("series_lengths") or []
             ncat = p.get("n_categories", 0)
-            if slens and ncat and any(L != ncat for L in slens):
+            is_hue_scatter = (p.get("kind") == "scatter" and len(slens) >= 2 and sum(slens) == ncat)
+            if slens and ncat and not is_hue_scatter and any(L != ncat for L in slens):
                 errs.append("panel %s: plotted series lengths %s != categories (%d)"
                             % (pid, slens, ncat))
             if p.get("n_series", 0) == 0:
@@ -103,7 +104,12 @@ def main():
                 if pid not in unit_cfg:
                     warns.append("panel %s: chart has values but empty unit" % pid)
             # Independent source-data fidelity cross-check for data_file-bound charts
-            sp_ch = (spec_panels.get(pid) or {}).get("chart") or {}
+            sp_panel = spec_panels.get(pid) or {}
+            sp_ch = dict(sp_panel.get("chart") or {})
+            if sp_ch and not sp_ch.get("kind"):
+                pt_l = str(sp_panel.get("type", "")).strip().lower()
+                if pt_l in ("bar", "barh", "stacked_bar", "line", "scatter", "box", "heatmap"):
+                    sp_ch["kind"] = pt_l
             if sp_ch.get("data_file") and p.get("series_data"):
                 try:
                     import fig_chart as FC
