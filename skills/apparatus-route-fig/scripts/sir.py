@@ -146,6 +146,32 @@ def normalize_sir(sir):
         t = str(n.get("type") or "").strip().lower()
         if t in NODE_TYPE_SYNONYMS:
             n["type"] = NODE_TYPE_SYNONYMS[t]
+        raw_a = n.get("attrs")
+        if isinstance(raw_a, list):
+            ad = {}
+            for idx_a, av in enumerate(raw_a, 1):
+                if isinstance(av, dict):
+                    for ak, av2 in av.items():
+                        ad[str(ak).strip()] = str(av2).strip()
+                else:
+                    s_av = str(av or "").strip()
+                    if not s_av:
+                        continue
+                    if ":" in s_av:
+                        ak, av2 = s_av.split(":", 1)
+                    elif "：" in s_av:
+                        ak, av2 = s_av.split("：", 1)
+                    elif "=" in s_av:
+                        ak, av2 = s_av.split("=", 1)
+                    else:
+                        ak, av2 = "Param %d" % idx_a, s_av
+                    ak = ak.strip() or ("Param %d" % idx_a)
+                    if ak in ad:
+                        ak = "%s (%d)" % (ak, idx_a)
+                    ad[ak] = av2.strip()
+            n["attrs"] = ad
+        elif isinstance(raw_a, str) and raw_a.strip():
+            n["attrs"] = {"Note": raw_a.strip()}
     for e in sir.get("links") or []:
         if not isinstance(e, dict):
             continue

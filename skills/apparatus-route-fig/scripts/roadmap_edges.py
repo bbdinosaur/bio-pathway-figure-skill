@@ -49,7 +49,8 @@ def build_links(rg, sird):
         if src.get("loc"):
             meta["prov_loc"] = src["loc"]
         lab = str(e.get("label") or "").strip()
-        if kind == "feedback":
+        mk = "tbar" if kind == "inhibit" else "arrow"
+        if kind in ("feedback", "loop") or b["col"] < a["col"]:
             k = per_fb.get(0, 0)
             per_fb[0] = k + 1
             fy = rg["bottom"] + 28.0 + (k % 4) * 30.0
@@ -58,7 +59,7 @@ def build_links(rg, sird):
             sx, tx = a["cx"] + dx, b["cx"] + dx
             prims.append(scene.LN([(sx, rg["bottom"]), (sx, fy),
                                    (tx, fy), (tx, rg["bottom"])],
-                                  stroke=color, sw=1.8, dash=dash, marker="arrow",
+                                  stroke=color, sw=1.8, dash=dash, marker=mk,
                                   layer="links", **meta))
             if lab:
                 frac = (0.50, 0.34, 0.66, 0.42)[k % 4]
@@ -67,7 +68,7 @@ def build_links(rg, sird):
         elif b["col"] == a["col"] + 1:
             hy = a["y"] + 19
             prims.append(scene.LN([(a["x"] + a["w"], hy), (b["x"], hy)],
-                                  stroke=color, sw=2.0, dash=dash, marker="arrow",
+                                  stroke=color, sw=2.0, dash=dash, marker=mk,
                                   layer="links", **meta))
             if lab:
                 lines = sirmod.wrap_text(lab, 11.0, max(gap - 12.0, 74.0))[:2]
@@ -76,14 +77,14 @@ def build_links(rg, sird):
                     labels.append(scene.TX((a["x"] + a["w"] + b["x"]) / 2, y_start + li * 13.0, ln,
                                            size=11.0, fill="#2D3748", layer="labels",
                                            halo=True, edge="pe%d" % j))
-        else:
+        elif b["col"] > a["col"] + 1:
             k = per_top.get(0, 0)
             per_top[0] = k + 1
             ty = T_TOP - 28.0 - (k % 3) * 26.0
             dx = (0.0, 18.0, -18.0)[k % 3]
             sx, tx = a["cx"] + dx, b["cx"] + dx
             prims.append(scene.LN([(sx, T_TOP), (sx, ty), (tx, ty), (tx, T_TOP)],
-                                  stroke=color, sw=1.8, dash=dash, marker="arrow",
+                                  stroke=color, sw=1.8, dash=dash, marker=mk,
                                   layer="links", **meta))
             if lab:
                 frac = 0.34 if (k % 2 == 0) else 0.64

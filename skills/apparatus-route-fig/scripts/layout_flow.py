@@ -46,7 +46,25 @@ def _assign_layers(nodes, all_links):
     nmap = {n["id"]: n for n in nodes}
     explicit = {n["id"]: int(n["layer"]) for n in nodes if isinstance(n.get("layer"), int)}
 
-    mat_links = [e for e in all_links if e.get("kind", "material") not in ("loop", "signal", "data")]
+    # 跨平行臂的抑制/串扰边（两端属不同非空 group，且目标已有同组或无组前向入边）：不强行把目标列右推，避免平行臂留空洞
+    in_same_fwd = set()
+    for e in all_links:
+        if e.get("kind", "material") in ("material", "activate"):
+            ga = str((nmap.get(e["from"]) or {}).get("group") or "").strip()
+            gb = str((nmap.get(e["to"]) or {}).get("group") or "").strip()
+            if not ga or not gb or ga == gb:
+                in_same_fwd.add(e["to"])
+    mat_links = []
+    for e in all_links:
+        k_e = e.get("kind", "material")
+        if k_e in ("loop", "signal", "data"):
+            continue
+        if k_e == "inhibit":
+            ga = str((nmap.get(e["from"]) or {}).get("group") or "").strip()
+            gb = str((nmap.get(e["to"]) or {}).get("group") or "").strip()
+            if ga and gb and ga != gb and e["to"] in in_same_fwd:
+                continue
+        mat_links.append(e)
     aux_links = [e for e in all_links if e.get("kind", "material") in ("signal", "data")]
     use_links = mat_links if mat_links else [e for e in all_links if e.get("kind") != "loop"]
 
@@ -215,6 +233,13 @@ def place_nodes(sird, maxcols=None):
                 return (group_order[g_s] if (use_g_lane and g_s in group_order) else 999, base)
             cols[c].sort(key=score_out)
 
+    # 反孤儿换行：若仅超出 1 列且末列仅有 <=2 个终端节点，适度收紧列间距保单带横向贯通，避免 1800px 折返长线
+    colgap = COLGAP
+    if ncols == maxcols + 1 and maxcols <= 6 and len(cols.get(ncols - 1, [])) <= 2:
+        maxcols = ncols
+        if ncols >= 7:
+            colgap = 88.0
+
     # 真正按带内列号 c % maxcols 计算 X 坐标，杜绝对角线漂移与超宽死白；<=4 列且文本较密时自适应拓宽节点卡片
     eff_cols = min(ncols, maxcols) if ncols else 1
     nw = NODE_W
@@ -228,8 +253,8 @@ def place_nodes(sird, maxcols=None):
             max_need = max(max_need, min(lw, 238.0), min(aw, 238.0))
         if max_need > NODE_W + 4.0:
             nw = min(238.0, max(NODE_W, round(max_need, 1)))
-    col_x = {c: L_M + (c % maxcols) * (nw + COLGAP) for c in range(ncols)}
-    W = max(720.0, L_M + eff_cols * (nw + COLGAP) - COLGAP + R_M)
+    col_x = {c: L_M + (c % maxcols) * (nw + colgap) for c in range(ncols)}
+    W = max(720.0, L_M + eff_cols * (nw + colgap) - colgap + R_M)
 
     # 动态计算标题/副标题高度与 Band 0 跨列顶通道留白，无标题子面板自动紧缩顶部留白
     title_s = str(sird.get("title") or "").strip()
@@ -241,10 +266,18 @@ def place_nodes(sird, maxcols=None):
         header_bot = t_bot + (16.0 + len(sub_lines) * 17.0 if sub_lines else 14.0) + 12.0
     else:
         header_bot = 8.0
+    top_row_ids = {cols[c][0]["id"] for c in range(min(ncols, maxcols)) if cols.get(c)}
+    has_lower_row = any(len(cols.get(c, [])) >= 2 for c in range(min(ncols, maxcols)))
     n_skip_b0 = sum(1 for e in fwd_links
                     if layer.get(e["from"], 0) // maxcols == 0
                     and layer.get(e["to"], 0) // maxcols == 0
                     and layer.get(e["to"], 0) > layer.get(e["from"], 0) + 1)
+    if has_lower_row:
+        n_skip_b0 += sum(1 for e in all_links
+                         if (e.get("kind") == "loop" or layer.get(e["to"], 0) < layer.get(e["from"], 0))
+                         and layer.get(e["from"], 0) // maxcols == 0
+                         and layer.get(e["to"], 0) // maxcols == 0
+                         and e["from"] in top_row_ids and e["to"] in top_row_ids)
     skip_pad_b0 = (26.0 + 14.0 * min(n_skip_b0, 3)) if n_skip_b0 else 0.0
 
     groups = sorted({str(n.get("group")) for n in nodes if n.get("group")})

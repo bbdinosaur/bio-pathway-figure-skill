@@ -156,6 +156,10 @@ def _set_multiline_text(elem, tspans, text_val):
                 ts = tspans[idx_l]
                 for sub in list(ts):
                     ts.remove(sub)
+                if len(new_lines) > 1 and idx_l > 0 and not ts.get("dy") and not ts.get("y"):
+                    if base_x is not None and not ts.get("x"):
+                        ts.set("x", str(base_x))
+                    ts.set("dy", "1.25em")
                 ts.text = ln
                 ts.tail = ""
             else:
@@ -203,17 +207,20 @@ def _replace_text_elem(elem, old, new, exact=False):
             continue
         if exact:
             if cur.strip() == old.strip():
-                if "\n" in str(new) and obj is elem:
+                if "\n" in str(new):
                     _set_multiline_text(elem, tspans, new)
-                else:
-                    setattr(obj, field, new)
+                    changed = True
+                    break
+                setattr(obj, field, new)
                 changed = True
         elif old in cur:
             rep = cur.replace(old, new)
-            if "\n" in rep and obj is elem and not tspans:
-                _set_multiline_text(elem, tspans, rep)
-            else:
-                setattr(obj, field, rep)
+            if "\n" in rep:
+                full_rep = before.replace(old, new) if old in before else rep
+                _set_multiline_text(elem, tspans, full_rep)
+                changed = True
+                break
+            setattr(obj, field, rep)
             changed = True
     if not changed and old is not None:
         norm_before = re.sub(r"\s+", " ", before).strip()
@@ -531,15 +538,16 @@ def _apply_op(root, op):
         return {"action": "add-arrow", "id": op.get("id", ""), "marker": mk,
                 "from": list(pts[0]), "to": list(pts[-1]), "n_pts": len(pts), "reason": reason}
     if act == "pad-canvas":
+        import render as rendermod
         pt, pr = float(op.get("top", 0)), float(op.get("right", 0))
         pb, pl = float(op.get("bottom", 0)), float(op.get("left", 0))
-        vb = (root.get("viewBox") or "").replace(",", " ").split()
-        if len(vb) == 4:
-            vx, vy, vw, vh = [float(x) for x in vb]
+        vb = rendermod._parse_viewbox_str(root.get("viewBox"))
+        if vb is not None:
+            vx, vy, vw, vh = vb
         else:
             vx, vy = 0.0, 0.0
-            vw = float(re.sub(r"[^0-9.]", "", root.get("width") or "800") or 800)
-            vh = float(re.sub(r"[^0-9.]", "", root.get("height") or "600") or 600)
+            vw = rendermod._parse_len_str(root.get("width")) or 800.0
+            vh = rendermod._parse_len_str(root.get("height")) or 600.0
         nx, ny, nw, nh = vx - pl, vy - pt, vw + pl + pr, vh + pt + pb
         old_vb = root.get("viewBox")
         root.set("viewBox", "%g %g %g %g" % (nx, ny, nw, nh))
@@ -552,11 +560,12 @@ def _apply_op(root, op):
             try:
                 rx0 = float(ch.get("x") or 0)
                 ry0 = float(ch.get("y") or 0)
-                rw0 = float(re.sub(r"[^0-9.]", "", ch.get("width") or "0") or 0)
-                rh0 = float(re.sub(r"[^0-9.]", "", ch.get("height") or "0") or 0)
+                is_pct_bg = str(ch.get("width") or "").strip() == "100%" and str(ch.get("height") or "").strip() == "100%"
+                rw0 = rendermod._parse_len_str(ch.get("width")) or 0.0
+                rh0 = rendermod._parse_len_str(ch.get("height")) or 0.0
             except Exception:
                 continue
-            if ch.get("id") == "canvas_bg" or (abs(rx0 - vx) <= 2 and abs(ry0 - vy) <= 2 and abs(rw0 - vw) <= 2 and abs(rh0 - vh) <= 2):
+            if ch.get("id") == "canvas_bg" or is_pct_bg or (abs(rx0 - vx) <= 2 and abs(ry0 - vy) <= 2 and abs(rw0 - vw) <= 2 and abs(rh0 - vh) <= 2):
                 ch.set("x", "%g" % nx)
                 ch.set("y", "%g" % ny)
                 ch.set("width", "%g" % nw)
@@ -686,8 +695,9 @@ def _export_if_needed(svg_path, a):
             Path(preview).parent.mkdir(parents=True, exist_ok=True)
             pv_dpi = min(int(getattr(a, "preview_dpi", 96) or 96), 108)
             try:
+                src_p = exp.get("png", {}).get("path")
                 exp["preview"] = {"path": str(preview), "dpi": pv_dpi,
-                                  "engine": rendermod.svg_to_png(svg_path, preview, pv_dpi)}
+                                  "engine": rendermod.make_preview_png(src_p, preview, dpi, pv_dpi, fallback_svg=svg_path)}
             except Exception as e:
                 exp["preview"] = {"error": str(e)}
     return exp
@@ -771,6 +781,7 @@ def _write_result_skel(a, dst, records, exp, diff_rep, raw_spec=None):
                     contract[k] = "<待填：依据保源编辑实况与 diff 如实撰写>"
         except Exception:
             pass
+    import audit_delivery as auditmod
     sk = {
         "case_id": cid_eff or "CASE_ID",
         "status": "ok" if not any("error" in v for v in exp.values()) else "partial",
@@ -783,7 +794,7 @@ def _write_result_skel(a, dst, records, exp, diff_rep, raw_spec=None):
         "change_records": records,
         "output_contract": contract,
         "output_contract_fields": list(contract.keys()),
-        "uncertainty": list(raw_spec.get("uncertainty") or []),
+        "uncertainty": auditmod.collect_scientific_uncertainty(raw_spec),
     }
     for k, v in contract.items():
         if k not in sk:
@@ -798,13 +809,7 @@ def _write_result_skel(a, dst, records, exp, diff_rep, raw_spec=None):
         try:
             old_res = json.loads(p.read_text(encoding="utf-8"))
             if isinstance(old_res, dict):
-                old_oc = old_res.get("output_contract") if isinstance(old_res.get("output_contract"), dict) else {}
-                for k, v in list(contract.items()):
-                    if k not in explicit_rf and isinstance(v, str) and "<待填" in v:
-                        prev = old_oc.get(k) if k in old_oc else old_res.get(k)
-                        if prev not in (None, "") and not (isinstance(prev, str) and "<待填" in prev):
-                            contract[k] = prev
-                            sk[k] = prev
+                auditmod.merge_existing_result(sk, contract, explicit_rf, old_res)
         except Exception:
             pass
     unfilled = [k for k, v in contract.items() if isinstance(v, str) and "<待填" in v]

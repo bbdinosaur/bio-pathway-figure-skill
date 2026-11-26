@@ -39,9 +39,9 @@ def _multi(a, sirmod, buildmod, checks, svgfig, rendermod, figures, sird=None):
                 if a.preview:
                     pvd = Path(a.preview)
                     pv_dst = (pvd / (name + "_preview.png")) if pvd.suffix.lower() != ".png" else pvd.with_name(pvd.stem + "_%d.png" % i)
-                    pv_dst.parent.mkdir(parents=True, exist_ok=True)
-                    rmeta["preview"] = {"path": str(pv_dst), "dpi": min(int(a.preview_dpi or 96), 108),
-                                        "engine": rendermod.svg_to_png(out / (name + ".svg"), pv_dst, min(int(a.preview_dpi or 96), 108))}
+                    pv_dpi = min(int(a.preview_dpi or 96), 108)
+                    rmeta["preview"] = {"path": str(pv_dst), "dpi": pv_dpi,
+                                        "engine": rendermod.make_preview_png(png, pv_dst, a.dpi, pv_dpi, fallback_svg=out / (name + ".svg"))}
             except Exception:
                 import mirror
                 rmeta["mirror"] = mirror.render(sc, png, pdf, a.dpi, ffile, fam)
@@ -141,11 +141,10 @@ def main():
                 rmeta["mirror"] = {"error": str(e)}
         if a.preview:
             pv_path = Path(a.preview)
-            pv_path.parent.mkdir(parents=True, exist_ok=True)
             pv_dpi = min(int(a.preview_dpi or 96), 108)
             try:
                 rmeta["preview"] = {"path": str(pv_path), "dpi": pv_dpi,
-                                    "engine": rendermod.svg_to_png(svg_path, pv_path, pv_dpi)}
+                                    "engine": rendermod.make_preview_png(png_path, pv_path, a.dpi, pv_dpi, fallback_svg=svg_path)}
             except Exception as e:
                 rmeta["preview"] = {"error": str(e)}
     (out / "render_meta.json").write_text(json.dumps(rmeta, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -227,10 +226,8 @@ def _skel(a, rep, rmeta, path, contract_path=None, prov_rows=None, sird=None, mu
         loc = str(row.get("loc") or "").strip()
         if loc and loc not in src_locs:
             src_locs.append(loc)
-    unc = [w for w in rep.get("warns", [])][:10]
-    for u in (sird.get("uncertainty") or []):
-        if str(u) not in unc:
-            unc.append(str(u))
+    import audit_delivery as auditmod
+    unc = auditmod.collect_scientific_uncertainty(sird)
     title_s = str(sird.get("title") or a.name).strip()[:80]
     if multi_count:
         detail_s = "Built multi-figure set '%s' (%d figures, %d grounded elements from %s) as layered SVG + %ddpi PNG/PDF." % (
@@ -281,15 +278,7 @@ def _skel(a, rep, rmeta, path, contract_path=None, prov_rows=None, sird=None, mu
         except Exception:
             existing = {}
     if isinstance(existing, dict):
-        old_oc = existing.get("output_contract") if isinstance(existing.get("output_contract"), dict) else {}
-        for k, v in list(contract.items()):
-            if k not in explicit_rf and isinstance(v, str) and "<待填" in v:
-                prev = old_oc.get(k) if k in old_oc else existing.get(k)
-                if prev not in (None, "") and not (isinstance(prev, str) and "<待填" in prev):
-                    contract[k] = prev
-                    sk[k] = prev
-        if existing.get("output_contract_fields"):
-            sk["output_contract_fields"] = existing["output_contract_fields"]
+        auditmod.merge_existing_result(sk, contract, explicit_rf, existing)
     unfilled = [k for k, v in contract.items() if isinstance(v, str) and "<待填" in v]
     path.write_text(json.dumps(sk, ensure_ascii=False, indent=1), encoding="utf-8")
     return unfilled

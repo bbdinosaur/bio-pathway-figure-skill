@@ -97,7 +97,7 @@ def _aggregate_xy(xs, ys, mode):
         if fv is None:
             dropped += 1
             continue
-        k = str(xv)
+        k = str(xv).strip()
         buckets.setdefault(k, []).append(fv)
     ox, oy, oerr, ns, raw_pts = [], [], [], [], []
     for k, vals in buckets.items():
@@ -202,6 +202,7 @@ def _hydrate_panel(p, base_dir):
                                             "loc": "%s%s" % (tpath.name, (" [%s]" % tbl["sheet"]) if tbl["sheet"] else "")})
         src_base["table"] = tpath.name
         src_base["sha256_12"] = tbl["sha256"][:12]
+        src_base["n_source_rows"] = len(rows)
         if p.get("x_col") and p.get("y_col") and p.get("val_col"):
             xc = tp.resolve_col(cols, p["x_col"])
             yc = tp.resolve_col(cols, p["y_col"])
@@ -248,7 +249,8 @@ def _hydrate_panel(p, base_dir):
             for ci, yc_raw in enumerate(p["y_cols"]):
                 yc = tp.resolve_col(cols, yc_raw)
                 ec = tp.resolve_col(cols, yerr_cols[ci], allow_none=True) if ci < len(yerr_cols) else None
-                src_d = dict(src_base, table=tpath.name, sha256_12=tbl["sha256"][:12])
+                src_d = dict(src_base, table=tpath.name, sha256_12=tbl["sha256"][:12],
+                             n_source_rows=len(rows), columns_used=[c for c in (xc, yc, ec, lc_w) if c])
                 if agg in ("mean_sd", "mean_sem"):
                     raw_xs = [r.get(xc, "") for r in rows] if xc else list(range(len(rows)))
                     raw_ys = [r.get(yc, "") for r in rows]
@@ -286,7 +288,8 @@ def _hydrate_panel(p, base_dir):
             else:
                 groups[str(p.get("series_name") or yc or "Series")] = rows
             for gname, grows in groups.items():
-                src_d = dict(src_base, table=tpath.name, sha256_12=tbl["sha256"][:12])
+                src_d = dict(src_base, table=tpath.name, sha256_12=tbl["sha256"][:12],
+                             n_source_rows=len(grows), columns_used=[c for c in (xc, yc, ec, gc, lc) if c])
                 if agg in ("mean_sd", "mean_sem"):
                     raw_xs = [r.get(xc, "") for r in grows] if xc else list(range(len(grows)))
                     raw_ys = [r.get(yc, "") for r in grows]
@@ -602,15 +605,22 @@ def _plot_panel(ax, p, panel_tag="", row_title_pad=None):
         ax.set_xlabel(str(p.get("xlabel") or ""))
         ax.set_ylabel(str(p.get("ylabel") or ""))
         if p.get("title"):
-            ax.set_title(str(p["title"]), fontsize=11.5, fontweight="bold", pad=8)
+            ax.set_title(str(p["title"]), fontsize=11.5, fontweight="bold",
+                         pad=(row_title_pad if row_title_pad is not None else 8))
         src = p.get("source") or {}
+        mat_sha = hashlib.sha256(json.dumps(
+            [[round(float(v), 6) if _is_num(v) else None for v in row] for row in mat]
+        ).encode("utf-8")).hexdigest()[:12]
         row = {"panel": panel_tag.rstrip(".") or "main", "series": "heatmap", "n": len(vals_flat),
                "shape": [nr, nc], "y_range": [vmin, vmax],
                "mean": round(sum(vals_flat) / len(vals_flat), 6) if vals_flat else 0.0,
+               "data_sha12": mat_sha,
                "quote": src.get("quote", ""), "loc": src.get("loc", "")}
         if src.get("table"):
             row["table"] = src["table"]
             row["sha256_12"] = src.get("sha256_12", "")
+            if src.get("n_source_rows") is not None:
+                row["n_source_rows"] = src["n_source_rows"]
         mapping.append(row)
         return warns, mapping
 
@@ -620,11 +630,11 @@ def _plot_panel(ax, p, panel_tag="", row_title_pad=None):
     if kind in ("box", "violin"):
         # 每个 series 的 y 为一组分布，或单 series 用 x 分组
         groups_data, group_names, group_colors = [], [], []
-        if n_s == 1 and series[0].get("x") and len(set(str(v) for v in series[0]["x"])) > 1:
+        if n_s == 1 and series[0].get("x") and len(set(str(v).strip() for v in series[0]["x"])) > 1:
             s0 = series[0]
             buckets = {}
             for xv, yv in zip(s0["x"], s0["y"]):
-                buckets.setdefault(str(xv), []).append(_to_float(yv))
+                buckets.setdefault(str(xv).strip(), []).append(_to_float(yv))
             src = s0.get("source") or {}
             for gi, (gn, gvals) in enumerate(buckets.items()):
                 groups_data.append(gvals)
@@ -688,12 +698,21 @@ def _plot_panel(ax, p, panel_tag="", row_title_pad=None):
                     ax.scatter(xs_j, gvals, s=18, color=col, alpha=0.82, edgecolors="#FFFFFF", linewidths=0.4, zorder=4)
         numeric_x = False
     elif kind == "hist":
-        bins = p.get("bins") or "auto"
+        bins_raw = p.get("bins")
+        all_hvals = [_to_float(v) for s in series for v in (s.get("y") or s.get("x") or []) if _is_num(v)]
+        if n_s > 1 and all_hvals and (bins_raw is None or isinstance(bins_raw, (int, str))):
+            nb = int(bins_raw) if isinstance(bins_raw, int) and bins_raw > 0 else max(6, min(20, int(math.sqrt(len(all_hvals))) + 3))
+            lo_h, hi_h = min(all_hvals), max(all_hvals)
+            if hi_h <= lo_h:
+                hi_h = lo_h + 1.0
+            bins_eff = [lo_h + (hi_h - lo_h) * k / nb for k in range(nb + 1)]
+        else:
+            bins_eff = bins_raw or "auto"
         for i, s in enumerate(series):
             vals = [_to_float(v) for v in (s.get("y") or s.get("x") or [])]
             col = s.get("color") or PAL[s.get("color_index", i) % len(PAL)]
             lbl = str(s.get("name", "S%d" % (i + 1)))
-            ax.hist(vals, bins=bins, density=bool(p.get("density", False)), alpha=0.55 if n_s > 1 else 0.78,
+            ax.hist(vals, bins=bins_eff, density=bool(p.get("density", False)), alpha=0.55 if n_s > 1 else 0.78,
                     color=col, edgecolor="#1A202C", linewidth=0.7, label=lbl, zorder=3)
             src = s.get("source") or {}
             st = _series_stats(vals)
@@ -711,7 +730,7 @@ def _plot_panel(ax, p, panel_tag="", row_title_pad=None):
         if not numeric_x:
             for s in series:
                 for v in s["x"]:
-                    sv = str(v)
+                    sv = str(v).strip()
                     if sv not in cats:
                         cats.append(sv)
             cat_idx = {c: idx for idx, c in enumerate(cats)}
@@ -739,7 +758,7 @@ def _plot_panel(ax, p, panel_tag="", row_title_pad=None):
             if kind == "stacked_bar":
                 if any(yv < 0 for yv in y):
                     warns.append("%sseries[%d] stacked_bar 含负值，建议改用分组 bar" % (panel_tag, i))
-                xs_idx = [cat_idx[str(v)] for v in s["x"]]
+                xs_idx = [cat_idx[str(v).strip()] for v in s["x"]]
                 b_cur = [bottoms[xi] for xi in xs_idx]
                 tgt_ax.bar(xs_idx, y, width=0.58, bottom=b_cur, color=color, alpha=0.88,
                            edgecolor="#1A202C", linewidth=0.5, label=lbl, zorder=3)
@@ -747,7 +766,7 @@ def _plot_panel(ax, p, panel_tag="", row_title_pad=None):
                     bottoms[xi] += yv
                 x_rng = [cats[0], cats[-1]] if cats else []
             elif kind in ("bar", "barh"):
-                xs_idx = [cat_idx[str(v)] for v in s["x"]]
+                xs_idx = [cat_idx[str(v).strip()] for v in s["x"]]
                 bw = min(0.76 / max(n_s, 1), 0.42)
                 offset = (i - (n_s - 1) / 2.0) * bw
                 pos = [xi + offset for xi in xs_idx]
@@ -807,6 +826,7 @@ def _plot_panel(ax, p, panel_tag="", row_title_pad=None):
                                        label="Up (n=%d)" % len(up_x), zorder=3.5)
                     if i == 0:
                         tgt_ax.axvline(fc_t, color="#718096", ls="--", lw=0.95, zorder=2)
+                        tgt_ax.margins(x=0.10, y=0.08)
                         tgt_ax.axvline(-fc_t, color="#718096", ls="--", lw=0.95, zorder=2)
                         tgt_ax.axhline(y_t, color="#718096", ls="--", lw=0.95, zorder=2)
                     volcano_counts = {"up": len(up_x), "down": len(dn_x), "ns": len(ns_x),
@@ -891,7 +911,7 @@ def _plot_panel(ax, p, panel_tag="", row_title_pad=None):
                         warns.append("%sseries[%d] x 非单调递增" % (panel_tag, i))
                     x_rng = [min(x), max(x)]
                 else:
-                    x = [cat_idx[str(v)] for v in s["x"]]
+                    x = [cat_idx[str(v).strip()] for v in s["x"]]
                     x_rng = [cats[0], cats[-1]] if cats else []
                 ls = s.get("linestyle", "-")
                 if kind == "step":
@@ -945,6 +965,10 @@ def _plot_panel(ax, p, panel_tag="", row_title_pad=None):
             if src.get("table"):
                 row["table"] = src["table"]
                 row["sha256_12"] = src.get("sha256_12", "")
+                if src.get("columns_used"):
+                    row["columns_used"] = src["columns_used"]
+                if src.get("n_source_rows") is not None:
+                    row["n_source_rows"] = src["n_source_rows"]
             if src.get("dropped_missing"):
                 row["dropped_missing"] = src["dropped_missing"]
                 warns.append("%s%s 自动跳过 %d 行缺失/NA 数值" % (panel_tag, lbl, src["dropped_missing"]))
@@ -1189,10 +1213,8 @@ def _write_result_skel(a, rep, out, name, mapping, spec=None):
         loc = str(m.get("loc") or m.get("table") or "").strip()
         if loc and loc not in srcs:
             srcs.append(loc)
-    unc = list(rep.get("warns") or [])[:10]
-    for u in (spec.get("uncertainty") or []):
-        if str(u) not in unc:
-            unc.append(str(u))
+    import audit_delivery as auditmod
+    unc = auditmod.collect_scientific_uncertainty(spec, data_mapping=mapping)
     title_s = str(spec.get("title") or name).strip()
     detail_s = "Plotted '%s' (%d panel(s), %d series, %d verified points from %s) as editable SVG/PDF and %ddpi PNG." % (
         title_s[:80], rep.get("panel_count", 1), rep.get("series_count", len(mapping)),
@@ -1227,13 +1249,7 @@ def _write_result_skel(a, rep, out, name, mapping, spec=None):
         try:
             old_res = json.loads(p.read_text(encoding="utf-8"))
             if isinstance(old_res, dict):
-                old_oc = old_res.get("output_contract") if isinstance(old_res.get("output_contract"), dict) else {}
-                for k, v in list(contract.items()):
-                    if k not in explicit_rf and isinstance(v, str) and "<待填" in v:
-                        prev = old_oc.get(k) if k in old_oc else old_res.get(k)
-                        if prev not in (None, "") and not (isinstance(prev, str) and "<待填" in prev):
-                            contract[k] = prev
-                            sk[k] = prev
+                auditmod.merge_existing_result(sk, contract, explicit_rf, old_res)
         except Exception:
             pass
     unfilled = [k for k, v in contract.items() if isinstance(v, str) and "<待填" in v]

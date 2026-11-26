@@ -6,9 +6,11 @@
 import json
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
+import zlib
 from pathlib import Path
 
 PREF_FONTS = ["Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "Source Han Sans CN",
@@ -85,19 +87,82 @@ def _parse_len(val, unit):
         return v * 96.0
     if u == "pt":
         return v * 96.0 / 72.0
+    if u == "pc":
+        return v * 16.0
     return v
 
 
+def _parse_len_str(raw):
+    """解析单个 CSS/SVG 长度值（px/pt/mm/cm/in/pc 或无单位）；百分比 '%' 或非法/非正值返回 None。"""
+    if raw is None:
+        return None
+    m = re.match(r"^\s*\+?((?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)\s*([a-z%]*)\s*$", str(raw), re.I)
+    if not m:
+        return None
+    unit = (m.group(2) or "").lower()
+    if unit == "%" or (unit and unit not in ("px", "pt", "mm", "cm", "in", "pc")):
+        return None
+    v = _parse_len(m.group(1), unit)
+    return v if v > 0 else None
+
+
+def _parse_viewbox_str(raw):
+    """解析空格或逗号分隔的 viewBox 四元组，返回 (vx, vy, vw, vh) 或 None。"""
+    if not raw:
+        return None
+    parts = [p for p in re.split(r"[\s,]+", str(raw).strip()) if p]
+    if len(parts) != 4:
+        return None
+    try:
+        vx, vy, vw, vh = [float(p) for p in parts]
+        if vw > 0 and vh > 0:
+            return vx, vy, vw, vh
+    except Exception:
+        pass
+    return None
+
+
+def _extract_svg_root_tag(txt):
+    """剥离前置 XML 注释后锁定根 <svg ...> 开标签，严禁在子元素 <rect> 等处误抓宽高。"""
+    clean = re.sub(r"<!--.*?-->", "", txt, flags=re.S)
+    m = re.search(r"<svg\b[^>]*>", clean, re.I | re.S)
+    return m.group(0) if m else ""
+
+
+def _tag_attr(tag, name):
+    """仅在开标签内解析单/双引号属性（要求属性名前为空白，杜绝误匹配 stroke-width/data-width）。"""
+    m = re.search(r"""\s%s\s*=\s*(?:"([^"]*)"|'([^']*)')""" % re.escape(name), tag, re.I)
+    if not m:
+        return None
+    return m.group(1) if m.group(1) is not None else m.group(2)
+
+
+def _svg_size_from_text(txt):
+    tag = _extract_svg_root_tag(txt)
+    if not tag:
+        return 1600.0, 900.0
+    w = _parse_len_str(_tag_attr(tag, "width"))
+    h = _parse_len_str(_tag_attr(tag, "height"))
+    if w is not None and h is not None:
+        return w, h
+    vb = _parse_viewbox_str(_tag_attr(tag, "viewBox"))
+    if vb is not None:
+        _, _, vw, vh = vb
+        if w is not None:
+            return w, w * vh / vw
+        if h is not None:
+            return h * vw / vh, h
+        return vw, vh
+    return (w or 1600.0), (h or 900.0)
+
+
 def _svg_size(svg):
-    t = Path(svg).read_text(encoding="utf-8", errors="ignore")[:2500]
-    w = re.search(r'\bwidth="([\d.]+)\s*([a-z%]*)"', t, re.I)
-    h = re.search(r'\bheight="([\d.]+)\s*([a-z%]*)"', t, re.I)
-    if w and h and w.group(2) != "%" and h.group(2) != "%":
-        return _parse_len(w.group(1), w.group(2)), _parse_len(h.group(1), h.group(2))
-    vb = re.search(r'viewBox="[\d.\-]+\s+[\d.\-]+\s+([\d.]+)\s+([\d.]+)"', t)
-    if vb:
-        return float(vb.group(1)), float(vb.group(2))
-    return 1600.0, 900.0
+    p = Path(svg)
+    with p.open("r", encoding="utf-8", errors="ignore") as fp:
+        head = fp.read(65536)
+    if not _extract_svg_root_tag(head) and p.stat().st_size > 65536:
+        head = p.read_text(encoding="utf-8", errors="ignore")
+    return _svg_size_from_text(head)
 
 
 def _fitz():
@@ -113,16 +178,32 @@ def _fitz():
 
 
 def _fitz_svg_bytes(svg_path):
-    """仅当 SVG 含 <style>、行内 <tspan> 或 style=\"...opacity...\" 时，在内存中生成兼容 PyMuPDF 的标准 SVG 字节流（原文件不动）。"""
+    """仅当 SVG 含 <style>、行内 <tspan>、opacity/dasharray 或根尺寸缺失/百分比时，在内存中生成兼容 PyMuPDF 的标准 SVG 字节流（原文件不动）。"""
     raw = Path(svg_path).read_bytes()
     txt = raw.decode("utf-8", errors="ignore")
-    if "<style" not in txt and "<tspan" not in txt and "opacity" not in txt and "stroke-dasharray" not in txt:
+    root_tag = _extract_svg_root_tag(txt[:65536]) or _extract_svg_root_tag(txt)
+    need_size_norm = bool(root_tag) and (
+        _parse_len_str(_tag_attr(root_tag, "width")) is None
+        or _parse_len_str(_tag_attr(root_tag, "height")) is None
+        or "," in (_tag_attr(root_tag, "viewBox") or "")
+    )
+    if (not need_size_norm and "<style" not in txt and "<tspan" not in txt
+            and "opacity" not in txt and "stroke-dasharray" not in txt):
         return raw
     try:
         import xml.etree.ElementTree as ET
         ET.register_namespace("", "http://www.w3.org/2000/svg")
         ET.register_namespace("xlink", "http://www.w3.org/1999/xlink")
         root = ET.fromstring(raw)
+        if need_size_norm:
+            rw, rh = _svg_size_from_text(txt)
+            if _parse_len_str(root.get("width")) is None:
+                root.set("width", "%g" % rw)
+            if _parse_len_str(root.get("height")) is None:
+                root.set("height", "%g" % rh)
+            vb_t = _parse_viewbox_str(root.get("viewBox"))
+            if vb_t is not None:
+                root.set("viewBox", "%g %g %g %g" % vb_t)
         root_ff = root.get("font-family")
         rules, id_rules = {}, {}
         for el in root.iter():
@@ -247,6 +328,41 @@ def _soffice_svg_to_png(svg, png, dpi=300):
     return None
 
 
+def _stamp_png_dpi(png_path, dpi):
+    """纯标准库写入/更新 PNG pHYs 块，确保所有渲染引擎导出的 PNG 均携带精确 DPI 元数据（300/96 等）。"""
+    try:
+        p = Path(png_path)
+        data = p.read_bytes()
+        if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n":
+            return
+        ppm = max(1, int(round(float(dpi) / 0.0254)))
+        phys_body = struct.pack(">IIb", ppm, ppm, 1)
+        phys_chunk = struct.pack(">I", len(phys_body)) + b"pHYs" + phys_body + struct.pack(">I", zlib.crc32(b"pHYs" + phys_body) & 0xFFFFFFFF)
+        out = bytearray(data[:8])
+        pos = 8
+        inserted = False
+        while pos + 12 <= len(data):
+            clen = struct.unpack(">I", data[pos:pos + 4])[0]
+            ctype = data[pos + 4:pos + 8]
+            cend = pos + 12 + clen
+            if cend > len(data):
+                return
+            if ctype == b"pHYs":
+                if not inserted:
+                    out.extend(phys_chunk)
+                    inserted = True
+            else:
+                out.extend(data[pos:cend])
+                if ctype == b"IHDR" and not inserted:
+                    out.extend(phys_chunk)
+                    inserted = True
+            pos = cend
+        if inserted:
+            p.write_bytes(bytes(out))
+    except Exception:
+        pass
+
+
 def svg_to_png(svg, png, dpi=300):
     Path(png).parent.mkdir(parents=True, exist_ok=True)
     W, H = _svg_size(svg)
@@ -254,11 +370,13 @@ def svg_to_png(svg, png, dpi=300):
     if shutil.which("rsvg-convert"):
         ok, _ = _run(["rsvg-convert", "-w", str(px), "-h", str(py), "-o", str(png), str(svg)])
         if ok and Path(png).exists() and Path(png).stat().st_size > 200:
+            _stamp_png_dpi(png, dpi)
             return "rsvg-convert"
     try:
         import cairosvg
         cairosvg.svg2png(url=str(svg), write_to=str(png), output_width=px)
         if Path(png).exists() and Path(png).stat().st_size > 200:
+            _stamp_png_dpi(png, dpi)
             return "cairosvg"
     except Exception:
         pass
@@ -266,6 +384,7 @@ def svg_to_png(svg, png, dpi=300):
         ok, _ = _run(["inkscape", str(svg), "--export-type=png",
                       "--export-filename=%s" % png, "--export-width=%d" % px], 60)
         if ok and Path(png).exists() and Path(png).stat().st_size > 200:
+            _stamp_png_dpi(png, dpi)
             return "inkscape"
     m = _fitz()
     if m is not None:
@@ -273,13 +392,17 @@ def svg_to_png(svg, png, dpi=300):
             doc = m.open(stream=_fitz_svg_bytes(svg), filetype="svg")
             scale = dpi / 96.0
             pm = doc[0].get_pixmap(matrix=m.Matrix(scale, scale), alpha=False)
+            if hasattr(pm, "set_dpi"):
+                pm.set_dpi(int(round(dpi)), int(round(dpi)))
             pm.save(str(png))
             doc.close()
+            _stamp_png_dpi(png, dpi)
             return "pymupdf"
         except Exception:
             pass
     so_eng = _soffice_svg_to_png(svg, png, dpi)
     if so_eng:
+        _stamp_png_dpi(png, dpi)
         return so_eng
     raise RuntimeError("所有 SVG→PNG 引擎均失败；请用 matplotlib 镜像渲染（scripts/mirror.py）")
 
@@ -318,13 +441,41 @@ def svg_to_pdf(svg, pdf):
     raise RuntimeError("所有 SVG→PDF 引擎均失败；请用 matplotlib 镜像渲染（scripts/mirror.py）")
 
 
+def make_preview_png(src_png, dst_preview, src_dpi=300, dst_dpi=96, fallback_svg=None):
+    """零重复渲染生成轻量预览 PNG（<=108 DPI）：优先直接用 Pillow 对已渲染 300 DPI PNG 做 LANCZOS 降采样（~20ms），缺 Pillow 再回退 svg_to_png。"""
+    pv_dpi = min(max(int(dst_dpi or 96), 48), 108)
+    dst = Path(dst_preview)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    sp = Path(src_png) if src_png else None
+    if sp and sp.exists() and sp.stat().st_size > 200:
+        try:
+            from PIL import Image
+            with Image.open(str(sp)) as im:
+                scale = float(pv_dpi) / float(max(int(src_dpi or 300), pv_dpi))
+                if scale < 0.99:
+                    nw = max(120, int(round(im.width * scale)))
+                    nh = max(80, int(round(im.height * scale)))
+                    resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.BICUBIC)
+                    im = im.resize((nw, nh), resample)
+                im.save(str(dst), format="PNG", dpi=(pv_dpi, pv_dpi))
+            _stamp_png_dpi(dst, pv_dpi)
+            return "pillow-downsample"
+        except Exception:
+            pass
+    if fallback_svg and Path(fallback_svg).exists():
+        return svg_to_png(fallback_svg, dst, pv_dpi)
+    raise RuntimeError("预览图生成失败：缺少源 PNG 与回退 SVG")
+
+
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser(description="SVG→PNG/PDF 渲染工具 / CJK 字体探测")
     ap.add_argument("--svg", help="待渲染 SVG 文件路径")
     ap.add_argument("--png", help="输出 PNG 路径")
     ap.add_argument("--pdf", help="输出 PDF 路径")
+    ap.add_argument("--preview", help="可选轻量预览 PNG 路径（<=108 DPI）")
     ap.add_argument("--dpi", type=int, default=300)
+    ap.add_argument("--preview-dpi", type=int, default=96)
     a = ap.parse_args()
     fam, ffile = detect_cjk()
     res = {"cjk_family": fam, "cjk_file": ffile}
@@ -333,4 +484,8 @@ if __name__ == "__main__":
             res["png"] = {"engine": svg_to_png(a.svg, a.png, a.dpi), "path": a.png, "dpi": a.dpi}
         if a.pdf:
             res["pdf"] = {"engine": svg_to_pdf(a.svg, a.pdf), "path": a.pdf}
+        if a.preview:
+            pv_dpi = min(int(a.preview_dpi or 96), 108)
+            res["preview"] = {"engine": make_preview_png(a.png, a.preview, a.dpi, pv_dpi, fallback_svg=a.svg),
+                              "path": a.preview, "dpi": pv_dpi}
     print(json.dumps(res, ensure_ascii=False))

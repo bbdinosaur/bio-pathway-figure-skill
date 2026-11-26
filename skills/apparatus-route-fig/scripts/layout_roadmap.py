@@ -57,11 +57,11 @@ def build_roadmap(sird):
     plinks = sird.get("phase_links", [])
     n = len(phases)
     pidx = {p["id"]: i for i, p in enumerate(phases)}
-    n_skip = sum(1 for e in plinks if e.get("kind") != "feedback"
+    n_skip = sum(1 for e in plinks if e.get("kind") not in ("feedback", "loop")
                  and pidx.get(e.get("to"), -1) > pidx.get(e.get("from"), -1) + 1)
     skip_pad = (34.0 + 26.0 * min(n_skip, 3)) if n_skip else 0.0
     has_adj_lbl = any(
-        e.get("kind") != "feedback" and pidx.get(e.get("to"), -1) == pidx.get(e.get("from"), -1) + 1
+        e.get("kind") not in ("feedback", "loop") and pidx.get(e.get("to"), -1) == pidx.get(e.get("from"), -1) + 1
         and str(e.get("label") or "").strip()
         for e in plinks
     )

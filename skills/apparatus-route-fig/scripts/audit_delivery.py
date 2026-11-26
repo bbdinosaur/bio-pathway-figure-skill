@@ -15,17 +15,241 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 PLACEHOLDER_PAT = re.compile(r"(<待填|TODO_FILL|PLACEHOLDER|REPLACE_ME)", re.I)
+_TBD_PAT = re.compile(r"(?:\bTBD\b|待定)", re.I)
+_AUTO_CR_PREFIXES = ("Built ", "Plotted ", "Composed ", "Generated ")
 
 
-def _png_size(path):
+def _extract_tbd_items(obj, out_list, seen, limit=12):
+    """从 SIR/chart spec 中提取真实待定参数（TBD/待定），绝不混入内部几何排版告警。"""
+    if not isinstance(obj, dict) or len(out_list) >= limit:
+        return
+
+    def _add(msg):
+        m = str(msg or "").strip()
+        if m and m not in seen and len(out_list) < limit:
+            seen.add(m)
+            out_list.append(m)
+
+    for key in ("subtitle", "note"):
+        val = obj.get(key)
+        if isinstance(val, str) and _TBD_PAT.search(val):
+            _add("参数待定(TBD): %s=%s" % (key, val.strip()[:80]))
+
+    for coll_k in ("nodes", "phases"):
+        for item in (obj.get(coll_k) or []):
+            if not isinstance(item, dict) or len(out_list) >= limit:
+                continue
+            iid = str(item.get("id") or item.get("label") or item.get("title") or coll_k)
+            for fk in ("label", "title", "time", "deliverable", "note"):
+                v = item.get(fk)
+                if isinstance(v, str) and _TBD_PAT.search(v):
+                    _add("参数待定(TBD): %s.%s (%s)" % (iid, fk, v.strip()[:60]))
+            attrs = item.get("attrs")
+            if isinstance(attrs, list):
+                for av in attrs:
+                    s = str(av or "").strip()
+                    if _TBD_PAT.search(s):
+                        _add("参数待定(TBD): %s (%s)" % (iid, s[:60]))
+            elif isinstance(attrs, dict):
+                for ak, av in attrs.items():
+                    s = "%s=%s" % (ak, av)
+                    if _TBD_PAT.search(s):
+                        _add("参数待定(TBD): %s (%s)" % (iid, s[:60]))
+            for tv in (item.get("tasks") or []):
+                s = str(tv or "").strip()
+                if _TBD_PAT.search(s):
+                    _add("参数待定(TBD): %s (%s)" % (iid, s[:60]))
+
+    for lk in (obj.get("links") or []):
+        if not isinstance(lk, dict) or len(out_list) >= limit:
+            continue
+        for fk in ("label", "note"):
+            v = lk.get(fk)
+            if isinstance(v, str) and _TBD_PAT.search(v):
+                _add("参数待定(TBD): %s->%s (%s)" % (lk.get("from", "?"), lk.get("to", "?"), v.strip()[:60]))
+
+
+def collect_scientific_uncertainty(spec=None, data_mapping=None):
+    """仅收集真实科学材料层面的不确定项（显式 uncertainty/conflicts、源表缺失/NA 剔除、TBD 待定参数），
+    严禁将内部版式/几何检查 warns 写入 result.json.uncertainty。"""
+    unc, seen = [], set()
+
+    def _add(item):
+        s = str(item or "").strip()
+        if s and s not in seen:
+            seen.add(s)
+            unc.append(s)
+
+    def _scan_spec(d):
+        if not isinstance(d, dict):
+            return
+        for fk in ("uncertainty", "conflicts"):
+            val = d.get(fk)
+            if isinstance(val, list):
+                for u in val:
+                    _add(u)
+            elif isinstance(val, str) and val.strip():
+                _add(val)
+        _extract_tbd_items(d, unc, seen)
+        for sub_k in ("figures", "panels"):
+            if isinstance(d.get(sub_k), list):
+                for sub in d[sub_k]:
+                    if isinstance(sub, dict):
+                        _scan_spec(sub)
+        if isinstance(d.get("rows"), list):
+            for row in d["rows"]:
+                if isinstance(row, list):
+                    for sub in row:
+                        if isinstance(sub, dict):
+                            _scan_spec(sub)
+
+    _scan_spec(spec)
+
+    for m in (data_mapping or []):
+        if not isinstance(m, dict):
+            continue
+        dm = int(m.get("dropped_missing") or 0)
+        if dm > 0:
+            plbl = str(m.get("panel") or "").strip()
+            ptag = ("Panel %s " % plbl) if (plbl and plbl.lower() != "main") else ""
+            sname = str(m.get("series") or "series")
+            _add("%s%s: 源表剔除 %d 行缺失/NA 数值" % (ptag, sname, dm))
+    return unc
+
+
+def _cr_key(rec):
+    if not isinstance(rec, dict):
+        return None
+    act = str(rec.get("action") or "").strip().lower()
+    tgt = str(rec.get("target") or rec.get("target_id") or rec.get("id") or "").strip()
+    return (act, tgt)
+
+
+def _is_auto_change_record(rec):
+    if not isinstance(rec, dict):
+        return False
+    if rec.get("auto") is True:
+        return True
+    act = str(rec.get("action") or "").strip().lower()
+    if act not in ("generate", "generate_chart", "compose_panels"):
+        return False
+    extra = set(rec.keys()) - {"action", "target", "detail", "auto"}
+    if extra:
+        return False
+    det = str(rec.get("detail") or "").strip()
+    return any(det.startswith(p) for p in _AUTO_CR_PREFIXES)
+
+
+def merge_change_records(old_records, new_records):
+    """按 (action, target) 智能合并 change_records：保留非同目标前序记录及人工撰写的详细科学说明。"""
+    old_list = old_records if isinstance(old_records, list) else []
+    new_list = new_records if isinstance(new_records, list) else []
+    new_keys = {_cr_key(r) for r in new_list if _cr_key(r) is not None}
+    merged = []
+    human_keys = set()
+
+    for rec in old_list:
+        k = _cr_key(rec)
+        if k is None:
+            if rec not in merged:
+                merged.append(rec)
+            continue
+        if k not in new_keys:
+            if rec not in merged:
+                merged.append(rec)
+        elif not _is_auto_change_record(rec):
+            human_keys.add(k)
+            if rec not in merged:
+                merged.append(rec)
+
+    for rec in new_list:
+        k = _cr_key(rec)
+        if k is not None and k in human_keys and _is_auto_change_record(rec):
+            continue
+        if rec not in merged:
+            merged.append(rec)
+    return merged
+
+
+def merge_existing_result(sk, contract, explicit_rf, existing):
+    """非覆盖合并已有 result.json：保留已填 output_contract、自定义顶层键、sources、uncertainty 与 change_records。"""
+    if not isinstance(existing, dict):
+        return sk
+    explicit_rf = explicit_rf if isinstance(explicit_rf, dict) else {}
+    old_oc = existing.get("output_contract") if isinstance(existing.get("output_contract"), dict) else {}
+
+    if sk.get("case_id") in (None, "", "CASE_ID") and existing.get("case_id") not in (None, "", "CASE_ID"):
+        sk["case_id"] = existing["case_id"]
+        if "case_id" in contract and contract["case_id"] in (None, "", "CASE_ID"):
+            contract["case_id"] = existing["case_id"]
+
+    for k, v in list(contract.items()):
+        if k not in explicit_rf and isinstance(v, str) and "<待填" in v:
+            prev = old_oc.get(k) if k in old_oc else existing.get(k)
+            if prev not in (None, "") and not (isinstance(prev, str) and "<待填" in prev):
+                contract[k] = prev
+                sk[k] = prev
+
+    for ok_k, ok_v in old_oc.items():
+        if ok_k not in contract and ok_v not in (None, "") and not (isinstance(ok_v, str) and "<待填" in ok_v):
+            contract[ok_k] = ok_v
+            if ok_k not in sk:
+                sk[ok_k] = ok_v
+
+    for k, v in existing.items():
+        if k not in sk and k not in ("output_contract", "output_contract_fields"):
+            sk[k] = v
+
+    if isinstance(existing.get("sources"), list):
+        for s_item in existing["sources"]:
+            if s_item not in sk["sources"]:
+                sk["sources"].append(s_item)
+
+    if isinstance(existing.get("uncertainty"), list):
+        for u_item in existing["uncertainty"]:
+            if u_item not in sk["uncertainty"]:
+                sk["uncertainty"].append(u_item)
+
+    if isinstance(existing.get("change_records"), list):
+        sk["change_records"] = merge_change_records(existing["change_records"], sk.get("change_records"))
+        if "change_records" in contract:
+            contract["change_records"] = sk["change_records"]
+
+    if existing.get("output_contract_fields"):
+        merged_ocf = list(existing["output_contract_fields"])
+        for f in contract.keys():
+            if f not in merged_ocf:
+                merged_ocf.append(f)
+        sk["output_contract_fields"] = merged_ocf
+    return sk
+
+
+def _png_info(path):
+    """纯标准库读取 PNG 宽高与 pHYs DPI 元数据，返回 (w, h, dpi_x) 或 None。"""
     try:
-        hdr = Path(path).read_bytes()[:24]
-        if len(hdr) == 24 and hdr[:8] == b"\x89PNG\r\n\x1a\n" and hdr[12:16] == b"IHDR":
-            w, h = struct.unpack(">II", hdr[16:24])
-            return int(w), int(h)
+        data = Path(path).read_bytes()
+        if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+            return None
+        w, h = struct.unpack(">II", data[16:24])
+        dpi_x = None
+        pos = 8
+        while pos + 12 <= len(data):
+            clen = struct.unpack(">I", data[pos:pos + 4])[0]
+            ctype = data[pos + 4:pos + 8]
+            cend = pos + 12 + clen
+            if cend > len(data):
+                break
+            if ctype == b"pHYs" and clen == 9:
+                ppu_x, _ppu_y, unit = struct.unpack(">IIb", data[pos + 8:pos + 17])
+                if unit == 1 and ppu_x > 0:
+                    dpi_x = round(ppu_x * 0.0254, 1)
+                break
+            if ctype == b"IDAT":
+                break
+            pos = cend
+        return int(w), int(h), dpi_x
     except Exception:
-        pass
-    return None
+        return None
 
 
 def _iter_strings(obj, prefix=""):
@@ -173,13 +397,19 @@ def audit(out_dir, contract_path=None):
         if f.stat().st_size <= 200:
             errs.append("PNG 文件过小或为空: %s" % rel)
             continue
-        wh = _png_size(f)
-        if not wh:
+        info = _png_info(f)
+        if not info:
             errs.append("PNG 文件头无效或损坏: %s" % rel)
             continue
-        if wh[0] < 120 or wh[1] < 80:
-            warns.append("PNG 像素尺寸过小: %s (%dx%d)" % (rel, wh[0], wh[1]))
-        pngs.append({"file": rel, "width": wh[0], "height": wh[1], "bytes": f.stat().st_size})
+        pw, ph, pdpi = info
+        if pw < 120 or ph < 80:
+            warns.append("PNG 像素尺寸过小: %s (%dx%d)" % (rel, pw, ph))
+        if pdpi is not None and pdpi < 150 and "preview" not in rel.lower():
+            warns.append("正式 PNG 分辨率偏低: %s (%.1f DPI < 150)" % (rel, pdpi))
+        rec_p = {"file": rel, "width": pw, "height": ph, "bytes": f.stat().st_size}
+        if pdpi is not None:
+            rec_p["dpi"] = pdpi
+        pngs.append(rec_p)
     pdfs = [str(f.relative_to(out)) for f in sorted(out.rglob("*.pdf")) if f.stat().st_size > 200]
     if not svgs:
         errs.append("输出目录未找到可编辑 .svg 源文件")

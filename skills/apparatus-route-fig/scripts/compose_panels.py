@@ -28,27 +28,15 @@ XLINKNS = "http://www.w3.org/1999/xlink"
 ET.register_namespace("", SVGNS)
 ET.register_namespace("xlink", XLINKNS)
 
-_UNIT_PX = {"": 1.0, "px": 1.0, "pt": 96.0 / 72.0, "mm": 96.0 / 25.4, "cm": 96.0 / 2.54, "in": 96.0}
-
-
 def _parse_len_px(val, fallback):
-    if val is None:
-        return float(fallback)
-    m = re.match(r"^\s*([+-]?\d+(?:\.\d+)?)\s*([a-z%]*)\s*$", str(val), re.I)
-    if not m or m.group(2) == "%":
-        return float(fallback)
-    return float(m.group(1)) * _UNIT_PX.get(m.group(2).lower(), 1.0)
+    v = rendermod._parse_len_str(val)
+    return float(v) if v is not None else float(fallback)
 
 
 def _svg_viewbox(root):
-    vb = (root.get("viewBox") or "").replace(",", " ").split()
-    if len(vb) == 4:
-        try:
-            vx, vy, vw, vh = [float(x) for x in vb]
-            if vw > 1 and vh > 1:
-                return vx, vy, vw, vh
-        except Exception:
-            pass
+    vb = rendermod._parse_viewbox_str(root.get("viewBox"))
+    if vb is not None and vb[2] > 1 and vb[3] > 1:
+        return vb
     w = _parse_len_px(root.get("width"), 800.0)
     h = _parse_len_px(root.get("height"), 600.0)
     return 0.0, 0.0, max(w, 10.0), max(h, 10.0)
@@ -472,8 +460,9 @@ def _assemble_and_export(spec, loaded_rows, out, name, ff, fam, footer, dpi, pre
         pv_p.parent.mkdir(parents=True, exist_ok=True)
         pv_dpi = min(int(preview_dpi or 96), 108)
         try:
+            src_png = png_path if "error" not in rmeta.get("png", {}) else None
             rmeta["preview"] = {"path": str(pv_p), "dpi": pv_dpi,
-                                "engine": rendermod.svg_to_png(svg_path, pv_p, pv_dpi)}
+                                "engine": rendermod.make_preview_png(src_png, pv_p, dpi, pv_dpi, fallback_svg=svg_path)}
         except Exception as e:
             rmeta["preview"] = {"error": str(e)}
 
@@ -535,12 +524,15 @@ def _write_result_skel(a, rep, merged_prov, spec=None):
     dst_res = getattr(a, "result_out", None) or getattr(a, "result_skel", None)
     if not dst_res:
         return None
+    import audit_delivery as auditmod
     spec = spec if isinstance(spec, dict) else {}
     contract = {}
+    cid_eff = getattr(a, "case_id", None)
     if getattr(a, "contract", None) and Path(a.contract).exists():
         try:
-            import audit_delivery as auditmod
             cj = json.loads(Path(a.contract).read_text(encoding="utf-8"))
+            if not cid_eff and cj.get("case_id"):
+                cid_eff = str(cj["case_id"])
             for k in auditmod._extract_contract_keys(cj):
                 kl = k.strip().lower()
                 if kl in ("editable_svg", "svg", "svg_file", "svg_path", "output_svg", "editable_source", "editable_source_path") or kl.endswith("_svg") or kl.endswith("_svg_path"):
@@ -552,7 +544,7 @@ def _write_result_skel(a, rep, merged_prov, spec=None):
                 elif kl in ("status", "run_status"):
                     contract[k] = "ok"
                 elif kl in ("case_id", "id"):
-                    contract[k] = a.case_id or "CASE_ID"
+                    contract[k] = cid_eff or "CASE_ID"
                 elif kl in ("provenance_file", "provenance_path", "provenance_json"):
                     contract[k] = "provenance.json"
                 elif kl in ("checks_report", "check_report", "export_check", "export_checks"):
@@ -566,8 +558,9 @@ def _write_result_skel(a, rep, merged_prov, spec=None):
         loc = str(row.get("loc") or "").strip()
         if loc and loc not in src_locs:
             src_locs.append(loc)
+    unc = auditmod.collect_scientific_uncertainty(spec, data_mapping=merged_prov)
     sk = {
-        "case_id": a.case_id or "CASE_ID",
+        "case_id": cid_eff or "CASE_ID",
         "status": "ok" if rep.get("ok") else "partial",
         "deliverables": {
             "editable_source": {"path": a.name + ".svg", "format": "svg", "panels": [p["label"] for p in rep.get("panels") or []]},
@@ -582,7 +575,7 @@ def _write_result_skel(a, rep, merged_prov, spec=None):
         "render": rep.get("render", {}),
         "output_contract": contract,
         "output_contract_fields": list(contract.keys()),
-        "uncertainty": list(rep.get("warns") or []),
+        "uncertainty": unc,
         "change_records": [{"action": "compose_panels", "target": a.name + ".svg",
                             "detail": "Composed %d editable SVG panels into a unified vector figure" % len(rep.get("panels") or [])}],
     }
@@ -599,13 +592,7 @@ def _write_result_skel(a, rep, merged_prov, spec=None):
         try:
             old_res = json.loads(p_out.read_text(encoding="utf-8"))
             if isinstance(old_res, dict):
-                old_oc = old_res.get("output_contract") if isinstance(old_res.get("output_contract"), dict) else {}
-                for k, v in list(contract.items()):
-                    if k not in explicit_rf and isinstance(v, str) and "<待填" in v:
-                        prev = old_oc.get(k) if k in old_oc else old_res.get(k)
-                        if prev not in (None, "") and not (isinstance(prev, str) and "<待填" in prev):
-                            contract[k] = prev
-                            sk[k] = prev
+                auditmod.merge_existing_result(sk, contract, explicit_rf, old_res)
         except Exception:
             pass
     unfilled = [k for k, v in contract.items() if isinstance(v, str) and "<待填" in v]

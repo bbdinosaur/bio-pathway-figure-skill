@@ -36,6 +36,31 @@ def _col_idx(cell_ref):
     return idx - 1
 
 
+def _resolve_sheet(snames, sheet):
+    """严格解析 XLSX 工作表名：精确匹配 → 去空白大小写匹配 → 字母数字归一化 → 整数索引；不存在时明确报错（绝不静默错读 Sheet1）。"""
+    if not snames:
+        return None
+    if sheet is None or str(sheet).strip() == "":
+        return snames[0]
+    w = str(sheet)
+    if w in snames:
+        return w
+    ws = w.strip().lower()
+    ci = [s for s in snames if s.strip().lower() == ws]
+    if len(ci) == 1:
+        return ci[0]
+    wn = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", ws)
+    if wn:
+        nm = [s for s in snames if re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", s.strip().lower()) == wn]
+        if len(nm) == 1:
+            return nm[0]
+    if ws.isdigit():
+        idx = int(ws)
+        if 0 <= idx < len(snames):
+            return snames[idx]
+    raise ValueError("工作表 %r 不存在，可用工作表: %s" % (sheet, snames))
+
+
 def _read_xlsx_stdlib(path, sheet=None, skip_rows=0):
     """纯标准库读取 .xlsx（支持 sharedStrings、inlineStr、多 sheet）。"""
     with zipfile.ZipFile(path, "r") as zf:
@@ -70,12 +95,9 @@ def _read_xlsx_stdlib(path, sheet=None, skip_rows=0):
         if not sheets:
             ws = sorted(n for n in names if n.startswith("xl/worksheets/sheet") and n.endswith(".xml"))
             sheets = [("Sheet%d" % (i + 1), w) for i, w in enumerate(ws)]
-        chosen_name, chosen_xml = sheets[0]
-        if sheet is not None:
-            for idx, (sn, sx) in enumerate(sheets):
-                if sn == str(sheet) or str(idx) == str(sheet):
-                    chosen_name, chosen_xml = sn, sx
-                    break
+        snames = [s[0] for s in sheets]
+        chosen_name = _resolve_sheet(snames, sheet)
+        chosen_xml = next((sx for sn, sx in sheets if sn == chosen_name), sheets[0][1])
         raw_rows = []
         if chosen_xml in names:
             ws_root = ET.fromstring(zf.read(chosen_xml))
@@ -307,18 +329,20 @@ def load_table(path, sheet=None, skip_rows=0):
                 if isinstance(v, list) and v and isinstance(v[0], dict):
                     return {"columns": list(v[0].keys()), "rows": v, "sheets": [], "sheet": None, "sha256": sha, "banner": None, "renamed_headers": [], "footnotes": []}
         raise ValueError("JSON 顶层不是记录数组")
-    if ext == ".xlsx":
+    if ext in (".xlsx", ".xlsm"):
         try:
             import openpyxl
             wb = openpyxl.load_workbook(str(p), data_only=True, read_only=True)
             snames = list(wb.sheetnames)
-            sname = str(sheet) if (sheet and str(sheet) in snames) else snames[0]
+            sname = _resolve_sheet(snames, sheet)
             ws = wb[sname]
             raw = [[("" if v is None else v) for v in row] for row in ws.iter_rows(values_only=True)]
             wb.close()
             cols, rows, banner, renamed, footnotes = _rows_to_records(raw, skip_rows=skip_rows)
             return {"columns": cols, "rows": rows, "sheets": snames, "sheet": sname, "sha256": sha,
                     "banner": banner, "renamed_headers": renamed, "footnotes": footnotes}
+        except ValueError:
+            raise
         except Exception:
             (cols, rows, banner, renamed, footnotes), snames, sname = _read_xlsx_stdlib(p, sheet=sheet, skip_rows=skip_rows)
             return {"columns": cols, "rows": rows, "sheets": snames, "sheet": sname, "sha256": sha,
@@ -367,6 +391,8 @@ def summarize(tbl, head=5):
                   "median": round(med, 6), "sd": round(sd, 6)}
             if pct_cnt:
                 st["percent_stripped"] = pct_cnt
+            if min(nums) >= 0.0 and max(nums) <= 1.0 and min(nums) < 0.05 and re.search(r"(^p$|p_?val|padj|fdr|q_?val)", str(c), re.I):
+                st["hint"] = "raw_p_value_col (chart_kit volcano 可直连 p_col 自动 -log10)"
             col_stats[c] = st
         else:
             uniq = list(dict.fromkeys(str(r.get(c, "")).strip() for r in rows if not is_missing(r.get(c, ""))))

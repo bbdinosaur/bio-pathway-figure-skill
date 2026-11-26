@@ -56,6 +56,7 @@ def route_edges(sird, g):
         is_wf = bb0 > ba0
         is_wb = bb0 < ba0
         is_sb = (ba0 == bb0) and ((cb0 < ca0) or (k0 == "loop" and cb0 <= ca0))
+        is_sb_top = is_sb and (not _has_node_above(geom, e["from"])) and (not _has_node_above(geom, e["to"])) and (_has_node_below(geom, e["from"]) or _has_node_below(geom, e["to"]))
         is_sc = (ca0 == cb0) and (ba0 == bb0) and (k0 != "loop")
         is_adj = (cb0 == ca0 + 1) and (ba0 == bb0) and not is_sb
         is_top_skip = not is_wf and not is_wb and not is_sb and not is_sc and not is_adj
@@ -64,10 +65,10 @@ def route_edges(sird, g):
             is_wf
             or is_adj
             or (is_wb and (b0["bcol"] == 0 or _has_node_below(geom, e["to"])))
-            or (is_sb and _has_node_below(geom, e["to"]))
+            or (is_sb and not is_sb_top and _has_node_below(geom, e["to"]))
             or (is_top_skip and _has_node_above(geom, e["to"]))
         )
-        if (is_top_skip and _has_node_above(geom, e["to"])) or (is_sb and _has_node_below(geom, e["to"])) or (is_wb and _has_node_below(geom, e["to"])):
+        if (is_top_skip and _has_node_above(geom, e["to"])) or (is_sb and not is_sb_top and _has_node_below(geom, e["to"])) or (is_wb and _has_node_below(geom, e["to"])):
             col_has_drop.add((bb0, cb0))
         if enters_left:
             # 回流/反馈边放最下方，顶跨列放最上方，其余按源节点 y 排序，尽量减少交叉
@@ -82,7 +83,7 @@ def route_edges(sird, g):
             is_adj
             or is_wf
             or (is_wb and _has_node_below(geom, e["from"]))
-            or (is_sb and _has_node_below(geom, e["from"]))
+            or (is_sb and not is_sb_top and _has_node_below(geom, e["from"]))
             or (is_top_skip and _has_node_above(geom, e["from"]))
         )
         if exits_right:
@@ -202,27 +203,40 @@ def route_edges(sird, g):
             lxy = (lx_mid, bus_y - 7.0)
 
         elif same_band_back:
-            k = per_bus.get(("sb", ba), 0)
-            per_bus[("sb", ba)] = k + 1
-            bus_y = bands[ba]["y_base"] + bands[ba]["h"] + bands[ba].get("group_bot_pad", 0.0) + 22.0 + (k % 5) * 18.0
-            bus_ys.append(bus_y)
-            if _has_node_below(geom, e["from"]):
-                sx = a["x"] + a["w"] + 16.0
-                p_start = [(a["x"] + a["w"], uyc), (sx, uyc), (sx, bus_y)]
-                x_s = sx
+            use_top_loop = (not _has_node_above(geom, e["from"])) and (not _has_node_above(geom, e["to"])) and (
+                _has_node_below(geom, e["from"]) or _has_node_below(geom, e["to"])
+            )
+            if use_top_loop:
+                k = per_top.get(ba, 0)
+                per_top[ba] = k + 1
+                ty = bands[ba]["y_base"] - bands[ba].get("group_top_pad", 0.0) - 18.0 - (k % 3) * 16.0
+                sx, tx = a["cx"], b["cx"]
+                if abs(sx - tx) < 1.0:
+                    sx, tx = a["cx"] + 14.0, b["cx"] - 14.0
+                pts = [(sx, a["y"]), (sx, ty), (tx, ty), (tx, b["y"])]
+                lxy = ((sx + tx) / 2.0, ty - 7.0)
             else:
-                p_start = [(a["cx"], a["y"] + a["h"]), (a["cx"], bus_y)]
-                x_s = a["cx"]
-            if _has_node_below(geom, e["to"]):
-                pad_g = 22.0 if b.get("in_group_box") else 16.0
-                tx = b["x"] - pad_g - 8.0 * (k % 2)
-                p_end = [(tx, bus_y), (tx, vyc), (b["x"], vyc)]
-                x_t = tx
-            else:
-                p_end = [(b["cx"], bus_y), (b["cx"], b["y"] + b["h"])]
-                x_t = b["cx"]
-            pts = p_start + p_end
-            lxy = ((x_s + x_t) / 2.0, bus_y - 7.0)
+                k = per_bus.get(("sb", ba), 0)
+                per_bus[("sb", ba)] = k + 1
+                bus_y = bands[ba]["y_base"] + bands[ba]["h"] + bands[ba].get("group_bot_pad", 0.0) + 22.0 + (k % 5) * 18.0
+                bus_ys.append(bus_y)
+                if _has_node_below(geom, e["from"]):
+                    sx = a["x"] + a["w"] + 16.0
+                    p_start = [(a["x"] + a["w"], uyc), (sx, uyc), (sx, bus_y)]
+                    x_s = sx
+                else:
+                    p_start = [(a["cx"], a["y"] + a["h"]), (a["cx"], bus_y)]
+                    x_s = a["cx"]
+                if _has_node_below(geom, e["to"]):
+                    pad_g = 22.0 if b.get("in_group_box") else 16.0
+                    tx = b["x"] - pad_g - 8.0 * (k % 2)
+                    p_end = [(tx, bus_y), (tx, vyc), (b["x"], vyc)]
+                    x_t = tx
+                else:
+                    p_end = [(b["cx"], bus_y), (b["cx"], b["y"] + b["h"])]
+                    x_t = b["cx"]
+                pts = p_start + p_end
+                lxy = ((x_s + x_t) / 2.0, bus_y - 7.0)
 
         elif same_col:
             k = per_same.get(ca, 0)

@@ -27,22 +27,26 @@
 - 字体链：Noto Sans CJK SC → Noto Sans SC → Source Han Sans SC → WenQuanYi → sans-serif。
 - 检查命令：`checks_report.json` errors=0；人工核对 PNG：无重叠/无越界/无截断。
 
-## 4. 数据图表（matplotlib 模板）
+## 4. 定制数据图表（publication-grade matplotlib 模板）
 
 ```python
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-plt.rcParams.update({"font.sans-serif": ["Noto Sans CJK SC", "Noto Sans SC", "sans-serif"],
-                     "axes.unicode_minus": False, "font.size": 11,
-                     "axes.grid": True, "grid.alpha": .3, "figure.dpi": 300,
-                     "svg.fonttype": "none", "pdf.fonttype": 42})
-PAL = ["#2B6CB0", "#C05621", "#2F855A", "#6B46C1", "#B83280"]
-fig, ax = plt.subplots(figsize=(6.0, 3.6))          # 单栏6in宽
-for i,(name,y) in enumerate(series.items()):
-    ax.plot(x, y, "-o", ms=3.5, lw=1.4, color=PAL[i], label=name)  # 数据必须来自材料
-ax.set_xlabel("时间 (min)"); ax.set_ylabel("降解率 (%)")   # 单位不可省
+plt.rcParams.update({
+    "font.sans-serif": ["Noto Sans CJK SC", "Noto Sans SC", "DejaVu Sans", "sans-serif"],
+    "axes.unicode_minus": False, "font.size": 10.5, "axes.spines.top": False, "axes.spines.right": False,
+    "axes.grid": True, "grid.alpha": 0.25, "figure.dpi": 300,
+    "svg.fonttype": "none", "pdf.fonttype": 42,
+})
+PAL = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9"]  # Okabe-Ito
+fig, ax = plt.subplots(figsize=(6.4, 4.0), constrained_layout=True)       # 多面板用 GridSpec
+for i, (name, y) in enumerate(series.items()):
+    ax.plot(x, y, "-o", ms=4.0, lw=1.6, color=PAL[i % len(PAL)], label=name)  # 必须直读源表原值
+ax.set_xlabel("Time (min)"); ax.set_ylabel("Response (%)")                 # 单位与 n 值不可省
 ax.legend(frameon=False)
-fig.tight_layout()
-fig.savefig("chart.png", dpi=300); fig.savefig("chart.pdf"); fig.savefig("chart.svg")
+fig.savefig("/app/output/chart.svg", facecolor="white")
+fig.savefig("/app/output/chart.pdf", facecolor="white")
+fig.savefig("/app/output/chart.png", dpi=300, facecolor="white")
+fig.savefig("/app/work/preview.png", dpi=96, facecolor="white")           # 轻量视觉自检 (<=108 DPI)
 ```
-散点/柱状同理；多子图用 `constrained_layout=True`；每条曲线在 result.json 记录数据出处。
+定制图同样须在 `/app/output/provenance.json` 与 `/app/output/result.json` 中记录源表路径、列名、样本量 `n` 与统计口径。
