@@ -6,6 +6,7 @@
 - Supported panel topologies:
   - **`hero-2x2`** (auto-selected for 4 panels with mechanism/chart/row unless `panel_weights` is given): Top row `31% / 69%` (A Question + B Hero Mechanism/Method), Bottom row `64% / 36%` (C Hero Quantitative Results + D Conclusion/KPI); row height `48% / 52%`.
   - **`1+3`** (journal Figure 3 classic): Full-width top hero schematic/overview (`46%`) + 3 equal or custom-weighted (`bottom_weights`) bottom quantitative panels (`54%`).
+  - **`1+4` / `2+3` / `3+2` / `2x3`**: 5- and 6-panel journal multi-panel topologies (with automatic graceful reconciliation if panel count differs from named layout).
   - **`2x2`**: Equal 2×2 quadrants (`50% / 50%`).
   - **`hero-1+2`** / **`hero-2+1`**: 3-panel asymmetric layouts (1 wide hero + 2 companion panels).
   - **`left-hero`**: Tall left hero panel (`44%`, customizable via `col_weights`) + 2–3 stacked right panels (`right_weights`).
@@ -14,7 +15,7 @@
   - **`row`**: Single horizontal strip (1–8 panels, default equal or custom `panel_weights`).
 - Themes:
   - **`card`** (default Graphical Abstract): rounded card `rx=11`, subtle role tint, `5.5 px` accent spine, colored letter chip `A–H`, 4-color header rule.
-  - **`journal`** (Nature/Cell multi-panel figure): pure white background, clean hairline `rx=4` framing (`#E2E8F0`), bold dark panel letter (`a`/`b`/`c`/`d`), single crisp publication header rule (`#0F172A`).
+  - **`journal`** (Nature/Cell multi-panel figure): pure white background, clean hairline `rx=4` framing (`#E2E8F0`, or optional `border: false` frameless style), bold dark panel letter (`a`/`b`/`c`/`d`), single crisp publication header rule (`#0F172A`).
 
 ## Typography & autofit
 - Font stack: `DejaVu Sans, Arial, Helvetica, Noto Sans CJK SC, Noto Serif CJK SC, WenQuanYi Zen Hei, sans-serif`.

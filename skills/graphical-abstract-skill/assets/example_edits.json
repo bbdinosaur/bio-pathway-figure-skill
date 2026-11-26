@@ -8,6 +8,6 @@
     "panel_badges": [{"x": 20, "y": 30, "label": "a"}],
     "arrows": [{"x1": 280, "y1": 160, "x2": 390, "y2": 160, "kind": "inhibit", "label": "Blocks target"}],
     "scalebar": {"x": 40, "y": 460, "px": 90, "length": "50 um"},
-    "footer": {"sources": "Synthetic source SVG (example patch)", "version": "GA-Skill v14 · Example"}
+    "footer": {"sources": "Synthetic source SVG (example patch)", "version": "GA-Skill v19.1 · Example"}
   }
 ]

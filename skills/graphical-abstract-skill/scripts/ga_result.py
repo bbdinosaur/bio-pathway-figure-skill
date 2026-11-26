@@ -64,8 +64,9 @@ def _extract_inventory(brief_path: Path) -> dict | None:
     panels_inv, entities, relations, encodings = [], [], [], []
 
     _CHART_TYPES = {
-        "chart", "bar", "hbar", "stacked", "line", "dot", "box", "scatter",
-        "volcano", "paired", "slope", "before_after", "heatmap", "survival", "km",
+        "chart", "bar", "hbar", "stacked", "line", "dot", "strip", "stripplot", "beeswarm", "dot_mean", "swarm",
+        "box", "scatter", "volcano", "paired", "slope", "before_after", "heatmap", "survival",
+        "km", "forest", "forest_plot",
     }
 
     def _walk(pid, blocks):
@@ -99,11 +100,15 @@ def _extract_inventory(brief_path: Path) -> dict | None:
                 kind = bl.get("kind", "bar" if bt == "chart" else bt)
                 ch_map = {
                     "bar": "bar_height", "hbar": "bar_length", "stacked": "stacked_segment_height",
-                    "line": "y_position+slope", "dot": "y_position", "box": "box_whisker_quartiles+replicates",
+                    "line": "y_position+slope", "dot": "y_position",
+                    "strip": "individual_replicates+mean_sd_bar", "beeswarm": "individual_replicates+mean_sd_bar",
+                    "box": "box_whisker_quartiles+replicates",
                     "paired": "paired_before_after_trajectory", "slope": "paired_before_after_trajectory",
                     "before_after": "paired_before_after_trajectory",
                     "scatter": "x_y_coordinates", "volcano": "log2FC_x_neglog10p_y_threshold_color",
                     "survival": "kaplan_meier_step_survival", "km": "kaplan_meier_step_survival",
+                    "forest": "effect_point_estimate+95pct_CI_whisker",
+                    "forest_plot": "effect_point_estimate+95pct_CI_whisker",
                     "heatmap": "sequential_or_diverging_color_ramp",
                 }
                 series = bl.get("series", [])
@@ -163,8 +168,9 @@ def _auto_provenance(brief_path: Path) -> tuple[dict, dict]:
         smap["figure_sources"] = root_src
 
     _CHART_TYPES = {
-        "chart", "bar", "hbar", "stacked", "line", "dot", "box", "scatter",
-        "volcano", "paired", "slope", "before_after", "heatmap", "survival", "km",
+        "chart", "bar", "hbar", "stacked", "line", "dot", "strip", "stripplot", "beeswarm", "dot_mean", "swarm",
+        "box", "scatter", "volcano", "paired", "slope", "before_after", "heatmap", "survival",
+        "km", "forest", "forest_plot",
     }
 
     def _walk(pid, blocks, p_src):
@@ -349,8 +355,11 @@ def build_result(case_path: Path, out_path: Path, outdir: Path | None = None,
         if isinstance(ck_dict.get("ga_check"), dict) and ck_dict["ga_check"].get("pass"):
             auto_ok.append("geometry_bounds_overlap_font_floor")
         if isinstance(ck_dict.get("export_check"), dict):
-            if ck_dict["export_check"].get("png", {}).get("non_blank"):
+            png_ec = ck_dict["export_check"].get("png", {})
+            if png_ec.get("non_blank"):
                 auto_ok.append("png_non_blank_1to1")
+            if png_ec.get("dpi_ok") and png_ec.get("edge_clip_px", 0) == 0:
+                auto_ok.append("png_96dpi_zero_edge_clip")
             if ck_dict["export_check"].get("pdf", {}).get("searchable_text"):
                 auto_ok.append("pdf_vector_searchable_text")
         if isinstance(ck_dict.get("color_audit"), dict) and ck_dict["color_audit"].get("deuteranopia_pass"):
@@ -388,29 +397,46 @@ def build_result(case_path: Path, out_path: Path, outdir: Path | None = None,
     if inv:
         result["scientific_inventory"] = inv
 
+    def _auto_caption():
+        if rep.get("notes"):
+            return rep["notes"]
+        if bp_use.exists():
+            try:
+                br_t = json.loads(bp_use.read_text(encoding="utf-8"))
+                ttl = str(br_t.get("title", "")).strip()
+                sub = str(br_t.get("subtitle", "")).strip()
+                p_bits = []
+                for pi, p in enumerate(br_t.get("panels") or []):
+                    bdg = str(p.get("badge") or chr(97 + pi)).strip()
+                    pt = str(p.get("title", "")).strip()
+                    if pt:
+                        p_bits.append(f"({bdg}) {pt}")
+                parts = [x for x in (ttl, sub) if x]
+                if p_bits:
+                    parts.append("; ".join(p_bits))
+                if br_t.get("sources"):
+                    parts.append(f"Sources: {br_t['sources']}")
+                return ". ".join(parts) if parts else None
+            except Exception:
+                pass
+        if isinstance(ck_dict, dict) and isinstance(ck_dict.get("source_preservation"), dict):
+            sp = ck_dict["source_preservation"]
+            return (f"Source-preserving surgical edit of {sp.get('source_svg', 'source SVG')} "
+                    f"({sp.get('n_changes', 0)} changes; untouched_layers_preserved={sp.get('untouched_layers_preserved')}).")
+        return None
+
     def autofill(f):
         fl = f.lower()
-        if "png" in fl and png_rel:
-            return png_rel
-        if "pdf" in fl and pdf_rel:
-            return pdf_rel
-        if any(k in fl for k in ("svg", "figure", "editable", "source_file", "main")) \
-                and not any(x in fl for x in ("source_map", "source_files", "provenance")) and main_rel:
-            return main_rel
+        # 1. Non-file metadata/text/structured fields first (prevents 'figure_caption' matching 'figure' -> .svg)
+        if any(k in fl for k in ("caption", "summary", "takeaway", "abstract", "description", "legend_text", "notes")):
+            return _auto_caption()
+        if "preserv" in fl and isinstance(result.get("checks"), dict) and result["checks"].get("source_preservation"):
+            return result["checks"]["source_preservation"]
         if any(k in fl for k in ("export_check", "export_report", "audit", "check", "verification")):
             return result["checks"]
-        if any(k in fl for k in ("export", "raster", "preview", "deliverable")):
-            d = {}
-            if main_rel:
-                d["svg"] = main_rel
-            if png_rel:
-                d["png"] = png_rel
-            if pdf_rel:
-                d["pdf"] = pdf_rel
-            return d or None
         if any(k in fl for k in ("data_map", "encoding", "legend")):
-            return result["data_mapping"]
-        if any(k in fl for k in ("provenance", "evidence", "source")):
+            return result["data_mapping"] or _auto_caption()
+        if any(k in fl for k in ("source_map", "provenance", "evidence")):
             return result["source_map"]
         if any(k in fl for k in ("inventory", "entit", "relation", "panel_map", "claim")):
             return result.get("scientific_inventory") or result["source_map"]
@@ -424,17 +450,25 @@ def build_result(case_path: Path, out_path: Path, outdir: Path | None = None,
             return result["uncertainty"]
         if any(k in fl for k in ("limit", "partial")):
             return result["limits"]
-        if any(k in fl for k in ("summary", "takeaway", "abstract", "caption", "description")):
-            if rep.get("notes"):
-                return rep["notes"]
-            if bp_use.exists():
-                try:
-                    br_t = json.loads(bp_use.read_text(encoding="utf-8"))
-                    ttl = str(br_t.get("title", "")).strip()
-                    sub = str(br_t.get("subtitle", "")).strip()
-                    return f"{ttl} — {sub}" if (ttl and sub) else (ttl or None)
-                except Exception:
-                    pass
+        # 2. Specific export artifact formats (PNG/PDF before SVG/figure)
+        if "png" in fl and png_rel:
+            return png_rel
+        if "pdf" in fl and pdf_rel:
+            return pdf_rel
+        if any(k in fl for k in ("svg", "figure", "editable", "source_file", "main")) \
+                and not any(x in fl for x in ("source_map", "source_files", "provenance")) and main_rel:
+            return main_rel
+        if any(k in fl for k in ("export", "raster", "preview", "deliverable")):
+            d = {}
+            if main_rel:
+                d["svg"] = main_rel
+            if png_rel:
+                d["png"] = png_rel
+            if pdf_rel:
+                d["pdf"] = pdf_rel
+            return d or None
+        if "source" in fl:
+            return result["source_map"]
         return None
 
     missing = []

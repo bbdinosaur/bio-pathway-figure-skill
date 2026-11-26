@@ -306,24 +306,26 @@ def _mech_block(b, x, y, w, h, fs, accent, diag=None):
             sizes = {}
             col_ws = {}
             single_row_tall = (uh > 165.0 and all(len(groups[k]) == 1 for k in lv_keys))
+            spacious_hero = (uw > 650.0 and uh > 140.0 and max_per_lv <= 2)
             for k in lv_keys:
                 cw = 0.0
                 for nd in groups[k]:
                     nid = nd.get("id", "")
-                    ico_w = 24.0 if nd.get("icon") else 0.0
+                    ico_w = 28.0 if (nd.get("icon") and spacious_hero) else (24.0 if nd.get("icon") else 0.0)
                     lbl = str(nd.get("label", nid))
                     sub = str(nd.get("sub", "")).strip()
                     req_w = float(nd.get("w", 0))
                     # Aim for natural width covering BOTH label and subtitle, capped by max_cw
                     sub_w = text_width(sub, sfs) if sub else 0.0
-                    wide_bonus = 24.0 if (uw > 620.0 and n_lv <= 4) else 0.0
-                    nat_w = min(max_cw, max(req_w or 0, min(255.0, max(text_width(lbl, mfs), sub_w) + 32 + ico_w + wide_bonus)))
-                    nw = max(84.0, min(max_cw, nat_w))
-                    lns = wrap_text(lbl, mfs, nw - 16 - ico_w)
-                    slns = wrap_text(sub, sfs, nw - 16 - ico_w) if sub else []
-                    min_nh = 56.0 if single_row_tall else (36.0 if ico_w else 30.0)
+                    wide_bonus = 34.0 if (spacious_hero and n_lv <= 4) else (24.0 if (uw > 620.0 and n_lv <= 4) else 0.0)
+                    nat_cap = 290.0 if spacious_hero else 255.0
+                    nat_w = min(max_cw, max(req_w or 0, min(nat_cap, max(text_width(lbl, mfs), sub_w) + 34 + ico_w + wide_bonus)))
+                    nw = max(92.0 if spacious_hero else 84.0, min(max_cw, nat_w))
+                    lns = wrap_text(lbl, mfs, nw - 18 - ico_w)
+                    slns = wrap_text(sub, sfs, nw - 18 - ico_w) if sub else []
+                    min_nh = 62.0 if single_row_tall else (50.0 if spacious_hero else (36.0 if ico_w else 30.0))
                     nh = max(min_nh,
-                             len(lns) * mfs * 1.26 + len(slns) * sfs * 1.2 + (20 if single_row_tall else 14))
+                             len(lns) * mfs * 1.26 + len(slns) * sfs * 1.2 + (22 if single_row_tall else (18 if spacious_hero else 14)))
                     sizes[nid] = (lns, slns, nw, nh)
                     cw = max(cw, nw)
                 col_ws[k] = cw
@@ -519,18 +521,61 @@ def _mech_block(b, x, y, w, h, fs, accent, diag=None):
                                      sx_st + sw_st + sgap - 1.5, sy_st + 10.0,
                                      "#94A3B8", 1.3, 4.8))
 
-    # 1. Render compartment zones FIRST (behind nodes & edges)
+    # 1. Compute compartment zone boxes & separate adjacent non-nested overlaps cleanly
     zone_vborders = []  # [(bx, by0, by1)] vertical compartment walls to keep edge labels off
     tall_single = (orient == "LR" and uh > 165.0 and all(len(groups[k]) == 1 for k in lv_keys)) if not all_explicit else False
-    for zi, zn in enumerate(zones):
+    zone_specs = []
+    zone_min_y = y + (34.0 if stages else 10.0)
+    for zn in zones:
         mids = [nid for nid in zn.get("nodes", []) if nid in pos]
         if not mids:
             continue
         zx0 = max(x + 2, min(pos[m][0] for m in mids) - 10)
-        zone_min_y = y + (32.0 if stages else 10.0)
         zy0 = max(zone_min_y, min(pos[m][1] for m in mids) - (28 if tall_single else 24))
         zx1 = min(x + w - 2, max(pos[m][0] + pos[m][2] for m in mids) + 10)
         zy1 = min(y + h - leg_h - 4, max(pos[m][1] + pos[m][3] for m in mids) + (16 if tall_single else 10))
+        zone_specs.append([zn, set(mids), zx0, zy0, zx1, zy1])
+
+    # Pairwise de-overlap for disjoint adjacent compartments (prevents border clash on tight columns)
+    for zi in range(len(zone_specs)):
+        for zj in range(zi + 1, len(zone_specs)):
+            if zone_specs[zi][1] & zone_specs[zj][1]:
+                continue  # intentionally nested/shared nodes
+            ax0, ay0, ax1, ay1 = zone_specs[zi][2:]
+            bx0, by0, bx1, by1 = zone_specs[zj][2:]
+            ox = min(ax1, bx1) - max(ax0, bx0)
+            oy = min(ay1, by1) - max(ay0, by0)
+            if ox > -2.0 and oy > -2.0:
+                if ox <= oy:
+                    if (ax0 + ax1) <= (bx0 + bx1):
+                        mid = (ax1 + bx0) / 2.0
+                        zone_specs[zi][4] = min(ax1, mid - 2.0)
+                        zone_specs[zj][2] = max(bx0, mid + 2.0)
+                    else:
+                        mid = (bx1 + ax0) / 2.0
+                        zone_specs[zj][4] = min(bx1, mid - 2.0)
+                        zone_specs[zi][2] = max(ax0, mid + 2.0)
+                else:
+                    if (ay0 + ay1) <= (by0 + by1):
+                        mid = (ay1 + by0) / 2.0
+                        zone_specs[zi][5] = min(ay1, mid - 2.0)
+                        zone_specs[zj][3] = max(by0, mid + 2.0)
+                    else:
+                        mid = (by1 + ay0) / 2.0
+                        zone_specs[zj][5] = min(by1, mid - 2.0)
+                        zone_specs[zi][3] = max(ay0, mid + 2.0)
+
+    # Pre-collect straight edge segments so zone label pills avoid sitting directly on arrows
+    edge_segs = []
+    for ed in edges:
+        ea, eb = ed.get("from"), ed.get("to")
+        if ea in pos and eb in pos and not _needs_curve(ea, eb):
+            ax0, ay0, aw0, ah0 = pos[ea]
+            bx0, by0, bw0, bh0 = pos[eb]
+            edge_segs.append((ax0 + aw0 / 2.0, ay0 + ah0 / 2.0, bx0 + bw0 / 2.0, by0 + bh0 / 2.0))
+
+    zone_pill_svgs = []
+    for zn, _mset, zx0, zy0, zx1, zy1 in zone_specs:
         zone_vborders.append((zx0, zy0, zy1))
         zone_vborders.append((zx1, zy0, zy1))
         zcol = zn.get("color", "#E2E8F0")
@@ -582,13 +627,51 @@ def _mech_block(b, x, y, w, h, fs, accent, diag=None):
         if zlab_raw:
             zmax = max(36.0, zw_box - 22)
             zw = min(zmax, text_width(zlab_raw, 10.5) * 1.07)
-            # Crisp pill badge sitting cleanly on the top edge (zero double-border clash)
-            px_b, py_b = zx0 + 10, max(y + 1, zy0 - 7.5)
-            out.append(rrect(px_b - 5, py_b, zw + 11, 16.5, rx=4,
-                             fill="#FFFFFF", stroke=zstroke, sw=0.85,
-                             extra='data-kind="label-bg"'))
-            out.append(text_fit(px_b, py_b + 12.0, zlab_raw,
-                                zmax, 10.5, INK2, weight="bold"))
+            pw_z, ph_z = zw + 11.0, 16.5
+            # Collision-aware zone pill placement (strictly below stage ribbon & clear of all nodes/labels)
+            pill_min_y = y + (25.0 if stages else 1.0)
+            y_top_pill = max(pill_min_y, zy0 - 7.5)
+            y_in_pill = max(pill_min_y, zy0 + 3.0)
+            y_bot_pill = min(y + h - leg_h - ph_z - 2.0, zy1 - ph_z - 2.0)
+            cand_p = [
+                (zx0 + 10.0, y_top_pill),
+                (max(zx0 + 6.0, zx1 - pw_z - 5.0), y_top_pill),
+                (max(zx0 + 6.0, (zx0 + zx1 - pw_z) / 2.0), y_top_pill),
+                (zx0 + 10.0, y_in_pill),
+                (max(zx0 + 6.0, zx1 - pw_z - 5.0), y_in_pill),
+                (zx0 + 10.0, y_bot_pill),
+                (max(zx0 + 6.0, zx1 - pw_z - 5.0), y_bot_pill),
+            ]
+            best_p, best_pen = cand_p[0], 1e18
+            for cx_p, cy_p in cand_p:
+                rx0, ry0, rx1, ry1 = cx_p - 5.0, cy_p, cx_p - 5.0 + pw_z, cy_p + ph_z
+                pen = 0.0
+                for _nid, (nx0, ny0, nw0, nh0) in pos.items():
+                    ovx = max(0.0, min(rx1 + 2.0, nx0 + nw0) - max(rx0 - 2.0, nx0))
+                    ovy = max(0.0, min(ry1 + 2.0, ny0 + nh0) - max(ry0 - 2.0, ny0))
+                    pen += ovx * ovy * 10.0
+                for lx0, ly0, lx1, ly1 in placed_labels:
+                    ovx = max(0.0, min(rx1 + 2.0, lx1) - max(rx0 - 2.0, lx0))
+                    ovy = max(0.0, min(ry1 + 2.0, ly1) - max(ry0 - 2.0, ly0))
+                    pen += ovx * ovy * 10.0
+                for sx0, sy0, sx1, sy1 in edge_segs:
+                    for ti in range(1, 10):
+                        px_s = sx0 + (sx1 - sx0) * (ti / 10.0)
+                        py_s = sy0 + (sy1 - sy0) * (ti / 10.0)
+                        if rx0 - 2.0 <= px_s <= rx1 + 2.0 and ry0 - 2.0 <= py_s <= ry1 + 2.0:
+                            pen += 80.0
+                            break
+                if pen < best_pen:
+                    best_pen = pen
+                    best_p = (cx_p, cy_p)
+                    if pen == 0.0:
+                        break
+            px_b, py_b = best_p
+            zone_pill_svgs.append(rrect(px_b - 5, py_b, pw_z, ph_z, rx=4,
+                                        fill="#FFFFFF", stroke=zstroke, sw=0.85,
+                                        extra='data-kind="label-bg"'))
+            zone_pill_svgs.append(text_fit(px_b, py_b + 12.0, zlab_raw,
+                                           zmax, 10.5, INK2, weight="bold"))
             placed_labels.append((px_b - 6, py_b - 1, px_b + zw + 7, py_b + 17.5))
 
     # 2. Render edges (straight or curved Bezier for skip-edges)
@@ -721,11 +804,15 @@ def _mech_block(b, x, y, w, h, fs, accent, diag=None):
                          extra='fill-opacity="0.06"'))
         out.append(rrect(px, py, nw, nh, rx=rx, fill=fill, stroke=col, sw=1.6,
                          extra=f'data-kind="mech-node" data-node-id="{esc(nid)}"'))
+        if shape != "pill" and nh >= 44.0 and nw >= 110.0:
+            out.append(rrect(px + 1.2, py + 5.0, 3.6, nh - 10.0, rx=1.8, fill=col))
         ico = nd.get("icon", "")
+        ico_r = 12.0 if nh >= 48.0 else 10.5
+        ico_cx = px + (22.0 if nh >= 48.0 else 16.0)
         if ico:
-            out.append(render_icon(ico, px + 16, py + nh / 2, r=10.5, color=col, bg=fill))
+            out.append(render_icon(ico, ico_cx, py + nh / 2, r=ico_r, color=col, bg=fill))
         lns, slns, _, _ = sizes[nid]
-        tx = px + (nw + 22) / 2 if ico else px + nw / 2
+        tx = px + (nw + (30.0 if nh >= 48.0 else 22.0)) / 2 if ico else px + nw / 2
         tot_th = len(lns) * mfs * 1.26 + len(slns) * sfs * 1.2
         ty0 = py + (nh - tot_th) / 2
         for j, ln in enumerate(lns):
@@ -734,6 +821,7 @@ def _mech_block(b, x, y, w, h, fs, accent, diag=None):
         for j, sln in enumerate(slns):
             out.append(text(tx, ty0 + len(lns) * mfs * 1.26 + sfs * 0.9 + j * sfs * 1.2,
                             sln, sfs, MUT, "middle"))
+    out.extend(zone_pill_svgs)
     out.extend(label_svgs)
 
     # 4. Human-readable wrapped footnote if any edge label couldn't avoid collisions
@@ -916,8 +1004,10 @@ _BLOCK_ALIASES = {
 }
 _DIRECT_CHART_TYPES = {
     "bar", "grouped_bar", "bar_chart", "hbar", "horizontal_bar", "stacked",
-    "line", "line_chart", "dot", "dotplot", "boxplot", "box_plot", "violin",
-    "scatter", "volcano", "paired", "slope", "heatmap", "survival", "kaplan_meier", "km",
+    "line", "line_chart", "dot", "dotplot", "strip", "stripplot", "beeswarm", "dot_mean", "swarm",
+    "boxplot", "box_plot", "violin",
+    "scatter", "volcano", "paired", "slope", "before_after", "heatmap",
+    "survival", "kaplan_meier", "km", "forest", "forest_plot",
 }
 
 

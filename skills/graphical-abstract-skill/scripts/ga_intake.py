@@ -318,8 +318,45 @@ def _summarize_block(rows: list[list[str]]) -> dict:
     return out
 
 
+def _split_side_by_side(block: list[list[str]]) -> list[list[list[str]]]:
+    """Split horizontally juxtaposed Nature Source Data tables separated by >=1 empty column."""
+    if len(block) < 3:
+        return [block]
+    max_c = max((len(r) for r in block), default=0)
+    if max_c < 5:
+        return [block]
+    # Ignore 1-cell banner rows at top when checking column occupancy
+    data_rows = [r for r in block if sum(1 for c in r if c != "") >= 2]
+    if len(data_rows) < 2:
+        return [block]
+    empty_cols = [
+        ci for ci in range(max_c)
+        if all((ci >= len(r) or r[ci] == "") for r in data_rows)
+    ]
+    if not empty_cols:
+        return [block]
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for ec in empty_cols + [max_c]:
+        if ec - start >= 2:
+            spans.append((start, ec))
+        start = ec + 1
+    if len(spans) <= 1:
+        return [block]
+    out_blocks = []
+    for c0, c1 in spans[:6]:
+        sub = []
+        for r in block:
+            sl = [r[i] if i < len(r) else "" for i in range(c0, c1)]
+            if any(sl):
+                sub.append(sl)
+        if len(sub) >= 2:
+            out_blocks.append(sub)
+    return out_blocks if len(out_blocks) >= 2 else [block]
+
+
 def _summarize_rows(parsed: list[list[str]]) -> dict:
-    """Compute grouped/column/wide-replicate numeric stats, splitting stacked subtables on blank rows."""
+    """Compute grouped/column/wide-replicate numeric stats, splitting stacked & side-by-side subtables."""
     norm = [[str(c).strip() if c is not None else "" for c in r] for r in parsed]
     blocks: list[list[list[str]]] = []
     cur: list[list[str]] = []
@@ -333,9 +370,12 @@ def _summarize_rows(parsed: list[list[str]]) -> dict:
         blocks.append(cur)
     if not blocks:
         return {}
-    if len(blocks) == 1:
-        return _summarize_block(blocks[0])
-    subs = [sb for blk in blocks[:8] if (sb := _summarize_block(blk))]
+    expanded: list[list[list[str]]] = []
+    for blk in blocks[:8]:
+        expanded.extend(_split_side_by_side(blk))
+    if len(expanded) == 1:
+        return _summarize_block(expanded[0])
+    subs = [sb for blk in expanded[:10] if (sb := _summarize_block(blk))]
     if not subs:
         return {}
     if len(subs) == 1:
@@ -395,7 +435,7 @@ def _read_xlsx_stdlib(p: Path, max_sheets: int = 10, max_rows: int = 505, max_co
             for rel in rr:
                 rid, tgt = rel.get("Id"), rel.get("Target")
                 if rid and tgt:
-                    tgt = tgt.lstrip("/")
+                    tgt = re.sub(r"^(\.\./)+", "", tgt).lstrip("/")
                     if not tgt.startswith("xl/"):
                         tgt = "xl/" + tgt
                     rel_map[rid] = tgt
@@ -482,7 +522,7 @@ def _read_xlsx_stdlib(p: Path, max_sheets: int = 10, max_rows: int = 505, max_co
     return sheets_out
 
 
-def read_xlsx_sheets(p: Path, max_sheets: int = 16, max_rows: int = 505, max_cols: int = 24) -> dict[str, list[list[str]]]:
+def read_xlsx_sheets(p: Path, max_sheets: int = 40, max_rows: int = 2005, max_cols: int = 36) -> dict[str, list[list[str]]]:
     """Read XLSX sheets with merged-header support (stdlib XML primary, openpyxl fallback)."""
     try:
         res = _read_xlsx_stdlib(p, max_sheets=max_sheets, max_rows=max_rows, max_cols=max_cols)
@@ -553,12 +593,33 @@ def _is_target_sheet(sname: str, target_figs: list[int]) -> bool:
     return False
 
 
+def _slim_stats_in_place(obj):
+    """Strip secondary quartile/replicate fields for Turn-1 stdout while preserving exact {n, mean, sd, sem}."""
+    if isinstance(obj, dict):
+        if "n" in obj and "mean" in obj and "sd" in obj:
+            for k in ("median", "q1", "q3", "min", "max", "replicates"):
+                obj.pop(k, None)
+        else:
+            for v in obj.values():
+                _slim_stats_in_place(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            _slim_stats_in_place(v)
+
+
 def _fit_stdout_budget(out: dict, max_bytes: int, saved_path: str | None = None) -> str:
-    """Guarantee valid bounded Turn-1 stdout (<= max_bytes) without EVER dropping case/PDF/SVG."""
+    """Guarantee valid bounded Turn-1 stdout (<= max_bytes) while keeping actual numbers visible."""
     txt = json.dumps(out, ensure_ascii=False, indent=1)
     if len(txt.encode("utf-8")) <= max_bytes:
         return txt
     slim = json.loads(json.dumps(out))
+    # Pass 0.25: keep EVERY sheet/table's exact {n, mean, sd, sem} by trimming verbose quartiles/replicates
+    _slim_stats_in_place(slim)
+    if saved_path:
+        slim["_full_intake_saved"] = saved_path
+    txt = json.dumps(slim, ensure_ascii=False, indent=1)
+    if len(txt.encode("utf-8")) <= max_bytes:
+        return txt
     target_figs = slim.get("_target_figures_detected") or []
     compacted_files = []
     # Pass 0.5: if target figures detected, compact ONLY non-target XLSX sheets first
@@ -646,7 +707,7 @@ def _fit_stdout_budget(out: dict, max_bytes: int, saved_path: str | None = None)
 
 
 def xlsx_preview(p: Path):
-    sheets = read_xlsx_sheets(p, max_sheets=16, max_rows=505, max_cols=24)
+    sheets = read_xlsx_sheets(p, max_sheets=40, max_rows=2005, max_cols=36)
     if not sheets:
         return None
     info = {}
@@ -655,7 +716,7 @@ def xlsx_preview(p: Path):
             "rows": len(all_rows),
             "head": [r[:12] for r in all_rows[:4]],
         }
-        if 2 <= len(all_rows) <= 505:
+        if 2 <= len(all_rows) <= 2005:
             sheet_info.update(_summarize_rows(all_rows))
         info[name] = sheet_info
     return info
@@ -688,13 +749,42 @@ def docx_preview(p: Path) -> dict | None:
                 return None
             root = ET.fromstring(zf.read("word/document.xml"))
         paras = []
-        for pel in root.iter():
-            if pel.tag.endswith("}p") or pel.tag == "p":
-                txt = "".join(t.text or "" for t in pel.iter()
-                              if t.tag.endswith("}t") or t.tag == "t").strip()
+        tables = []
+        for el in root.iter():
+            tag = el.tag.split("}", 1)[-1]
+            if tag == "tbl" and len(tables) < 4:
+                rows_tb = []
+                for tr in el:
+                    if tr.tag.split("}", 1)[-1] != "tr":
+                        continue
+                    cells = []
+                    for tc in tr:
+                        if tc.tag.split("}", 1)[-1] != "tc":
+                            continue
+                        ct = " ".join(
+                            (t.text or "").strip() for t in tc.iter()
+                            if t.tag.split("}", 1)[-1] == "t" and (t.text or "").strip()
+                        )
+                        cells.append(ct[:60])
+                    if any(cells):
+                        rows_tb.append(cells[:12])
+                    if len(rows_tb) >= 24:
+                        break
+                if rows_tb:
+                    tables.append(rows_tb)
+            elif tag == "p":
+                txt = "".join(t.text or "" for t in el.iter()
+                              if t.tag.split("}", 1)[-1] == "t").strip()
                 if txt:
                     paras.append(txt)
-        return {"n_paragraphs": len(paras), "preview": " ".join(paras)[:1200]}
+        res = {"n_paragraphs": len(paras), "preview": " ".join(paras)[:1200]}
+        if tables:
+            res["n_tables"] = len(tables)
+            res["tables"] = tables
+            tb_stats = [st for tb in tables if (st := _summarize_rows(tb))]
+            if tb_stats:
+                res["table_stats"] = tb_stats[:3]
+        return res
     except Exception:
         return None
 
@@ -887,7 +977,7 @@ def main():
     ap.add_argument("--pdf-pages", default=None, help="extract specific PDF pages e.g. 2-4 or 3")
     ap.add_argument("--table", default=None, help="extract exact stats/rows from a single CSV/TSV/XLSX file")
     ap.add_argument("--sheet", default=None, help="optional sheet name (or substring) when using --table on XLSX")
-    ap.add_argument("--max-bytes", type=int, default=14000, help="hard stdout byte cap for Turn-1 digest (default 14000)")
+    ap.add_argument("--max-bytes", type=int, default=22000, help="hard stdout byte cap for Turn-1 digest (default 22000)")
     ap.add_argument("--save", default=None, help="save full untruncated intake JSON to this path")
     a = ap.parse_args()
 
@@ -898,7 +988,7 @@ def main():
             print(json.dumps({"error": f"file not found: {tp}"}))
             return 1
         if suf in (".xlsx", ".xlsm"):
-            sheets = read_xlsx_sheets(tp, max_sheets=32, max_rows=2000, max_cols=32)
+            sheets = read_xlsx_sheets(tp, max_sheets=40, max_rows=2005, max_cols=36)
             if not sheets:
                 print(json.dumps({"error": f"failed to read sheets from {tp}"}))
                 return 1

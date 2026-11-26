@@ -109,6 +109,15 @@ def _bbox(el):
                 ang = 0.0
             if abs(abs(ang) - 90) < 5:
                 return (x - fs * 0.85, y - w / 2, x + fs * 0.35, y + w / 2)
+            if abs(ang) > 5:
+                rad = math.radians(ang)
+                ca, sa = math.cos(rad), math.sin(rad)
+                # Use tight core box around rotated baseline to avoid diagonal false-positive overlaps
+                corners = [(x0, y - fs * 0.45), (x0 + w, y - fs * 0.45),
+                           (x0 + w, y + fs * 0.2), (x0, y + fs * 0.2)]
+                rxs = [x + (cx - x) * ca - (cy - y) * sa for cx, cy in corners]
+                rys = [y + (cx - x) * sa + (cy - y) * ca for cx, cy in corners]
+                return (min(rxs), min(rys), max(rxs), max(rys))
         return (x0, y - fs * 0.85, x0 + w, y + fs * 0.3)
     if t == "rect":
         try:
@@ -142,6 +151,48 @@ def _bbox(el):
         except ValueError:
             return None
     return None
+
+
+def _text_obb(el):
+    """Return 4 corners [(x,y),...] of a rotated <text> element, or None if unrotated/axis-aligned."""
+    a = el.attrib
+    rot = a.get("transform", "")
+    if "rotate" not in rot:
+        return None
+    try:
+        ang = float(rot.split("rotate")[1].strip("( ").split(",")[0].split(" ")[0])
+        if abs(ang) < 5 or abs(abs(ang) - 90) < 5:
+            return None
+        x = float(str(a.get("x", 0)).split()[0])
+        y = float(str(a.get("y", 0)).split()[0])
+        fs = _parse_fs(_style_prop(el, "font-size") or 12)
+        w = text_width("".join(el.itertext()), fs)
+        anchor = a.get("text-anchor", "start")
+        x0 = x - w if anchor == "end" else x - w / 2 if anchor == "middle" else x
+        rad = math.radians(ang)
+        ca, sa = math.cos(rad), math.sin(rad)
+        corners = [(x0, y - fs * 0.78), (x0 + w, y - fs * 0.78),
+                   (x0 + w, y + fs * 0.25), (x0, y + fs * 0.25)]
+        return [(x + (cx - x) * ca - (cy - y) * sa, y + (cx - x) * sa + (cy - y) * ca)
+                for cx, cy in corners]
+    except Exception:
+        return None
+
+
+def _obb_separated(pa, pb) -> bool:
+    """Exact 2D Separating Axis Theorem check for two 4-vertex convex polygons."""
+    for poly in (pa, pb):
+        for k in range(4):
+            x1, y1 = poly[k]
+            x2, y2 = poly[(k + 1) % 4]
+            nx, ny = -(y2 - y1), (x2 - x1)
+            if abs(nx) < 1e-9 and abs(ny) < 1e-9:
+                continue
+            da = [px * nx + py * ny for px, py in pa]
+            db = [px * nx + py * ny for px, py in pb]
+            if max(da) <= min(db) + 1e-6 or max(db) <= min(da) + 1e-6:
+                return True
+    return False
 
 
 def _inter(a, b) -> float:
@@ -275,7 +326,7 @@ def audit(svg_path: Path, brief=None, report=None, external: bool = False):
                 if wpx > maxw * 1.03:
                     errors.append(f"text overflow {wpx:.0f}>{maxw:.0f}px: '{label}'")
             if not (external and _has_ancestor_transform(el)):
-                texts.append((bb, label))
+                texts.append((bb, label, _text_obb(el)))
                 doc_order.append(("text", bb, order, label))
             if pbox and (bb[0] < pbox[0] - 2 or bb[2] > pbox[2] + 2
                          or bb[1] < pbox[1] - 2 or bb[3] > pbox[3] + 2):
@@ -327,11 +378,19 @@ def audit(svg_path: Path, brief=None, report=None, external: bool = False):
                 warnings.append(
                     f"occlusion: text '{label}' covered {ar:.0f}px2 by fill={fill2}")
 
-    # Text-text overlap
+    # Text-text overlap (uses exact 2D SAT for angled/rotated labels)
     for i in range(len(texts)):
         for j in range(i + 1, len(texts)):
             ar = _inter(texts[i][0], texts[j][0])
             if ar > 10:
+                oi, oj = texts[i][2], texts[j][2]
+                if oi is not None or oj is not None:
+                    pi = oi or [(texts[i][0][0], texts[i][0][1]), (texts[i][0][2], texts[i][0][1]),
+                                (texts[i][0][2], texts[i][0][3]), (texts[i][0][0], texts[i][0][3])]
+                    pj = oj or [(texts[j][0][0], texts[j][0][1]), (texts[j][0][2], texts[j][0][1]),
+                                (texts[j][0][2], texts[j][0][3]), (texts[j][0][0], texts[j][0][3])]
+                    if _obb_separated(pi, pj):
+                        continue
                 warnings.append(
                     f"text overlap area {ar:.0f}px2: '{texts[i][1]}' vs '{texts[j][1]}'")
 
@@ -339,21 +398,37 @@ def audit(svg_path: Path, brief=None, report=None, external: bool = False):
     palette_used = []
     min_luma_d, min_deut_d = None, None
     advisories = []
+    _CHART_TYPES_CK = {
+        "chart", "plot", "graph", "figure", "data",
+        "bar", "grouped_bar", "bar_chart", "hbar", "horizontal_bar", "stacked",
+        "line", "line_chart", "dot", "dotplot", "strip", "stripplot", "beeswarm", "dot_mean", "swarm",
+        "box", "boxplot", "box_plot", "violin",
+        "scatter", "volcano", "paired", "slope", "before_after", "heatmap",
+        "survival", "kaplan_meier", "km", "forest", "forest_plot",
+    }
+
+    def _is_chart_bl(bl: dict) -> bool:
+        bt = str(bl.get("type", "")).strip().lower().replace("-", "_").replace(" ", "_")
+        if bt == "box":
+            return bool(bl.get("series") or bl.get("xlabels"))
+        return bt in _CHART_TYPES_CK
+
     if brief:
         def _iter_charts(blocks):
             for bl in blocks:
-                if bl.get("type") == "chart":
+                if _is_chart_bl(bl):
                     yield bl
-                elif bl.get("type") == "row":
+                elif str(bl.get("type", "")).lower() == "row":
                     yield from _iter_charts(bl.get("blocks", []))
 
         for b in brief.get("panels", []):
             for bl in _iter_charts(b.get("blocks", [])):
+                ckind = str(bl.get("kind") or bl.get("type") or "").lower()
                 if not bl.get("note"):
                     advisories.append(f"chart in {b.get('id','?')} lacks 'note' (add unit/n/source)")
-                if bl.get("kind") not in ("heatmap", "volcano", "volcano_plot") and not (bl.get("ylabel") or bl.get("xlabel")):
+                if ckind not in ("heatmap", "volcano", "volcano_plot") and not (bl.get("ylabel") or bl.get("xlabel")):
                     advisories.append(f"chart in {b.get('id','?')} lacks axis label with units")
-                if bl.get("kind") == "heatmap":
+                if ckind == "heatmap":
                     continue
                 ns = len(bl.get("series", []))
                 colors = bl.get("colors") or [SERIES[i % len(SERIES)] for i in range(max(ns, 1))]
@@ -391,9 +466,9 @@ def audit(svg_path: Path, brief=None, report=None, external: bool = False):
             charts_in_brief = []
             def _collect_c(blocks):
                 for bl in blocks:
-                    if bl.get("type") == "chart":
+                    if _is_chart_bl(bl):
                         charts_in_brief.append(bl)
-                    elif bl.get("type") == "row":
+                    elif str(bl.get("type", "")).lower() == "row":
                         _collect_c(bl.get("blocks", []))
             for p in brief.get("panels", []):
                 _collect_c(p.get("blocks", []))
@@ -445,6 +520,8 @@ def _collect_source_numbers(data_dir: Path) -> list[float]:
                 nums.add(round(-math.log10(v), 4))
             elif v > 1.0:
                 nums.add(round(math.log10(v), 4))
+            if v > 0:
+                nums.add(round(math.log2(v), 4))
 
     def _add_text_nums(txt: str):
         for m in _NUM_RE.finditer(txt[:250000]):
@@ -518,12 +595,12 @@ def _collect_source_numbers(data_dir: Path) -> list[float]:
                     for cell in row:
                         _add_text_nums(cell)
                 non_empty = [ln for ln in raw_lines if ln.strip()]
-                if 2 <= len(non_empty) <= 501:
-                    _add_table_stats(parsed[:510])
+                if 2 <= len(non_empty) <= 2005:
+                    _add_table_stats(parsed[:2005])
                     _add_row_pcts(parsed[:200])
             elif suf in (".xlsx", ".xlsm"):
                 from ga_intake import read_xlsx_sheets
-                sheets = read_xlsx_sheets(p, max_sheets=16, max_rows=2000, max_cols=24)
+                sheets = read_xlsx_sheets(p, max_sheets=40, max_rows=2005, max_cols=36)
                 for srows in sheets.values():
                     for row in srows:
                         for c in row:
@@ -531,13 +608,19 @@ def _collect_source_numbers(data_dir: Path) -> list[float]:
                                 _add_val(float(c))
                             except ValueError:
                                 _add_text_nums(c)
-                    _add_table_stats(srows[:510])
+                    _add_table_stats(srows[:2005])
                     _add_row_pcts(srows[:200])
             elif suf == ".docx":
                 from ga_intake import docx_preview
                 dp = docx_preview(p)
-                if dp and dp.get("preview"):
-                    _add_text_nums(dp["preview"])
+                if dp:
+                    if dp.get("preview"):
+                        _add_text_nums(dp["preview"])
+                    for tb in (dp.get("tables") or []):
+                        for row in tb:
+                            for cell in row:
+                                _add_text_nums(str(cell))
+                        _add_table_stats(tb)
             elif suf in (".txt", ".md", ".json"):
                 _add_text_nums(p.read_text(encoding="utf-8", errors="ignore"))
             elif suf == ".pdf":
@@ -561,8 +644,10 @@ def _audit_data_grounding(brief: dict, data_dir: Path) -> dict:
             bt = str(bl.get("type", "")).strip().lower().replace("-", "_").replace(" ", "_")
             if bt == "row":
                 _walk_blocks(pid, bl.get("blocks", []))
-            elif bt in ("chart", "bar", "hbar", "stacked", "line", "dot", "box", "scatter",
-                        "volcano", "paired", "slope", "heatmap", "survival", "km"):
+            elif bt in ("chart", "bar", "hbar", "stacked", "line", "dot", "strip", "stripplot",
+                        "beeswarm", "dot_mean", "swarm", "box", "scatter",
+                        "volcano", "paired", "slope", "before_after", "heatmap", "survival",
+                        "km", "forest", "forest_plot"):
                 if bl.get("kind") == "heatmap" or bt == "heatmap":
                     for row in bl.get("values", []):
                         for v in row:
@@ -579,20 +664,22 @@ def _audit_data_grounding(brief: dict, data_dir: Path) -> dict:
                             for k in ("x", "y"):
                                 if isinstance(pt.get(k), (int, float)):
                                     vals.append((pid, float(pt[k])))
-                    for k in ("x", "y"):
+                    for k in ("x", "y", "values", "ci_lo", "ci_hi", "low", "high"):
                         for v in (bl.get(k) or []):
                             if isinstance(v, (int, float)):
                                 vals.append((pid, float(v)))
                     for s in bl.get("series", []):
-                        for k in ("values", "x", "y", "q1", "q3", "low", "high", "min", "max"):
+                        for k in ("values", "data", "means", "mean", "vals", "x", "y",
+                                  "q1", "q3", "low", "high", "min", "max", "ci_lo", "ci_hi", "ci_low", "ci_high"):
                             for v in (s.get(k) or []):
                                 if isinstance(v, (int, float)):
                                     vals.append((pid, float(v)))
-                        for grp_pts in (s.get("points") or []):
-                            if isinstance(grp_pts, list):
-                                for pv in grp_pts:
-                                    if isinstance(pv, (int, float)):
-                                        vals.append((pid, float(pv)))
+                        for pts_k in ("points", "replicates", "raw", "dots", "samples"):
+                            for grp_pts in (s.get(pts_k) or []):
+                                if isinstance(grp_pts, list):
+                                    for pv in grp_pts:
+                                        if isinstance(pv, (int, float)):
+                                            vals.append((pid, float(pv)))
 
     for p in brief.get("panels", []):
         _walk_blocks(p.get("id", "?"), p.get("blocks", []))

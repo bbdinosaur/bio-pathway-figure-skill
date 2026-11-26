@@ -93,7 +93,7 @@ Plain strings are also accepted in `steps`. Use `"fill": true` ONLY when `flow` 
 ### 6. `chart` — publication-grade quantitative chart (values MUST come from material)
 Supported `kind`: `"bar"`, `"hbar"` (supports negative values + zero baseline), `"stacked"`, `"line"` (supports `"band": true` shaded SD/SEM or `ci_lo`/`ci_hi` 95% CI band, `"step": true` KM survival curve), `"dot"`, `"box"` (biological box-and-whisker with quartiles & replicate dots from `points`), `"scatter"` (supports `"xlog": true` / `"ylog": true` + `"connect": true` for log-scale IC50/EC50 dose-response curves, `err`, `reflines`, `trend`, `xmin`/`xmax`/`ymin`/`ymax`, collision-free point `labels`), `"heatmap"` (auto RdBu diverging when `vmin < 0 < vmax`). `bar`/`line`/`dot`/`box` also support `"ylog": true` (log10 titers/CFU/fold-change). All 1D/2D charts support explicit `ymin`/`ymax` overrides and auto-cap percentage/survival axes cleanly at `100` (never emitting 120%/125% ticks). Common aliases (e.g., `grouped_bar`, `boxplot`, `survival`, `volcano`) are auto-normalized.
 All chart kinds support an optional bold `"title"` (ideal inside side-by-side `row` blocks), `"value_suffix"` (e.g. `"%"`, `"x"`), and `"note"`.
-- **Standard (`bar`/`hbar`/`stacked`/`line`/`dot`)**:
+- **Standard (`bar`/`hbar`/`strip`/`stacked`/`line`/`dot`/`box`)**:
   ```json
   {"type": "chart", "kind": "bar", "title": "a. Viability across models", "ylabel": "Viability (%)", "xlabel": "Model",
    "xlabels": ["Organoid", "Xenograft"], "value_labels": true, "value_suffix": "%",
@@ -105,13 +105,15 @@ All chart kinds support an optional bold `"title"` (ideal inside side-by-side `r
    "refline": {"value": 50, "label": "IC50"},
    "note": "Mean ± SD with individual replicates, n = 3 per group (source_data.xlsx)"}
   ```
-  - Optional `"points": [[...], ...]` overlays deterministic jittered biological replicate dots on `bar` / `hbar`.
+  - Optional `"points": [[...], ...]` overlays deterministic jittered biological replicate dots on `bar` / `hbar` / `box`, or renders a Prism-style individual-replicate scatter + bold horizontal mean ± SD bar when `kind: "strip"` (or `"beeswarm"`).
+  - Long or dense category `xlabels` automatically wrap to 2 lines and angle `-28°` when needed so labels never truncate.
   - Optional `"s1"` / `"s2"` in `sig` snaps bracket endpoints to exact grouped series bars (omit for group-center inter-group brackets).
   - Optional `"band": true` on `line` draws a translucent shaded error ribbon around `values ± err`; `"step": true` + optional `"censored": [idx, ...]` renders Kaplan-Meier step survival curves; `"sig_points": [{"x": i, "label": "***"}]` annotates point-wise significance.
   - Omit `"y"` in `"sig"` for automatic collision-free stacked bracket placement above bars, error bars, replicate dots, and value labels.
 - **Scatter (`kind: "scatter"`)**: `series: [{"name": "...", "x": [...], "y": [...], "labels": [...]}]`; supports `"xlog"`/`"ylog"`, `"connect": true` (dose-response curves), `"err"`, `"refline"` / `"reflines"` (horizontal `y` and/or vertical `x`), `"trend": true` (OLS linear fit + `R²`), and automatic 4-quadrant collision-free point labels.
 - **Volcano (`kind: "volcano"`)**: accepts either pre-split `series` or flat `"x"` / `"y"` / `"labels"` (or `"points": [{"x": 2.4, "y": 4.2, "label": "GENE1"}]`) + optional `"fc_thresh"` (default `1.0`) and `"p_thresh"` (default `1.301` for `p = 0.05`); automatically partitions Up (`#D55E00`), Down (`#0072B2`), and NS (`#94A3B8`) with counts in legend and dashed cutoff lines.
 - **Paired / Slope (`kind: "paired"` or `"slope"`)**: accepts `"pairs": [[pre, post], ...]` with `"xlabels": ["Pre", "Post"]`, or 2+ `"series": [{"name": "Ctrl", "values": [...]}, {"name": "Treated", "values": [...]}]`; connects matched donors/samples with translucent trajectories + bold group mean bars + optional `"sig"` brackets.
+- **Forest (`kind: "forest"` or `"forest_plot"`)**: effect-size / Odds-Ratio / Hazard-Ratio forest plot with horizontal 95% CI whiskers (`series: [{"values": [...], "ci_lo": [...], "ci_hi": [...]}]` or top-level `values`/`ci_lo`/`ci_hi`/`err`), `xlabels`, optional `"null_value"` (default `1.0` for ratio/xlog axes, `0.0` otherwise), `"xlog": true`, and right-hand `"value (lo–hi)"` CI column.
 - **Heatmap (`kind: "heatmap"`)**: `rows`/`ylabels`, `cols`/`xlabels`, `values`: 2D matrix (`null` rendered as `—`), optional `vmin`/`vmax`/`unit`, and `"ramp": "auto"|"sequential"|"diverging"` (automatically switches to colorblind-safe RdBu diverging ramp when `vmin < 0 < vmax`).
 
 ### 7. `svg` — auto-scaled custom inline vector block

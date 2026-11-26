@@ -226,7 +226,7 @@ def _is_pct_axis(label: str, vsuf: str = "") -> bool:
 
 def _bound_axis_ticks(lo_v: float, hi_v: float, lo_pad: float, hi_pad: float,
                       b: dict, label: str, vsuf: str = "",
-                      has_top_annot: bool = False) -> tuple[list[float], float, float]:
+                      has_top_annot: bool = False, n_sigs: int = 0) -> tuple[list[float], float, float]:
     """Compute nice axis ticks with explicit ymin/ymax support & scientific 100% cap."""
     exp_lo = _f(b["ymin"]) if b.get("ymin") is not None else None
     exp_hi = _f(b["ymax"]) if b.get("ymax") is not None else None
@@ -238,11 +238,14 @@ def _bound_axis_ticks(lo_v: float, hi_v: float, lo_pad: float, hi_pad: float,
         vhi = exp_hi if exp_hi is not None else ticks[-1]
         ticks = [t for t in ticks if vlo - 1e-6 <= t <= vhi + 1e-6]
         return ticks or [vlo, vhi], vlo, vhi
-    # Scientific percentage / survival / viability cap: NEVER draw bogus 120% or 125% ticks!
+    # Scientific percentage / survival / viability cap: NEVER draw bogus 120% or 125% ticks,
+    # while still reserving ample clean headroom for stacked significance brackets!
     if _is_pct_axis(label, vsuf) and lo_v >= -1e-6 and 50.0 <= hi_v <= 106.0:
         ticks = [0.0, 25.0, 50.0, 75.0, 100.0]
         vlo = 0.0
-        vhi = max(hi_v + 4.0, 112.0 if has_top_annot else 104.0)
+        sig_head = 15.0 * max(0, int(n_sigs))
+        vhi = max(hi_v + 6.0 + sig_head * 0.65,
+                  (110.0 if has_top_annot else 104.0) + sig_head)
         return ticks, vlo, vhi
     ticks = nice_ticks(lo_pad, hi_pad, 5)
     return ticks, ticks[0], ticks[-1]
@@ -420,11 +423,18 @@ def _render_scatter(b, x, y, w, h, fs):
             ys_all.extend([v - e, v + e])
     if not ys_all:
         ys_all = [0.0, 1.0]
+    # Gather reference lines early so log axes include positive refline values
+    refs = []
+    if isinstance(b.get("ref_line") or b.get("refline"), dict):
+        refs.append(b.get("ref_line") or b.get("refline"))
+    if isinstance(b.get("reflines"), list):
+        refs.extend(r for r in b["reflines"] if isinstance(r, dict))
     use_xlog = bool(b.get("xlog")) and min(xs_all) > 0
     use_ylog = bool(b.get("ylog")) and min(ys_all) > 0
     if use_xlog:
-        xlo_c = _f(b["xmin"]) if (b.get("xmin") is not None and _f(b["xmin"]) > 0) else min(xs_all)
-        xhi_c = _f(b["xmax"]) if (b.get("xmax") is not None and _f(b["xmax"]) > 0) else max(xs_all)
+        rx_pos = [_f(r["x"]) for r in refs if r.get("x") is not None and _f(r["x"]) > 0]
+        xlo_c = _f(b["xmin"]) if (b.get("xmin") is not None and _f(b["xmin"]) > 0) else min(xs_all + rx_pos)
+        xhi_c = _f(b["xmax"]) if (b.get("xmax") is not None and _f(b["xmax"]) > 0) else max(xs_all + rx_pos)
         xticks, xlo, xhi = _log_ticks(xlo_c, xhi_c)
     else:
         xspan = max(max(xs_all) - min(xs_all), 1e-6)
@@ -437,8 +447,11 @@ def _render_scatter(b, x, y, w, h, fs):
         xhi = _f(b["xmax"]) if b.get("xmax") is not None else xticks[-1]
         xticks = [t for t in xticks if xlo - 1e-6 <= t <= xhi + 1e-6] or [xlo, xhi]
     if use_ylog:
-        ylo_c = _f(b["ymin"]) if (b.get("ymin") is not None and _f(b["ymin"]) > 0) else min(ys_all)
-        yhi_c = _f(b["ymax"]) if (b.get("ymax") is not None and _f(b["ymax"]) > 0) else max(ys_all)
+        ry_pos = [_f(r.get("y", r.get("value"))) for r in refs
+                  if (r.get("y") is not None or (r.get("value") is not None and r.get("x") is None))
+                  and _f(r.get("y", r.get("value"))) > 0]
+        ylo_c = _f(b["ymin"]) if (b.get("ymin") is not None and _f(b["ymin"]) > 0) else min(ys_all + ry_pos)
+        yhi_c = _f(b["ymax"]) if (b.get("ymax") is not None and _f(b["ymax"]) > 0) else max(ys_all + ry_pos)
         yticks, ylo, yhi = _log_ticks(ylo_c, yhi_c)
     else:
         yspan = max(max(ys_all) - min(ys_all), 1e-6)
@@ -493,60 +506,73 @@ def _render_scatter(b, x, y, w, h, fs):
     if not use_ylog and ylo < 0 < yhi:
         out.append(line(px, sy(0.0), px + gw, sy(0.0), "#94A3B8", 1.0, dash="3 3"))
 
-    # Optional reference lines (dict or list of dicts with x and/or y/value)
-    raw_refs = b.get("ref_line") or b.get("refline") or b.get("reflines")
-    refs = raw_refs if isinstance(raw_refs, list) else ([raw_refs] if isinstance(raw_refs, dict) else [])
+    # Draw reference lines behind marks; defer their label pills AFTER marks for zero occlusion
     placed_sc = []  # [(x0, y0, x1, y1)] for collision-free scatter labels
+    deferred_ref_pills = []  # [(x_anchor, y_base, text, fs, color, anchor, pill_box)]
     for ref in refs:
-        if not isinstance(ref, dict):
-            continue
         rc = ref.get("color", "#64748B")
         rdash = ref.get("dash", "5 3")
         rfs = max(10.0, fs - 2)
         if ref.get("y") is not None or (ref.get("value") is not None and ref.get("x") is None):
-            ry = sy(float(ref.get("y", ref.get("value"))))
+            ry = sy(_f(ref.get("y", ref.get("value"))))
             if py <= ry <= py + gh:
                 out.append(line(px, ry, px + gw, ry, rc, 1.3, dash=rdash))
                 if ref.get("label"):
                     rl = str(ref["label"])
                     rw = text_width(rl, rfs)
-                    out.append(text(px + gw - 3, ry - 4, rl, rfs, rc, "end", weight="bold"))
-                    placed_sc.append((px + gw - 3 - rw, ry - 4 - rfs, px + gw - 3, ry - 2))
+                    pw_p, ph_p = rw + 6.0, rfs + 4.0
+                    bx0, by0 = px + gw - pw_p - 2.0, max(py + 1.0, ry - ph_p - 2.0)
+                    placed_sc.append((bx0, by0, bx0 + pw_p, by0 + ph_p))
+                    deferred_ref_pills.append((bx0 + pw_p / 2.0, by0 + rfs + 0.5, rl, rfs, rc, "middle",
+                                               (bx0, by0, pw_p, ph_p)))
         if ref.get("x") is not None:
-            rx = sx(float(ref["x"]))
+            rx = sx(_f(ref["x"]))
             if px <= rx <= px + gw:
                 out.append(line(rx, py, rx, py + gh, rc, 1.3, dash=rdash))
                 if ref.get("label") and ref.get("y") is None:
                     rl = str(ref["label"])
                     rw = text_width(rl, rfs)
-                    if rx + 4 + rw > px + gw:
-                        out.append(text(rx - 4, py + 12, rl, rfs, rc, "end", weight="bold"))
-                        placed_sc.append((rx - 4 - rw, py + 2, rx - 4, py + 14))
-                    else:
-                        out.append(text(rx + 4, py + 12, rl, rfs, rc, "start", weight="bold"))
-                        placed_sc.append((rx + 4, py + 2, rx + 4 + rw, py + 14))
+                    pw_p, ph_p = rw + 8.0, rfs + 4.0
+                    bx0 = (rx - pw_p - 6.0) if (rx + 6.0 + pw_p > px + gw) else (rx + 6.0)
+                    bx0 = max(px + 2.0, min(px + gw - pw_p - 2.0, bx0))
+                    by0 = py + 2.0
+                    placed_sc.append((bx0, by0, bx0 + pw_p, by0 + ph_p))
+                    deferred_ref_pills.append((bx0 + pw_p / 2.0, by0 + rfs + 0.5, rl, rfs, rc, "middle",
+                                               (bx0, by0, pw_p, ph_p)))
 
-    # Optional OLS linear trend line + R^2 badge
-    if b.get("trend") and len(xs_all) >= 2:
-        n_tr = min(len(xs_all), len(ys_all))
-        mx_t = sum(xs_all[:n_tr]) / n_tr
-        my_t = sum(ys_all[:n_tr]) / n_tr
-        sxx = sum((xv - mx_t) ** 2 for xv in xs_all[:n_tr])
-        syy = sum((yv - my_t) ** 2 for yv in ys_all[:n_tr])
-        sxy = sum((xs_all[i] - mx_t) * (ys_all[i] - my_t) for i in range(n_tr))
-        if sxx > 1e-12:
-            slp = sxy / sxx
-            icp = my_t - slp * mx_t
-            r2 = (sxy * sxy) / (sxx * syy) if syy > 1e-12 else 1.0
-            xa, xb = min(xs_all), max(xs_all)
-            ya, yb = max(ylo, min(yhi, slp * xa + icp)), max(ylo, min(yhi, slp * xb + icp))
-            out.append(line(sx(xa), sy(ya), sx(xb), sy(yb), "#475569", 1.5, dash="6 3"))
-            rtxt = f"R² = {r2:.2f}"
-            rfs = max(10.0, fs - 2)
-            rw = text_width(rtxt, rfs)
-            out.append(text(px + gw - 4, py + 13, rtxt, rfs, INK2, "end", weight="bold"))
-            placed_sc.append((px + gw - 4 - rw, py + 2, px + gw - 4, py + 15))
+    # Optional OLS linear trend line (exact paired x_i, y_i across series) + deferred R^2 badge
+    if b.get("trend"):
+        pts_tr = [(_f(xv), _f(yv)) for s in series
+                  for xv, yv in zip(s.get("x", []), s.get("y", []))
+                  if xv is not None and yv is not None]
+        if len(pts_tr) >= 2:
+            n_tr = len(pts_tr)
+            mx_t = sum(p[0] for p in pts_tr) / n_tr
+            my_t = sum(p[1] for p in pts_tr) / n_tr
+            sxx = sum((p[0] - mx_t) ** 2 for p in pts_tr)
+            syy = sum((p[1] - my_t) ** 2 for p in pts_tr)
+            sxy = sum((p[0] - mx_t) * (p[1] - my_t) for p in pts_tr)
+            if sxx > 1e-12:
+                slp = sxy / sxx
+                icp = my_t - slp * mx_t
+                r2 = (sxy * sxy) / (sxx * syy) if syy > 1e-12 else 1.0
+                xa, xb = min(p[0] for p in pts_tr), max(p[0] for p in pts_tr)
+                ya, yb = max(ylo, min(yhi, slp * xa + icp)), max(ylo, min(yhi, slp * xb + icp))
+                out.append(line(sx(xa), sy(ya), sx(xb), sy(yb), "#475569", 1.5, dash="6 3"))
+                rtxt = f"R² = {r2:.2f}"
+                rfs = max(10.0, fs - 2)
+                rw = text_width(rtxt, rfs)
+                pw_p, ph_p = rw + 8.0, rfs + 4.0
+                bx0, by0 = px + gw - pw_p - 2.0, py + 2.0
+                while any(bx0 < rx1 + 2 and bx0 + pw_p > rx0 - 2 and by0 < ry1 + 2 and by0 + ph_p > ry0 - 2
+                          for rx0, ry0, rx1, ry1 in placed_sc) and by0 + ph_p + 16 < py + gh:
+                    by0 += ph_p + 3.0
+                placed_sc.append((bx0, by0, bx0 + pw_p, by0 + ph_p))
+                deferred_ref_pills.append((bx0 + pw_p / 2.0, by0 + rfs + 0.5, rtxt, rfs, INK2, "middle",
+                                           (bx0, by0, pw_p, ph_p)))
 
+    total_sc_pts = sum(min(len(s.get("x", [])), len(s.get("y", []))) for s in series)
+    mk_rad = 2.8 if total_sc_pts > 80 else (3.5 if total_sc_pts > 35 else 4.4)
     for si, s in enumerate(series):
         col = colors[si % len(colors)]
         mk = MARKERS[si % len(MARKERS)]
@@ -569,7 +595,11 @@ def _render_scatter(b, x, y, w, h, fs):
                 out.append(line(cx, sy(yv + e), cx, sy(ylo_e), col, 1.3))
                 for ey_v in (sy(yv + e), sy(ylo_e)):
                     out.append(line(cx - 3.5, ey_v, cx + 3.5, ey_v, col, 1.3))
-            out.append(marker_shape(cx, cy, 4.4, col, mk))
+            if total_sc_pts > 60 and mk == "circle":
+                out.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{mk_rad:.1f}" '
+                           f'fill="{col}" fill-opacity="0.72" stroke="#FFFFFF" stroke-width="0.6"/>')
+            else:
+                out.append(marker_shape(cx, cy, mk_rad, col, mk))
             if i < len(labs) and labs[i]:
                 lb = str(labs[i])
                 lfs = max(10.0, fs - 2)
@@ -597,6 +627,11 @@ def _render_scatter(b, x, y, w, h, fs):
                     lx, ly, anc, lbox = chosen_l
                     placed_sc.append(lbox)
                     out.append(text(lx, ly, lb, lfs, INK2, anc))
+
+    # Render reference-line & R^2 pills ABOVE marks with translucent white halo (zero occlusion)
+    for tx_p, ty_p, txt_p, fs_p, col_p, anc_p, (bx0, by0, pw_p, ph_p) in deferred_ref_pills:
+        out.append(rrect(bx0, by0, pw_p, ph_p, rx=2.5, fill="#FFFFFF", extra='fill-opacity="0.93"'))
+        out.append(text(tx_p, ty_p, txt_p, fs_p, col_p, anc_p, weight="bold"))
 
     if b.get("ylabel"):
         yl_raw = str(b["ylabel"])
@@ -796,21 +831,224 @@ def _expand_volcano_brief(b: dict) -> dict:
     return nb
 
 
+def _render_forest(b, x, y, w, h, fs):
+    """Publication forest plot (OR / HR / effect size with 95% CI whiskers + vertical null line)."""
+    xlabels = [str(lb) for lb in b.get("xlabels", b.get("labels", b.get("rows", [])))]
+    series = b.get("series", [])
+    if not series and b.get("values"):
+        series = [{"name": b.get("name", "Effect"), "values": b.get("values", []),
+                   "ci_lo": b.get("ci_lo", b.get("low", [])),
+                   "ci_hi": b.get("ci_hi", b.get("high", [])),
+                   "err": b.get("err", [])}]
+    if not series:
+        return text(x + 4, y + fs, "Forest plot requires series/values", fs, MUT), fs * 2
+    s0 = series[0]
+    vals = [_f(v) for v in (s0.get("values") or [])]
+    lo_arr = s0.get("ci_lo") or s0.get("low") or []
+    hi_arr = s0.get("ci_hi") or s0.get("high") or []
+    err_arr = s0.get("err") or []
+    n = len(vals)
+    if n == 0:
+        return text(x + 4, y + fs, "Empty forest data", fs, MUT), fs * 2
+    if not xlabels:
+        xlabels = [f"Factor {i+1}" for i in range(n)]
+    cis = []
+    for i, v in enumerate(vals):
+        e = _f(err_arr[i]) if i < len(err_arr) else 0.0
+        lo = _f(lo_arr[i]) if i < len(lo_arr) and lo_arr[i] is not None else (v - e)
+        hi = _f(hi_arr[i]) if i < len(hi_arr) and hi_arr[i] is not None else (v + e)
+        cis.append((min(lo, v), v, max(hi, v)))
+    xl_low = str(b.get("xlabel", "")).lower()
+    is_ratio = bool(b.get("xlog")) or any(k in xl_low for k in ("odds", "hazard", "or", "hr", "ratio", "fold"))
+    null_v = _f(b.get("null_value", 1.0 if is_ratio else 0.0))
+    all_x = [null_v] + [p for lo, v, hi in cis for p in (lo, v, hi)]
+    use_xlog = bool(b.get("xlog")) and min(all_x) > 0
+    if use_xlog:
+        xlo_c = _f(b["xmin"]) if (b.get("xmin") is not None and _f(b["xmin"]) > 0) else min(all_x) * 0.85
+        xhi_c = _f(b["xmax"]) if (b.get("xmax") is not None and _f(b["xmax"]) > 0) else max(all_x) * 1.15
+        ticks, vlo, vhi = _log_ticks(xlo_c, xhi_c)
+    else:
+        sp = max(max(all_x) - min(all_x), 1e-6)
+        ticks = nice_ticks(
+            _f(b["xmin"]) if b.get("xmin") is not None else min(all_x) - sp * 0.1,
+            _f(b["xmax"]) if b.get("xmax") is not None else max(all_x) + sp * 0.1, 5,
+        )
+        vlo = _f(b["xmin"]) if b.get("xmin") is not None else ticks[0]
+        vhi = _f(b["xmax"]) if b.get("xmax") is not None else ticks[-1]
+        ticks = [t for t in ticks if vlo - 1e-6 <= t <= vhi + 1e-6] or [vlo, vhi]
+    fmt_x = _fmt_log_tick if use_xlog else _fmt_num
+    show_ci_txt = bool(b.get("value_labels", True))
+    ci_strs = [f"{_fmt_num(v)} ({_fmt_num(lo)}–{_fmt_num(hi)})" for lo, v, hi in cis]
+    lfs = max(10.0, fs - 2)
+    right_w = min(w * 0.30, max((text_width(s, lfs) for s in ci_strs), default=60.0) + 12.0) if show_ci_txt else 10.0
+    left = min(w * 0.34, max((text_width(lb, max(10.0, fs - 1)) for lb in xlabels[:n]), default=50.0) + 14.0)
+    note = str(b.get("note", "")).strip()
+    xlab = str(b.get("xlabel", "")).strip()
+    bot = fs * 1.5 + (fs * 1.35 if xlab else 0) + (fs * 1.25 if note else 0) + 6
+    px, py = x + left, y + 10.0
+    gw = max(60.0, w - left - right_w)
+    gh = max(60.0, h - 10.0 - bot)
+
+    def sx(v):
+        if use_xlog:
+            lx0, lx1 = math.log10(max(vlo, 1e-12)), math.log10(max(vhi, 1e-12))
+            return px + (math.log10(max(v, vlo)) - lx0) / max(lx1 - lx0, 1e-9) * gw
+        return px + (v - vlo) / max(vhi - vlo, 1e-9) * gw
+
+    out = []
+    for t in ticks:
+        tx = sx(t)
+        out.append(line(tx, py, tx, py + gh, GRID, 1.0))
+        out.append(text(tx, py + gh + fs * 1.15, fmt_x(t), max(10.0, fs - 1), MUT, "middle"))
+    out.append(line(px, py + gh, px + gw, py + gh, "#94A3B8", 1.3))
+    out.append(line(px, py, px, py + gh, "#94A3B8", 1.3))
+    if vlo <= null_v <= vhi:
+        nx_p = sx(null_v)
+        out.append(line(nx_p, py, nx_p, py + gh, "#64748B", 1.4, dash="5 3"))
+
+    slot = gh / max(n, 1)
+    c_sig_hi = (b.get("colors") or [SERIES[0], SERIES[1]])[0]
+    c_sig_lo = (b.get("colors") or [SERIES[0], SERIES[1]])[1] if len(b.get("colors") or [SERIES[0], SERIES[1]]) > 1 else SERIES[1]
+    for i, (lo, v, hi) in enumerate(cis):
+        cy = py + slot * (i + 0.5)
+        if i % 2 == 1:
+            out.append(rrect(px, py + slot * i + 1, gw, max(1.0, slot - 2), rx=0, fill="#F8FAFC"))
+        out.append(text_fit(px - 7, cy + (fs - 1) * 0.35, xlabels[i] if i < len(xlabels) else f"F{i+1}",
+                            left - 10, max(10.0, fs - 1), INK2, "end"))
+        crosses = (lo <= null_v <= hi)
+        col = "#64748B" if crosses else (c_sig_hi if v >= null_v else c_sig_lo)
+        x_lo, x_v, x_hi = sx(lo), sx(v), sx(hi)
+        out.append(line(x_lo, cy, x_hi, cy, col, 1.8))
+        out.append(line(x_lo, cy - 3.8, x_lo, cy + 3.8, col, 1.5))
+        out.append(line(x_hi, cy - 3.8, x_hi, cy + 3.8, col, 1.5))
+        out.append(marker_shape(x_v, cy, 4.6, col, "diamond" if not crosses else "square"))
+        if show_ci_txt:
+            out.append(text_fit(px + gw + 8, cy + lfs * 0.35, ci_strs[i], right_w - 10, lfs, INK2, "start"))
+    if xlab:
+        out.append(text_fit(px + gw / 2, py + gh + fs * 2.5, xlab, gw, max(10.0, fs - 1), MUT, "middle"))
+    if note:
+        out.append(text_fit(x + w / 2, y + h - 3, note, w - 8, max(10.0, fs - 2), MUT, "middle"))
+    return "".join(out), h
+
+
+def _normalize_chart_fields(b: dict) -> dict:
+    """Normalize natural field/series aliases so sd/sem/yerr/replicates/categories/data never drop silently."""
+    nb = dict(b)
+    if "xlabels" not in nb:
+        for k_alt in ("categories", "groups", "conditions"):
+            if nb.get(k_alt):
+                nb["xlabels"] = nb[k_alt]
+                break
+        else:
+            raw_k = str(nb.get("kind", "")).lower()
+            if nb.get("labels") and raw_k not in ("volcano", "volcano_plot", "scatter", "xy"):
+                nb["xlabels"] = nb["labels"]
+    for dst, alts in (
+        ("ylabel", ("y_label", "y_title", "y_axis")),
+        ("xlabel", ("x_label", "x_title", "x_axis")),
+        ("ylog", ("log_y", "log10_y")),
+        ("xlog", ("log_x", "log10_x")),
+        ("sig", ("significance", "pvalues", "p_values", "brackets")),
+        ("value_labels", ("show_values", "data_labels")),
+        ("value_suffix", ("suffix", "unit_suffix")),
+    ):
+        if dst not in nb:
+            for a in alts:
+                if a in nb and nb[a] is not None:
+                    nb[dst] = nb[a]
+                    break
+    if "reflines" not in nb and isinstance(nb.get("ref_lines"), list):
+        nb["reflines"] = nb["ref_lines"]
+    # Normalize each series dict + auto-compute mean/SD if only raw replicate points supplied
+    raw_ser = nb.get("series")
+    if isinstance(raw_ser, list):
+        norm_ser = []
+        for s in raw_ser:
+            if not isinstance(s, dict):
+                norm_ser.append(s)
+                continue
+            ns = dict(s)
+            if "name" not in ns:
+                for a in ("label", "group"):
+                    if ns.get(a) is not None:
+                        ns["name"] = ns[a]
+                        break
+            if "values" not in ns and not ("x" in ns and "y" in ns):
+                for a in ("data", "means", "mean", "vals"):
+                    if isinstance(ns.get(a), list):
+                        ns["values"] = ns[a]
+                        break
+            if "err" not in ns:
+                for a in ("sd", "sem", "yerr", "std", "error", "errors"):
+                    if isinstance(ns.get(a), list):
+                        ns["err"] = ns[a]
+                        break
+            if "points" not in ns:
+                for a in ("replicates", "raw", "dots", "samples", "individual"):
+                    if isinstance(ns.get(a), list):
+                        ns["points"] = ns[a]
+                        break
+            if "ci_lo" not in ns:
+                for a in ("ci_low", "lower", "low_ci"):
+                    if isinstance(ns.get(a), list):
+                        ns["ci_lo"] = ns[a]
+                        break
+            if "ci_hi" not in ns:
+                for a in ("ci_high", "upper", "high_ci"):
+                    if isinstance(ns.get(a), list):
+                        ns["ci_hi"] = ns[a]
+                        break
+            # Auto-derive exact mean & sample SD when only nested replicate lists are supplied
+            pts_n = ns.get("points")
+            if (not ns.get("values")) and isinstance(pts_n, list) and pts_n and isinstance(pts_n[0], list):
+                means_c, sds_c = [], []
+                for grp in pts_n:
+                    nums = [_f(v) for v in grp if v is not None] if isinstance(grp, list) else []
+                    if nums:
+                        mu = sum(nums) / len(nums)
+                        sd_v = math.sqrt(sum((v - mu) ** 2 for v in nums) / (len(nums) - 1)) if len(nums) >= 2 else 0.0
+                        means_c.append(round(mu, 4))
+                        sds_c.append(round(sd_v, 4))
+                    else:
+                        means_c.append(0.0)
+                        sds_c.append(0.0)
+                ns["values"] = means_c
+                if "err" not in ns:
+                    ns["err"] = sds_c
+            norm_ser.append(ns)
+        nb["series"] = norm_ser
+    return nb
+
+
 def _normalize_chart_kind(b: dict) -> tuple[str, dict]:
+    b = _normalize_chart_fields(b)
     raw = str(b.get("kind", "bar")).strip().lower().replace("-", "_").replace(" ", "_")
     if raw in ("bar", "grouped_bar", "bar_chart", "column", "columns", "bars", "hist", "histogram"):
         return "bar", b
-    if raw in ("hbar", "horizontal_bar", "barh", "forest", "forest_plot"):
+    if raw in ("forest", "forest_plot", "odds_ratio", "hazard_ratio", "effect_size"):
+        return "forest", b
+    if raw in ("hbar", "horizontal_bar", "barh"):
         return "hbar", b
     if raw in ("stacked", "stacked_bar", "stacked_bars", "composition"):
         return "stacked", b
     if raw in ("line", "line_chart", "curve", "timecourse", "trajectory", "dose_response"):
+        ser = b.get("series") or []
+        if ser and any(isinstance(s, dict) and "x" in s and "y" in s and not s.get("values") for s in ser):
+            nb = dict(b)
+            nb.setdefault("connect", True)
+            if raw == "dose_response" and "xlog" not in nb:
+                xs_dr = [_f(xv) for s in ser if isinstance(s, dict) for xv in (s.get("x") or []) if xv is not None]
+                if xs_dr and min(xs_dr) > 0 and max(xs_dr) / min(xs_dr) >= 20.0:
+                    nb["xlog"] = True
+            return "scatter", nb
         return "line", b
     if raw in ("step", "km", "kaplan_meier", "survival", "survival_curve"):
         nb = dict(b)
         nb.setdefault("step", True)
         return "line", nb
-    if raw in ("dot", "dotplot", "strip", "stripplot", "lollipop", "beeswarm"):
+    if raw in ("strip", "stripplot", "beeswarm", "dot_mean", "swarm"):
+        return "strip", b
+    if raw in ("dot", "dotplot", "lollipop"):
         return "dot", b
     if raw in ("box", "boxplot", "box_plot", "whisker", "violin"):
         return "box", b
@@ -850,6 +1088,9 @@ def render_chart(b, x, y, w, h, fs=12):
     if kind == "hbar":
         s_svg, used = _render_hbar(b, x, y, w, h, fs)
         return title_svg + s_svg, used + (tfs * 1.45 if chart_title else 0.0)
+    if kind == "forest":
+        s_svg, used = _render_forest(b, x, y, w, h, fs)
+        return title_svg + s_svg, used + (tfs * 1.45 if chart_title else 0.0)
     if kind == "paired":
         s_svg, used = _render_paired(b, x, y, w, h, fs)
         return title_svg + s_svg, used + (tfs * 1.45 if chart_title else 0.0)
@@ -869,7 +1110,7 @@ def render_chart(b, x, y, w, h, fs=12):
             mk = None if is_st_leg else MARKERS[i % len(MARKERS)]
             dsh = DASHES[i % len(DASHES)] if kind == "line" else None
             entries.append((s.get("name", f"S{i+1}"), colors[i % len(colors)],
-                            "line" if kind == "line" else ("dot" if kind == "dot" else "rect"),
+                            "line" if kind == "line" else ("dot" if kind in ("dot", "strip") else "rect"),
                             mk, dsh))
         legend_svg, lh = _legend(x, y + fs, w, entries, max(10.0, fs - 1))
 
@@ -913,7 +1154,7 @@ def render_chart(b, x, y, w, h, fs=12):
             lo_v = min(pos_vals)
         else:
             lo_v = min(min(all_lo), 0.0) if kind == "bar" else (min(all_lo) if all_lo else 0.0)
-            if kind in ("line", "dot", "box"):
+            if kind in ("line", "dot", "box", "strip"):
                 span = max(hi_v - lo_v, 1e-6)
                 lo_v = lo_v - span * 0.08
                 if all_lo and min(all_lo) >= 0 and lo_v < 0:
@@ -927,10 +1168,10 @@ def render_chart(b, x, y, w, h, fs=12):
     if sig_ys:
         head = 1.10
     elif has_sig:
-        head = 1.24 + 0.06 * max(0, len(sigs) - 1)
+        head = 1.24 + 0.07 * max(0, len(sigs) - 1)
     else:
         head = 1.15 if b.get("value_labels") else 1.08
-    use_ylog = bool(b.get("ylog")) and kind in ("bar", "line", "dot", "box") and all(
+    use_ylog = bool(b.get("ylog")) and kind in ("bar", "line", "dot", "box", "strip") and all(
         _f(v) > 0 for s in series for v in (s.get("values") or []) if v is not None
     ) and lo_v > 0
     cart_refs = []
@@ -953,6 +1194,7 @@ def render_chart(b, x, y, w, h, fs=12):
             lo_v, hi_v, lo_pad, hi_pad, b,
             str(b.get("ylabel", "")), str(b.get("value_suffix", "")),
             has_top_annot=(has_sig or bool(b.get("value_labels"))),
+            n_sigs=len(sigs),
         )
 
     fmt_y = _fmt_log_tick if use_ylog else _fmt_num
@@ -962,14 +1204,33 @@ def render_chart(b, x, y, w, h, fs=12):
     note = str(b.get("note", "")).strip()
     xlab = str(b.get("xlabel", "")).strip()
 
-    # Check if x-labels need 2 wrapped lines
+    # Adaptive X-labels: 1-line -> 2-line wrap -> angled -28 deg for dense/long category labels
     nx = max(len(xlabels), max((max(len(s.get("values", [])), len(s.get("points") or []))
                                 for s in series), default=1), 1)
     gw = max(60.0, w - left - 8)
     slot = gw / nx
-    x_wrapped = [wrap_text(lb, max(10.0, fs - 1), slot * 0.94)[:2] for lb in xlabels]
-    max_xl = max((len(lines) for lines in x_wrapped), default=1) if xlabels else 0
-    x_h = (max_xl * (fs * 1.18) + 6) if xlabels else fs * 0.5
+    xfs = max(10.0, fs - 1)
+    x_wrapped = [wrap_text(lb, xfs, slot * 0.94)[:2] for lb in xlabels]
+    angle_x = bool(b.get("rotate_xlabels")) or (
+        bool(xlabels) and (
+            any(len(wrap_text(lb, xfs, slot * 0.94)) > 2 for lb in xlabels)
+            or any(text_width(ln, xfs) > slot * 1.12 for lns in x_wrapped for ln in lns)
+        )
+    )
+    if angle_x and xlabels:
+        afs = max(10.0, xfs - 0.5)
+        max_xw = min(130.0, max(text_width(lb, afs) for lb in xlabels))
+        x_h = max(24.0, max_xw * math.sin(math.radians(28.0)) + afs + 6.0)
+        # Ensure rotated first label (text-anchor=end) never overhangs left panel border
+        first_w = min(130.0, text_width(xlabels[0], afs))
+        first_overhang = first_w * math.cos(math.radians(28.0)) - slot * 0.45 + 6.0
+        if first_overhang > left:
+            left = min(w * 0.34, first_overhang)
+            gw = max(60.0, w - left - 8)
+            slot = gw / nx
+    else:
+        max_xl = max((len(lines) for lines in x_wrapped), default=1) if xlabels else 0
+        x_h = (max_xl * (fs * 1.18) + 6) if xlabels else fs * 0.5
     bot = x_h + (fs * 1.35 if xlab else 0) + (fs * 1.25 if note else 0) + 4
 
     px, py = x + left, y + lh + 8
@@ -998,12 +1259,22 @@ def render_chart(b, x, y, w, h, fs=12):
     if vlo < 0 < vhi:
         out.append(line(px, sy(0.0), px + gw, sy(0.0), "#64748B", 1.2))
 
-    # X-labels (wrapped cleanly up to 2 lines)
-    for gi, lns in enumerate(x_wrapped):
-        cx = px + slot * (gi + 0.5)
-        for li, ln in enumerate(lns):
-            out.append(text_fit(cx, py + gh + fs * 1.15 + li * (fs * 1.15),
-                                ln, slot * 0.94, max(10.0, fs - 1), INK2, "middle"))
+    # X-labels (clean 2-line wrap or -28 deg angled rotation so long biological labels never truncate)
+    if angle_x and xlabels:
+        afs = max(10.0, xfs - 0.5)
+        for gi, lb in enumerate(xlabels):
+            cx = px + slot * (gi + 0.5)
+            ty_a = py + gh + afs + 3.0
+            lb_c = lb if text_width(lb, afs) <= 130.0 else lb[:22] + "…"
+            out.append(f'<text x="{cx:.1f}" y="{ty_a:.1f}" font-size="{afs:.1f}" '
+                       f'fill="{INK2}" text-anchor="end" '
+                       f'transform="rotate(-28 {cx:.1f} {ty_a:.1f})">{esc(lb_c)}</text>')
+    else:
+        for gi, lns in enumerate(x_wrapped):
+            cx = px + slot * (gi + 0.5)
+            for li, ln in enumerate(lns):
+                out.append(text_fit(cx, py + gh + fs * 1.15 + li * (fs * 1.15),
+                                    ln, slot * 0.94, xfs, INK2, "middle"))
 
     # Data marks (clamped Prism/Nature bar proportions + tracked bar rects for zero-collision reflines)
     bw = min((slot * 0.70) / nsv, 54.0)
@@ -1143,6 +1414,45 @@ def render_chart(b, x, y, w, h, fs=12):
                         vy = sy(vhi_b) - 8
                         if vy > py + 6:
                             out.append(text(midx, vy, _fmt_num(med) + vsuf, lfs, INK, "middle"))
+            elif kind == "strip":
+                pts_list = s.get("points") or []
+                n_it = max(len(vals), len(pts_list))
+                for i in range(n_it):
+                    cx = px + slot * (i + 0.5) - group_w / 2 + si * bw
+                    midx = cx + bw * 0.42
+                    bar_hw = min(bw * 0.36, 17.0)
+                    rpts = [_f(pv) for pv in (pts_list[i] if i < len(pts_list) and isinstance(pts_list[i], list) else []) if pv is not None]
+                    if rpts:
+                        mean_v = vals[i] if i < len(vals) else sum(rpts) / len(rpts)
+                        if i < len(err) and err[i] > 0:
+                            sd_v = err[i]
+                        elif len(rpts) >= 2:
+                            m_r = sum(rpts) / len(rpts)
+                            sd_v = math.sqrt(sum((pv - m_r) ** 2 for pv in rpts) / (len(rpts) - 1))
+                        else:
+                            sd_v = 0.0
+                        dot_r = 2.2 if len(rpts) > 30 else (2.8 if len(rpts) > 12 else 3.3)
+                        dot_op = "0.55" if len(rpts) > 30 else "0.82"
+                        offs = _jitter_offsets(len(rpts), min(bar_hw * 0.92, 13.0))
+                        for pv, dx in zip(rpts, offs):
+                            out.append(f'<circle cx="{midx+dx:.1f}" cy="{sy(pv):.1f}" r="{dot_r:.1f}" '
+                                       f'fill="{col}" fill-opacity="{dot_op}" stroke="#FFFFFF" stroke-width="0.8"/>')
+                    else:
+                        mean_v = vals[i] if i < len(vals) else 0.0
+                        sd_v = err[i] if i < len(err) else 0.0
+                    # Bold horizontal mean bar + SD whiskers on top of individual replicate dots
+                    if sd_v > 0:
+                        lo_eb = max(vlo, mean_v - sd_v) if use_ylog else (mean_v - sd_v)
+                        out.append(line(midx, sy(mean_v + sd_v), midx, sy(lo_eb), INK, 1.5))
+                        for ey_v in (sy(mean_v + sd_v), sy(lo_eb)):
+                            out.append(line(midx - bar_hw * 0.55, ey_v, midx + bar_hw * 0.55, ey_v, INK, 1.5))
+                    out.append(line(midx - bar_hw, sy(mean_v), midx + bar_hw, sy(mean_v), INK, 2.6))
+                    if b.get("value_labels"):
+                        lfs = max(10.0, fs - 2)
+                        top_v = max([mean_v + sd_v] + rpts)
+                        vy = sy(top_v) - 8
+                        if vy > py + 6:
+                            out.append(text(midx, vy, _fmt_num(mean_v) + vsuf, lfs, INK, "middle"))
             else:  # bar or dot
                 pts_list = s.get("points") or []
                 for i, v in enumerate(vals):
@@ -1256,11 +1566,11 @@ def render_chart(b, x, y, w, h, fs=12):
     for sg in sigs:
         try:
             g1, g2 = float(sg["x1"]), float(sg["x2"])
-            if "s1" in sg and kind in ("bar", "dot", "box"):
+            if "s1" in sg and kind in ("bar", "dot", "box", "strip"):
                 sx1 = px + slot * (g1 + 0.5) - group_w / 2 + float(sg["s1"]) * bw + bw * 0.42
             else:
                 sx1 = px + slot * (g1 + 0.5)
-            if "s2" in sg and kind in ("bar", "dot", "box"):
+            if "s2" in sg and kind in ("bar", "dot", "box", "strip"):
                 sx2 = px + slot * (g2 + 0.5) - group_w / 2 + float(sg["s2"]) * bw + bw * 0.42
             else:
                 sx2 = px + slot * (g2 + 0.5)

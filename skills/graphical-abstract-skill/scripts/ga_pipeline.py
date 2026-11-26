@@ -252,18 +252,32 @@ def verify_exports(png: Path, pdf: Path, report: dict, hires_dpi: int = 0):
             from PIL import Image
             import statistics
             im = Image.open(png).convert("L")
+            iw, ih = im.size
             raw_px = (list(im.get_flattened_data()) if hasattr(im, "get_flattened_data")
                       else list(im.getdata()))
             px = raw_px[:: max(1, len(raw_px) // 20000)]
-            ec["png"] = {"dims": list(im.size), "dpi": real_dpi,
-                         "non_blank": statistics.pstdev(px) > 4.0}
+            ink_ratio = round(sum(1 for v in px if v < 245) / max(len(px), 1), 4)
+            # Outer 1px border ink check catches clipped text/shapes even on complex external SVGs
+            edge_clip = 0
+            if iw >= 4 and ih >= 4 and len(raw_px) == iw * ih:
+                top_b = raw_px[:iw]
+                bot_b = raw_px[(ih - 1) * iw:]
+                lft_b = raw_px[::iw]
+                rgt_b = raw_px[iw - 1::iw]
+                edge_clip = sum(1 for v in top_b if v < 180) + sum(1 for v in bot_b if v < 180) \
+                    + sum(1 for v in lft_b if v < 180) + sum(1 for v in rgt_b if v < 180)
+            ec["png"] = {
+                "dims": [iw, ih], "dpi": real_dpi, "dpi_ok": real_dpi <= 108.0,
+                "non_blank": statistics.pstdev(px) > 4.0,
+                "ink_ratio": ink_ratio, "edge_clip_px": edge_clip,
+            }
             if hires_dpi > 0:
                 p2 = png.with_name(f"{png.stem}_{hires_dpi}dpi.png")
                 if p2.exists():
                     ec["png_hires"] = {"dims": list(Image.open(p2).size), "dpi": int(hires_dpi)}
         except Exception:
             dims = _png_dims_stdlib(png)
-            ec["png"] = {"dims": dims, "dpi": real_dpi,
+            ec["png"] = {"dims": dims, "dpi": real_dpi, "dpi_ok": real_dpi <= 108.0,
                          "non_blank": png.stat().st_size > 2048}
             if hires_dpi > 0:
                 p2 = png.with_name(f"{png.stem}_{hires_dpi}dpi.png")
@@ -324,10 +338,27 @@ def main():
         raw_st = bpath.stem.replace(".brief", "") or "ga"
         if raw_st in ("brief", "ga") and a.case and Path(a.case).exists():
             try:
-                c_txt = Path(a.case).read_text(encoding="utf-8", errors="ignore")
-                m_svg = re.search(r"\b([A-Za-z][A-Za-z0-9_-]{2,40})\.svg\b", c_txt)
-                if m_svg and m_svg.group(1).lower() not in ("editable", "source", "input"):
-                    raw_st = m_svg.group(1)
+                c_obj = json.loads(Path(a.case).read_text(encoding="utf-8", errors="ignore"))
+                # Only scan output/workorder fields (NEVER input materials/attachments!)
+                out_blob = json.dumps(
+                    {k: c_obj[k] for k in ("output_contract", "required_outputs", "deliverables",
+                                           "expected_outputs", "workorder", "target_output", "task")
+                     if k in c_obj},
+                    ensure_ascii=False,
+                )
+                bad_stems = {"editable", "source", "input", "original", "template", "reference", "draft", "example"}
+                found_st = False
+                for m_svg in re.finditer(r"\b([A-Za-z][A-Za-z0-9_-]{2,40})\.svg\b", out_blob):
+                    cand_st = m_svg.group(1)
+                    if not any(bw in cand_st.lower() for bw in bad_stems):
+                        raw_st = cand_st
+                        found_st = True
+                        break
+                if not found_st:
+                    m_fig = re.search(r"\b(figure[_-]?\d+[a-z]?|fig[_-]?\d+[a-z]?|graphical[_-]abstract)\b",
+                                      out_blob, re.IGNORECASE)
+                    if m_fig:
+                        raw_st = m_fig.group(1).lower()
             except Exception:
                 pass
         stem = raw_st
@@ -357,6 +388,18 @@ def main():
         "panel_fs": {k: v["fs"] for k, v in diag["panels"].items()},
         "panel_fill": {k: v.get("fill_ratio") for k, v in diag["panels"].items()},
     }
+    if report.get("export_check"):
+        ec = report["export_check"]
+        p_ec = ec.get("png") or {}
+        f_ec = ec.get("pdf") or {}
+        summary["export_check"] = {
+            "dpi": p_ec.get("dpi"),
+            "dpi_ok": p_ec.get("dpi_ok"),
+            "ink_ratio": p_ec.get("ink_ratio"),
+            "edge_clip_px": p_ec.get("edge_clip_px"),
+            "non_blank": p_ec.get("non_blank"),
+            "searchable_text": f_ec.get("searchable_text"),
+        }
     if overflow:
         summary["overflow_hints"] = [
             f"{k} overflows by {round(diag['panels'][k]['content_h'] - diag['panels'][k]['avail_h'], 1)}px "
@@ -394,8 +437,8 @@ def main():
             summary["data_grounding"] = ck["data_grounding"]
 
     # Optional one-shot delivery to /app/output + result.json generation
-    if a.deliver:
-        deliv = Path(a.deliver).resolve()
+    if a.deliver or (a.case and Path(a.case).exists() and outdir.name == "output"):
+        deliv = Path(a.deliver).resolve() if a.deliver else outdir
         deliv.mkdir(parents=True, exist_ok=True)
         copied = []
         cand_files = [svg, png, pdf]

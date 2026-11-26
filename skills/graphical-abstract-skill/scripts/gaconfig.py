@@ -95,45 +95,81 @@ def lum_delta(a: str, b: str) -> float:
 def _unit_to_px(val: str) -> float | None:
     if not val:
         return None
-    m = re.match(r"^\s*([\d.]+)\s*([a-z%]*)\s*$", str(val).lower())
+    m = re.match(
+        r"^\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*([a-z%]*)\s*$",
+        str(val).lower(),
+    )
     if not m:
         return None
     num, unit = float(m.group(1)), m.group(2)
-    scale = {"": 1.0, "px": 1.0, "pt": 96.0 / 72.0, "in": 96.0,
+    if num <= 0:
+        return None
+    scale = {"": 1.0, "px": 1.0, "pt": 96.0 / 72.0, "pc": 16.0, "in": 96.0,
              "cm": 96.0 / 2.54, "mm": 96.0 / 25.4}
     return num * scale[unit] if unit in scale else None
 
 
+def _extract_root_svg_tag(svg_text: str) -> str:
+    """Strictly extract the root <svg ...> opening tag (ignoring comments & child elements)."""
+    if not svg_text:
+        return ""
+    head = re.sub(r"<!--.*?-->", "", svg_text[:32768], flags=re.S)
+    m = re.search(r"<svg\b[^>]*>", head, re.I | re.S)
+    if not m and len(svg_text) > 32768:
+        m = re.search(r"<svg\b[^>]*>", re.sub(r"<!--.*?-->", "", svg_text, flags=re.S), re.I | re.S)
+    return m.group(0) if m else ""
+
+
+def _svg_attr(root_tag: str, name: str) -> str | None:
+    """Extract a standalone attribute (single or double quoted) from the root <svg> tag."""
+    if not root_tag:
+        return None
+    m = re.search(rf'(?<=\s){name}\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', root_tag, re.I)
+    if not m:
+        return None
+    val = m.group(1) if m.group(1) is not None else m.group(2)
+    return val.strip()
+
+
+def _parse_viewbox_str(vb_str: str | None) -> tuple[float, float, float, float] | None:
+    if not vb_str:
+        return None
+    try:
+        parts = [float(x) for x in re.split(r"[\s,]+", vb_str.strip()) if x]
+        if len(parts) == 4 and parts[2] > 0 and parts[3] > 0:
+            return (parts[0], parts[1], parts[2], parts[3])
+    except Exception:
+        pass
+    return None
+
+
 def parse_svg_dims(svg_text: str, default=(W, H)) -> tuple[int, int]:
-    """Extract canvas pixel (w, h) from an SVG's width/height or viewBox."""
-    head = svg_text[:1500]
-    mw = re.search(r'\bwidth="([^"]+)"', head)
-    mh = re.search(r'\bheight="([^"]+)"', head)
-    w = _unit_to_px(mw.group(1)) if mw else None
-    h = _unit_to_px(mh.group(1)) if mh else None
-    if (not w or not h):
-        mvb = re.search(r'\bviewBox="([^"]+)"', head)
-        if mvb:
-            parts = [float(x) for x in re.split(r"[\s,]+", mvb.group(1).strip()) if x]
-            if len(parts) == 4 and parts[2] > 0 and parts[3] > 0:
-                w, h = w or parts[2], h or parts[3]
+    """Extract canvas pixel (w, h) strictly from root <svg> width/height or viewBox."""
+    root_tag = _extract_root_svg_tag(svg_text)
+    w = _unit_to_px(_svg_attr(root_tag, "width") or "")
+    h = _unit_to_px(_svg_attr(root_tag, "height") or "")
+    if not w or not h:
+        vb = _parse_viewbox_str(_svg_attr(root_tag, "viewBox"))
+        if vb:
+            _, _, vbw, vbh = vb
+            if not w and not h:
+                w, h = vbw, vbh
+            elif not w:
+                w = h * (vbw / vbh)
+            elif not h:
+                h = w * (vbh / vbw)
     return int(round(w or default[0])), int(round(h or default[1]))
 
 
 def parse_svg_viewbox(svg_text: str, default=(0.0, 0.0, float(W), float(H))) -> tuple[float, float, float, float]:
-    """Return (min_x, min_y, width, height) from viewBox or width/height."""
-    head = svg_text[:2000]
-    mvb = re.search(r'\bviewBox="([^"]+)"', head)
-    if mvb:
-        try:
-            parts = [float(x) for x in re.split(r"[\s,]+", mvb.group(1).strip()) if x]
-            if len(parts) == 4 and parts[2] > 0 and parts[3] > 0:
-                return (parts[0], parts[1], parts[2], parts[3])
-        except Exception:
-            pass
+    """Return (min_x, min_y, width, height) strictly from root <svg> viewBox or width/height."""
+    root_tag = _extract_root_svg_tag(svg_text)
+    vb = _parse_viewbox_str(_svg_attr(root_tag, "viewBox"))
+    if vb:
+        return vb
     w, h = parse_svg_dims(svg_text, default=(int(default[2]), int(default[3])))
     return (0.0, 0.0, float(w), float(h))
 
 
-VERSION = "GA-Skill v16.2"
+VERSION = "GA-Skill v19.1"
 ROLE_ACCENTS = [ROLE[k]["accent"] for k in ("question", "method", "results", "conclusion")]

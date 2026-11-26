@@ -4,7 +4,7 @@
   "title": "Example | Synthetic Multi-Panel Biological Figure Template",
   "subtitle": "Demonstrates journal theme, lowercase badges (a-d), membrane mechanism, boxplot+replicates & log-scale dose-response",
   "sources": "Synthetic example template (API demonstration)",
-  "version": "GA-Skill v14 · Example",
+  "version": "GA-Skill v19.1 · Example",
   "layout": "hero-2x2",
   "panels": [
     {

@@ -164,6 +164,72 @@ def _set_el_text(el, new_s: str):
         el.text = new_s
 
 
+def _rect_geom_from_el(el) -> tuple[float, float, float, float] | None:
+    """Return (x, y, w, h) for <rect>, or axis-aligned rectangular <polygon>/<path> (matplotlib/Prism bars)."""
+    tag = _strip(el.tag)
+    if tag == "rect":
+        try:
+            return (float(el.get("x", 0)), float(el.get("y", 0)),
+                    float(el.get("width", 0)), float(el.get("height", 0)))
+        except ValueError:
+            return None
+    pts = []
+    if tag == "polygon":
+        nums = [float(v) for v in re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", el.get("points", ""))]
+        pts = [(nums[i], nums[i + 1]) for i in range(0, len(nums) - 1, 2)]
+    elif tag == "path":
+        d = (el.get("d") or "").strip()
+        # Only rewrite clean straight-edge absolute M/L/H/V/Z paths (never touch curves!)
+        if d and not re.search(r"[CcSsQqTtAa]", d):
+            cx, cy = 0.0, 0.0
+            for tok in re.finditer(r"([MmLlHhVvZz])\s*([^MmLlHhVvZz]*)", d):
+                cmd = tok.group(1)
+                nums = [float(v) for v in re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", tok.group(2))]
+                if cmd == "M":
+                    for i in range(0, len(nums) - 1, 2):
+                        cx, cy = nums[i], nums[i + 1]
+                        pts.append((cx, cy))
+                elif cmd == "m":
+                    for i in range(0, len(nums) - 1, 2):
+                        cx, cy = cx + nums[i], cy + nums[i + 1]
+                        pts.append((cx, cy))
+                elif cmd == "L":
+                    for i in range(0, len(nums) - 1, 2):
+                        cx, cy = nums[i], nums[i + 1]
+                        pts.append((cx, cy))
+                elif cmd == "l":
+                    for i in range(0, len(nums) - 1, 2):
+                        cx, cy = cx + nums[i], cy + nums[i + 1]
+                        pts.append((cx, cy))
+                elif cmd == "H":
+                    for v in nums:
+                        cx = v
+                        pts.append((cx, cy))
+                elif cmd == "h":
+                    for v in nums:
+                        cx += v
+                        pts.append((cx, cy))
+                elif cmd == "V":
+                    for v in nums:
+                        cy = v
+                        pts.append((cx, cy))
+                elif cmd == "v":
+                    for v in nums:
+                        cy += v
+                        pts.append((cx, cy))
+    if len(pts) >= 4:
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+        if (x1 - x0) > 1e-3 and (y1 - y0) > 1e-3:
+            # Verify all vertices lie on the axis-aligned rectangle perimeter
+            tol = 0.25
+            if all((abs(px - x0) <= tol or abs(px - x1) <= tol) and (abs(py - y0) <= tol or abs(py - y1) <= tol)
+                   for px, py in pts):
+                return (x0, y0, x1 - x0, y1 - y0)
+    return None
+
+
 def inspect_svg(svg_path: Path, query: str | None = None) -> dict:
     raw = svg_path.read_text(encoding="utf-8", errors="ignore")
     cw, ch = parse_svg_dims(raw)
@@ -191,9 +257,24 @@ def inspect_svg(svg_path: Path, query: str | None = None) -> dict:
         if tag == "g" and el.get("id"):
             lid = el.get("id")
             layers.append(lid)
-            ilbl = el.get("{http://www.inkscape.org/namespaces/inkscape}label")
+            ilbl = el.get("{http://www.inkscape.org/namespaces/inkscape}label") or el.get("data-name")
             if ilbl and ilbl != lid:
                 layer_labels[lid] = ilbl
+            # Surface matplotlib-style <g id="patch_3"><path d="M...Z"/></g> single-rect containers
+            if query or len(named_shapes) < 80:
+                sh_ch = [ch for ch in el if _strip(ch.tag) in ("rect", "path", "polygon")]
+                if len(sh_ch) == 1 and not sh_ch[0].get("id"):
+                    rb = _rect_geom_from_el(sh_ch[0])
+                    if rb is not None:
+                        named_shapes.append({
+                            "id": lid,
+                            "tag": f"g>{_strip(sh_ch[0].tag)}",
+                            "layer": _nearest_layer(el),
+                            "fill": _get_eff_attr(sh_ch[0], "fill"),
+                            "stroke": _get_eff_attr(sh_ch[0], "stroke"),
+                            "geom": {"x": f"{rb[0]:g}", "y": f"{rb[1]:g}",
+                                     "width": f"{rb[2]:g}", "height": f"{rb[3]:g}", "rect_like": True},
+                        })
         elif tag == "text":
             txt = _full_text(el).strip()
             tx_v = el.get("x", "")
@@ -224,6 +305,11 @@ def inspect_svg(svg_path: Path, query: str | None = None) -> dict:
             if el.get("id") and (query or len(named_shapes) < 80):
                 geom = {k: el.get(k) for k in ("x", "y", "width", "height", "cx", "cy", "r", "x1", "y1", "x2", "y2")
                         if el.get(k) is not None}
+                if not geom and tag in ("path", "polygon"):
+                    rb = _rect_geom_from_el(el)
+                    if rb is not None:
+                        geom = {"x": f"{rb[0]:g}", "y": f"{rb[1]:g}",
+                                "width": f"{rb[2]:g}", "height": f"{rb[3]:g}", "rect_like": True}
                 ent = {
                     "id": el.get("id"),
                     "tag": tag,
@@ -494,7 +580,7 @@ def apply_edits(root, edits: list[dict], vb: tuple[float, float, float, float],
     id_map = {el.get("id"): el for el in root.iter() if el.get("id")}
     label_map = {}
     for el in root.iter():
-        il = el.get("{http://www.inkscape.org/namespaces/inkscape}label")
+        il = el.get("{http://www.inkscape.org/namespaces/inkscape}label") or el.get("data-name")
         if il and il not in label_map:
             label_map[il] = el
 
@@ -555,7 +641,11 @@ def apply_edits(root, edits: list[dict], vb: tuple[float, float, float, float],
             changes.append(f"replace_text ({cnt}x): '{old_s}' -> '{new_s}'")
 
         elif kind in ("set_text_by_id", "set_text"):
-            target = id_map.get(op.get("id")) if op.get("id") else None
+            target = _resolve(op.get("id")) if op.get("id") else None
+            if target is not None and _strip(target.tag) == "g":
+                t_desc = [ch for ch in target.iter() if _strip(ch.tag) == "text"]
+                if len(t_desc) == 1:
+                    target = t_desc[0]
             if target is None or _strip(target.tag) != "text":
                 errors.append(f"edit[{ei}]: text id '{op.get('id')}' not found")
                 continue
@@ -565,6 +655,37 @@ def apply_edits(root, edits: list[dict], vb: tuple[float, float, float, float],
                 if op.get(st_k) is not None:
                     _set_eff_attr(target, svg_k, str(op[st_k]))
             changes.append(f"set_text_by_id[{op.get('id')}]: '{prev}' -> '{op.get('new', '')}'")
+
+        elif kind in ("add_text", "insert_text"):
+            txt_val = str(op.get("text", op.get("new", ""))).strip()
+            if not txt_val:
+                errors.append(f"edit[{ei}]: add_text missing 'text'")
+                continue
+            parent = _resolve(op.get("layer")) if op.get("layer") else None
+            if parent is None:
+                parent = id_map.get("layer-edits")
+                if parent is None:
+                    parent = ET.SubElement(root, f"{NS}g", {"id": "layer-edits"})
+                    id_map["layer-edits"] = parent
+            t_attrs = {
+                "x": str(float(op.get("x", 20))),
+                "y": str(float(op.get("y", 20))),
+                "font-family": str(op.get("font_family", FONT)),
+                "font-size": str(op.get("font_size", 12)),
+                "fill": str(op.get("fill", "#0F172A")),
+            }
+            if op.get("anchor") or op.get("text_anchor"):
+                t_attrs["text-anchor"] = str(op.get("anchor") or op.get("text_anchor"))
+            if op.get("font_weight") or op.get("bold"):
+                t_attrs["font-weight"] = str(op.get("font_weight") or "bold")
+            if op.get("id"):
+                t_attrs["id"] = str(op["id"])
+            tel = ET.SubElement(parent, f"{NS}text", t_attrs)
+            tel.text = txt_val
+            if op.get("id"):
+                id_map[str(op["id"])] = tel
+            text_els.append(tel)
+            changes.append(f"add_text '{txt_val[:40]}' at ({t_attrs['x']},{t_attrs['y']})")
 
         elif kind == "set_text_by_index":
             idx = int(op.get("index", -1))
@@ -668,29 +789,42 @@ def apply_edits(root, edits: list[dict], vb: tuple[float, float, float, float],
             changes.append(f"delete {op.get('id')}")
 
         elif kind == "scale_rect":
-            target = id_map.get(op.get("id")) if op.get("id") else None
-            if target is None or _strip(target.tag) != "rect":
-                errors.append(f"edit[{ei}]: scale_rect target rect '{op.get('id')}' not found")
+            target = _resolve(op.get("id")) if op.get("id") else None
+            if target is not None and _strip(target.tag) == "g":
+                sh_ch = [ch for ch in target if _strip(ch.tag) in ("rect", "path", "polygon")]
+                if len(sh_ch) == 1:
+                    target = sh_ch[0]
+            t_tag = _strip(target.tag) if target is not None else ""
+            rb = _rect_geom_from_el(target) if target is not None else None
+            if target is None or rb is None:
+                errors.append(f"edit[{ei}]: scale_rect target rect/rect-like path '{op.get('id')}' not found")
                 continue
-            rx = float(target.get("x", 0))
-            ry = float(target.get("y", 0))
-            rw = float(target.get("width", 0))
-            rh = float(target.get("height", 0))
+            rx, ry, rw, rh = rb
+            nx, ny, nw, nh = rx, ry, rw, rh
             anchor = str(op.get("anchor", "bottom")).lower()
             if "height" in op:
                 nh = float(op["height"])
                 if anchor == "bottom":
-                    target.set("y", f"{ry + rh - nh:g}")
-                target.set("height", f"{nh:g}")
-                changes.append(f"scale_rect {op.get('id')}: height {rh:g} -> {nh:g} (anchor={anchor})")
+                    ny = ry + rh - nh
+                msg_sc = f"scale_rect {op.get('id')} ({t_tag}): height {rh:g} -> {nh:g} (anchor={anchor})"
             elif "width" in op:
                 nw = float(op["width"])
                 if anchor == "right":
-                    target.set("x", f"{rx + rw - nw:g}")
-                target.set("width", f"{nw:g}")
-                changes.append(f"scale_rect {op.get('id')}: width {rw:g} -> {nw:g} (anchor={anchor})")
+                    nx = rx + rw - nw
+                msg_sc = f"scale_rect {op.get('id')} ({t_tag}): width {rw:g} -> {nw:g} (anchor={anchor})"
             else:
                 errors.append(f"edit[{ei}]: scale_rect requires 'height' or 'width'")
+                continue
+            if t_tag == "rect":
+                target.set("x", f"{nx:g}")
+                target.set("y", f"{ny:g}")
+                target.set("width", f"{nw:g}")
+                target.set("height", f"{nh:g}")
+            elif t_tag == "polygon":
+                target.set("points", f"{nx:g},{ny:g} {nx+nw:g},{ny:g} {nx+nw:g},{ny+nh:g} {nx:g},{ny+nh:g}")
+            elif t_tag == "path":
+                target.set("d", f"M {nx:g} {ny:g} L {nx+nw:g} {ny:g} L {nx+nw:g} {ny+nh:g} L {nx:g} {ny+nh:g} Z")
+            changes.append(msg_sc)
 
         elif kind == "insert_svg":
             frag = str(op.get("xml", "")).strip()
@@ -894,9 +1028,21 @@ def main():
                     shutil.copy2(fsrc, dst)
                 copied.append(fsrc.name)
         out_summary["engine"] = eng
+        out_summary["canvas"] = [cw, ch]
         out_summary["audit_pass"] = ck["pass"]
         out_summary["audit_warnings"] = ck["warnings"]
         out_summary["delivered"] = copied
+        if ec:
+            p_ec = ec.get("png") or {}
+            f_ec = ec.get("pdf") or {}
+            out_summary["export_check"] = {
+                "dpi": p_ec.get("dpi"),
+                "dpi_ok": p_ec.get("dpi_ok"),
+                "ink_ratio": p_ec.get("ink_ratio"),
+                "edge_clip_px": p_ec.get("edge_clip_px"),
+                "non_blank": p_ec.get("non_blank"),
+                "searchable_text": f_ec.get("searchable_text"),
+            }
         if a.case and Path(a.case).exists():
             from ga_result import build_result
             out_summary["result"] = build_result(
