@@ -16,7 +16,7 @@
 │   ├── export_and_checks.md     # 导出参数、六类检查点与 result.json 契约说明
 │   └── checklists.md            # P0/P1/P2 终审速查清单
 └── scripts/
-    ├── inspect_input.py         # 步骤 0 一步式输入全景侦查（case/contract/数据表统计/PDF 候选实体/SVG 文本/字体与路由建议）
+    ├── inspect_input.py         # 步骤 0 一步式输入全景侦查（含 --init-output 首轮保底落盘 result.json）
     ├── chart_tool.py            # 数据图主入口（绘图 + SVG/PDF/PNG/PPTX + 溯源 + 自检）
     ├── chart_spec.py            # 数据解析（CSV/TSV 跳注释与 GBK 容错/零依赖 XLSX/JSON/filter/x_order/sort_x/非对称误差/重复聚合）
     ├── chart_render.py          # 12 种图型 + 双 Y 轴 + 线性回归(fit_line/R²) + 语义显著性括线 + 双向图元数值审计
@@ -30,9 +30,9 @@
 ## 核心能力与六类检查点
 
 1. **科学实体保真与接地审计**：`inspect_input.py --compact` 与 `--extract-pdf` 一次提取原论文 PDF 全文、单/双换行完整 Figure 图注（上限 2,500 字）、因果 `mechanism_sentences`、高频候选科学实体词表、**命中页空间矢量标签 `spatial_labels(x,y)`** 与 100 DPI 页图渲染；`--diagram --verify-pdf` 清理 PDF 断行连字符后逐字校验全部节点实体拼写并给出纠错建议。
-2. **空间关系与生物机制图 (`svg_edit.py --diagram`)**：支持纵向细胞分层 (`direction:"TB"`) 与横向通路流程 (`direction:"LR"`) 双模式；支持节点生物学角色自动语义配色 (`role`)、多蛋白复合物包络框 (`complexes`)、统一区室框（含质膜双线 `style:"membrane"`）、PTM 修饰徽章 (`badge:"P"/"Ub"`)、**平滑正交 90° 入框曲线 (`route:"smooth"`, 消除斜切 T-bar)**、同层双向反馈平行分离、外侧圆角走廊防穿框、长标题/长图注自动换行与语义图例，同步输出 `.svg/.pdf/.png(300 DPI)/_preview.png(100 DPI)` 与 `.provenance.json`。
-3. **数据编码与双向图元数值审计 (`chart_tool.py`)**：支持 12 种图型（`bar/grouped_bar/stacked_bar(normalize_pct)/barh/line(error_style:"band")/errorbar/scatter/box/violin/pie/donut/heatmap`）、双 Y 轴柱折线组合图 (`secondary_series`+`ylabel2` 右轴同色着色)、数值散点线性拟合 (`fit_line`/干净回归方程与 $R^2$/点标签避让拟合线)、宽矩阵热图自动识别与逐格溯源、tidy/宽表/零依赖 `.xlsx`、`data.filter`（保原始物理行号）、`x_order`/`series_order`/`sort_x`、非对称误差棒、零中心发散热图 (`vcenter`)、语义显著性括线与重复观测自动聚合 (`mean±SD`)；渲染后自动执行 **`glyph_value_audit`**、MathText 兼容 `svg_text_audit` 与 `annotation_audit`。
-4. **源保留编辑 (`svg_edit.py --input`)**：改前 `--inspect` 输出精准坐标、字号与颜色；SVG 支持保留多行 `<tspan>` 的 `replace_text`、穿透子 `<tspan>` 的 `set_style`、按色/按 id `recolor`、按 id/文本 `move`/`delete` 与新增原语；PDF 严格对齐 `exact`/`contains`/`regex` 整 span 红改保彩底，含 `recolor`/`set_style`/`move`/`delete` 时单/多页 PDF 自动同步重导该页，并自动输出 `--out-png`（300 DPI + `png_edge`）、`edit_diff_audit` 与 `.provenance.json`。
+2. **空间关系与生物机制图 (`svg_edit.py --diagram` + `--extract-pdf`)**：`--extract-pdf` 优先命中实际 Figure 图注页（适配文末插图长论文）、隔离 Figure 内部矢量标签 (`figure_interior_labels(nx,ny)`) 并提取 PTM/定量事实 (`Ser465/473`、`p < 0.001`、`fold`、`n=`)；支持 `TB|LR`、多面板对照 (`panels`)、生物矢量图元 (`receptor`/`dna` `↱`/`mitochondria`/`vesicle`/`outcome`)、嵌套细胞器 (`compartments.nodes` + `bilayer`/`nucleus`)、PTM 徽章、`step` 圆标、`custom_ops`、零撞点错开、15px 退距 T-bar、边标签防碰撞错位与精确尺寸单页矢量 PDF 导出。
+3. **数据编码、盲态视觉自愈与可复现溯源 (`chart_tool.py` + `kit_common.py`)**：支持 16 种图型（含 `dotplot`/`bubble`、`step`、`stacked_barh`、多系列分组 `box`/`violin`、`label_top_n`、`layout.width_ratios`）；原生适配 Nature/Cell 首行横幅 `.xlsx`/`.csv` 与 `"mean ± SD"` 单元格自动拆解；内置盲态视觉自愈引擎 (`_auto_heal_layout`)、OBB + 2D SAT 旋转文本精确几何检查 (`check_layout.py`) 与 2 行自定义 Matplotlib 桥接 (`apply_journal_style` + `export_and_audit_figure`)；`.provenance.json` 内嵌 `spec_embedded`/SHA-256/`row_to_elements` 支持独立重跑。
+4. **源保留编辑与诚实契约审计 (`svg_edit.py --input` + `make_result.py`)**：`--inspect` 解析累计 `<g transform>` 与 CSS `<style>` 色板；`recolor` 支持属性/内联 `style`/CSS `<style>`（含 `rgb()` 与命名色）/`<g id>` 穿透；新增 `set_attrs` 精确改柱高/几何；`kit_common` 精确换算 `pt/mm/cm/in` SVG 物理尺寸防 Chrome 栅格化裁切并输出紧贴单页矢量 PDF；`make_result.py --auto-collect` 每次重跑自动刷新检查与契约字段杜绝草稿残留，终态成功值统一为 `complete`（无缺口 `limits: []`），输出 `reproducibility` 与 `action_required`。
 5. **可编辑源文件与投稿级导出**：强制 `svg.fonttype="none"` 与 `pdf.fonttype=42`，同步交付 `.svg` + `.pdf` + `.png`（可选 `.pptx`），并提供 `assets/journal_presets.json`（Nature / Science / Cell / 通用期刊 / 学位论文 / 16:9 汇报预设）。
 6. **自动自检与六检查点汇总**：每次成图自动执行 `editable_svg`、`legend_series_match`、`glyph_value_audit`、`svg_text_audit`、`annotation_audit`、`svg_geometry`（越界/重叠）与 `png_edge`（裁切/留白），由 `make_result.py` 汇总写入 `result.json`。
 

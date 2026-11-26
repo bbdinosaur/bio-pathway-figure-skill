@@ -90,13 +90,14 @@ def _audit_annotations(prov_panels, spec_panels, caption=""):
     unit_pat = re.compile(r"(\([^)]+\)|\[[^\]]+\]|%|°|log|fold|ratio|index|score|count|pH|a\.u\.|ppm|mol|mg|μ|uM|nM|mM|kg|cm|mm|ms|min|hr|Hz|eV|Pa|K|℃|度|率|比|量|数)", re.I)
     err_pat = re.compile(r"(SD|SEM|CI|IQR|±|error|误差|标准差|标准误|置信)", re.I)
     warns = []
+    notes = []
     cap_txt = str(caption or "")
     for p, sp in zip(prov_panels, spec_panels):
         kind = p.get("kind")
         pid = p.get("panel")
         if kind not in ("heatmap", "pie", "donut"):
-            val_lbl = sp.get("xlabel") if kind == "barh" else sp.get("ylabel")
-            axis_nm = "xlabel" if kind == "barh" else "ylabel"
+            val_lbl = sp.get("xlabel") if kind in ("barh", "stacked_barh", "dotplot") else sp.get("ylabel")
+            axis_nm = "xlabel" if kind in ("barh", "stacked_barh", "dotplot") else "ylabel"
             if not val_lbl:
                 warns.append({"panel": pid, "issue": f"missing_{axis_nm}", "msg": f"缺少数值轴标签 {axis_nm}（请补充物理量与单位）"})
             elif not unit_pat.search(str(val_lbl)):
@@ -108,8 +109,35 @@ def _audit_annotations(prov_panels, spec_panels, caption=""):
             if not err_pat.search(combined):
                 warns.append({"panel": pid, "issue": "error_def_missing", "msg": "含误差线但图注/标签未标明 SD/SEM/95%CI，建议在 caption 或轴标签注明"})
         if p.get("missing_cells"):
-            warns.append({"panel": pid, "issue": "missing_values", "msg": f"存在 {len(p['missing_cells'])} 处源数据缺失（已诚实留空未补零）"})
-    return {"ok": len(warns) == 0, "n_warnings": len(warns), "warnings": warns}
+            notes.append({"panel": pid, "issue": "missing_values", "msg": f"存在 {len(p['missing_cells'])} 处源数据缺失（已诚实留空未补零）"})
+    return {"ok": len(warns) == 0, "n_warnings": len(warns), "warnings": warns, "notes": notes}
+
+
+def _wrap_fig_text(text, width_mm, font_pt):
+    """按图宽（mm）与字号自动折行（兼顾 CJK 与英文），防止 suptitle/caption 单行越界裁切。"""
+    s = str(text or "").strip()
+    if not s or "\n" in s:
+        return s, max(1, s.count("\n") + 1) if s else 0
+    usable_pt = max(120.0, (width_mm - 10.0) * 72.0 / 25.4)
+    def _cw(ch):
+        return font_pt * (1.02 if ord(ch) > 127 else 0.54)
+    def _tw(st):
+        return sum(_cw(c) for c in st)
+    if _tw(s) <= usable_pt:
+        return s, 1
+    has_sp = " " in s
+    tokens = s.split(" ") if has_sp else list(s)
+    lines, cur = [], ""
+    for tok in tokens:
+        cand = (cur + (" " if (cur and has_sp) else "") + tok) if cur else tok
+        if cur and _tw(cand) > usable_pt:
+            lines.append(cur)
+            cur = tok
+        else:
+            cur = cand
+    if cur:
+        lines.append(cur)
+    return "\n".join(lines), len(lines)
 
 
 def _place_legend(ax, handles, pnl, font_pt):
@@ -129,6 +157,88 @@ def _place_legend(ax, handles, pnl, font_pt):
     return leg
 
 
+def _auto_heal_layout(fig, panel_meta, font_pt):
+    """盲态 Agent 视觉自愈引擎：渲染前实测像素包围盒，自动修复 X 轴刻度碰撞与内嵌图例遮挡数据。"""
+    fixes = []
+    try:
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+    except Exception:
+        return fixes
+
+    changed = False
+    for pm in panel_meta:
+        ax = pm["ax"]
+        kind = pm["kind"]
+        pid = pm["panel"]
+        pnl = pm["spec"]
+        # 1. 检测相邻 X 轴刻度标签水平碰撞（未显式指定旋转且非水平/饼图）
+        if kind not in ("barh", "stacked_barh", "dotplot", "pie", "donut") and pnl.get("xticklabels_rotate") is None:
+            xt_bbs = []
+            for t in ax.get_xticklabels():
+                if t.get_visible() and t.get_text().strip():
+                    try:
+                        bb = t.get_window_extent(renderer)
+                        if bb.width > 1 and bb.height > 1:
+                            xt_bbs.append(bb)
+                    except Exception:
+                        pass
+            xt_bbs.sort(key=lambda b: b.x0)
+            overlap = any(xt_bbs[i].x1 > xt_bbs[i + 1].x0 - 1.5 for i in range(len(xt_bbs) - 1))
+            if overlap:
+                for t in ax.get_xticklabels():
+                    t.set_rotation(35)
+                    t.set_ha("right")
+                fixes.append({"panel": pid, "fix": "auto_rotate_xticklabels_35deg", "reason": "xtick_bbox_overlap"})
+                changed = True
+
+        # 2. 检测内嵌图例是否与柱体/散点/折线数据重叠，若重叠自动迁至 outer_top
+        leg = pm.get("legend")
+        handles = pm.get("handles") or []
+        loc = pnl.get("legend_loc", "best")
+        if leg is not None and handles and loc not in ("outer_top", "outer_right") and kind not in ("pie", "donut", "heatmap"):
+            try:
+                lbb = leg.get_window_extent(renderer)
+                l_area = max(1.0, lbb.width * lbb.height)
+                hit_data = False
+                for ptch in ax.patches:
+                    pbb = ptch.get_window_extent(renderer)
+                    if pbb.width > 1 and pbb.height > 1 and lbb.overlaps(pbb):
+                        ix = max(0.0, min(lbb.x1, pbb.x1) - max(lbb.x0, pbb.x0))
+                        iy = max(0.0, min(lbb.y1, pbb.y1) - max(lbb.y0, pbb.y0))
+                        if ix > 2.0 and iy > 2.0 and (ix * iy > 0.015 * l_area):
+                            hit_data = True
+                            break
+                if not hit_data:
+                    for col_a in ax.collections:
+                        offs = col_a.get_offsets()
+                        if offs is not None and len(offs):
+                            pts_disp = ax.transData.transform(offs)
+                            for px, py in pts_disp:
+                                if lbb.x0 - 2 <= px <= lbb.x1 + 2 and lbb.y0 - 2 <= py <= lbb.y1 + 2:
+                                    hit_data = True
+                                    break
+                        if hit_data:
+                            break
+                if hit_data:
+                    leg.remove()
+                    pnl_tmp = dict(pnl)
+                    pnl_tmp["legend_loc"] = "outer_top"
+                    pm["legend"] = _place_legend(ax, handles, pnl_tmp, font_pt)
+                    if pnl.get("panel_title"):
+                        ax.set_title(pnl["panel_title"], fontsize=font_pt, pad=max(21.0, font_pt * 2.8))
+                    fixes.append({"panel": pid, "fix": "auto_relocate_legend_outer_top", "reason": "legend_overlaps_data"})
+                    changed = True
+            except Exception:
+                pass
+    if changed:
+        try:
+            fig.canvas.draw()
+        except Exception:
+            pass
+    return fixes
+
+
 def build_figure(spec):
     import matplotlib.pyplot as plt
     from chart_render import draw_panel
@@ -137,14 +247,25 @@ def build_figure(spec):
     font_pt = float(st["font_pt"])
     finfo = setup_matplotlib(font_pt)
     panels = spec.get("panels", [])
-    ncol = int(spec.get("ncols", max(1, min(len(panels), 2))))
+    layout_cfg = spec.get("layout") if isinstance(spec.get("layout"), dict) else {}
+    ncol = int(spec.get("ncols") or layout_cfg.get("cols") or max(1, min(len(panels), 2)))
     nrow = max(1, (len(panels) + ncol - 1) // ncol)
     w_in = st["width_mm"] / 25.4
-    has_cap = bool(spec.get("caption"))
-    h_in = st["panel_h_mm"] * nrow / 25.4 + (0.28 * nrow) + (0.28 if has_cap else 0.0)
+    sup_wrapped, sup_lines = _wrap_fig_text(spec.get("suptitle", ""), st["width_mm"], font_pt + 1.0)
+    cap_fpt = max(6.0, font_pt * 0.82)
+    cap_wrapped, cap_lines = _wrap_fig_text(spec.get("caption", ""), st["width_mm"], cap_fpt)
+    sup_extra = 0.16 * max(0, sup_lines - 1) + (0.14 if sup_lines else 0.0)
+    cap_extra = (0.24 + 0.14 * max(0, cap_lines - 1)) if cap_lines else 0.0
+    h_in = st["panel_h_mm"] * nrow / 25.4 + (0.28 * nrow) + sup_extra + cap_extra
+    gkw = {}
+    if isinstance(layout_cfg.get("width_ratios"), list) and len(layout_cfg["width_ratios"]) == ncol:
+        gkw["width_ratios"] = layout_cfg["width_ratios"]
+    if isinstance(layout_cfg.get("height_ratios"), list) and len(layout_cfg["height_ratios"]) == nrow:
+        gkw["height_ratios"] = layout_cfg["height_ratios"]
     fig, axes = plt.subplots(nrow, ncol, figsize=(w_in, h_in), squeeze=False,
-                             layout="constrained")
+                             layout="constrained", gridspec_kw=gkw or None)
     prov_panels = []
+    panel_meta = []
     legend_checks = []
     labels = "abcdefghijklmnop"
 
@@ -172,8 +293,9 @@ def build_figure(spec):
         else:
             expected_series = [s["name"] for s in resolved.get("series", []) if s["name"] != "__all__"]
         rendered_legend = []
+        leg = None
         want_leg = pnl.get("legend", False if is_pie else True)
-        if want_leg and handles and resolved["kind"] != "heatmap":
+        if want_leg and handles and resolved["kind"] not in ("heatmap", "dotplot"):
             leg = _place_legend(ax, handles, pnl, font_pt)
             rendered_legend = [t.get_text() for t in leg.get_texts()]
             legend_checks.append({
@@ -182,6 +304,8 @@ def build_figure(spec):
                 "rendered": rendered_legend,
                 "match": rendered_legend == expected_series,
             })
+        panel_meta.append({"panel": tag, "ax": ax, "kind": resolved["kind"],
+                           "spec": pnl, "legend": leg, "handles": handles})
 
         prov_panels.append({
             "panel": tag,
@@ -207,11 +331,12 @@ def build_figure(spec):
     for j in range(len(panels), nrow * ncol):
         axes[j // ncol][j % ncol].set_visible(False)
 
-    if spec.get("suptitle"):
-        fig.suptitle(spec["suptitle"], fontsize=font_pt + 1)
-    if spec.get("caption"):
-        fig.supxlabel(str(spec["caption"]), fontsize=max(6.0, font_pt * 0.82), color="#444444")
-    return fig, axes, st, finfo, prov_panels, legend_checks
+    if sup_wrapped:
+        fig.suptitle(sup_wrapped, fontsize=font_pt + 1)
+    if cap_wrapped:
+        fig.supxlabel(cap_wrapped, fontsize=cap_fpt, color="#444444")
+    auto_fixes = _auto_heal_layout(fig, panel_meta, font_pt)
+    return fig, axes, st, finfo, prov_panels, legend_checks, auto_fixes
 
 
 def _export_pptx(spec, png_path, prov_path):
@@ -285,7 +410,7 @@ def main():
         fig_spec["suptitle"] = ""  # 标题改放 PPTX 可编辑文本框，避免重复
         fig_spec["caption"] = ""   # 图注改放 PPTX 可编辑文本框
 
-    fig, axes, st, finfo, prov, legend_checks = build_figure(fig_spec)
+    fig, axes, st, finfo, prov, legend_checks, auto_fixes = build_figure(fig_spec)
     w_in, h_in = fig.get_size_inches()
     paths = {}
     svg_path = outdir / f"{base}.svg"
@@ -332,6 +457,7 @@ def main():
     checks = {
         "legend_series_match": all(c["match"] for c in legend_checks) if legend_checks else True,
         "legend_details": legend_checks,
+        "auto_layout_fixes": auto_fixes,
         "editable_svg": verify_svg_editable(svg_path),
         "svg_text_audit": svg_text_audit,
         "glyph_value_audit": glyph_value_audit,
@@ -380,20 +506,40 @@ def main():
                 note_scale.append({"panel": p["panel"],
                                    "note": "数值跨>4个量级，建议 log_y 或 SI 词头并核对单位"})
 
+    # 收集源数据文件 SHA-256 与反向行号→图元索引，支撑独立可复现与双向回溯核验
+    import matplotlib as _mpl
+    input_hashes = {}
+    for sp_p in spec.get("panels", []):
+        df = (sp_p.get("data") or {}).get("file") or (sp_p.get("data") or {}).get("json_file")
+        if df and Path(str(df)).exists() and str(df) not in input_hashes:
+            input_hashes[str(df)] = sha256_of(df)
+    row_index = {}
+    for p in prov:
+        for ei, el in enumerate(p.get("elements", [])):
+            lns = el.get("source_lines") or ([el["source_line"]] if el.get("source_line") else [])
+            for ln in lns:
+                row_index.setdefault(str(ln), []).append(f"{p['panel']}:{el.get('glyph','el')}[{ei}]")
+
     provenance = {
-        "generated_by": "sci-figure-studio chart_tool v3",
+        "generated_by": "sci-figure-studio chart_tool v4",
         "case_id": spec.get("case_id"), "figure": base,
         "reproducibility": {
             "spec_file": str(Path(args.spec).name),
             "spec_sha256": sha256_of(args.spec),
+            "input_file_hashes": input_hashes,
+            "python_version": sys.version.split()[0],
+            "matplotlib_version": getattr(_mpl, "__version__", None),
             "command": f"python3 chart_tool.py {Path(args.spec).name} --outdir {outdir} --base {base} --png-dpi {png_dpi}",
+            "spec_embedded": spec,
         },
         "style": st, "fonts": finfo,
         "export_params": export_audit,
         "title": spec.get("suptitle"),
         "data_sources": sorted({json.dumps(p["data_source"], ensure_ascii=False, sort_keys=True)
                                 for p in prov}),
-        "panels": prov, "self_check": checks, "scale_notes": note_scale,
+        "panels": prov,
+        "row_to_elements": dict(list(row_index.items())[:200]),
+        "self_check": checks, "scale_notes": note_scale,
     }
     prov_path = dump_json(provenance, prov_file)
 
@@ -411,6 +557,7 @@ def main():
         and bool(checks.get("glyph_value_audit", {}).get("ok", True))
         and bool(checks.get("data_fidelity", {}).get("ok", True))
         and not ec.get("clipping_suspect")
+        and not ec.get("blank_suspect")
     )
     summary = {
         "ok": ok,
@@ -418,6 +565,7 @@ def main():
         "provenance": prov_path,
         "fonts": finfo,
         "checks": {
+            "auto_layout_fixes": auto_fixes,
             "editable_svg": checks["editable_svg"],
             "legend_series_match": checks["legend_series_match"],
             "svg_text_audit": checks["svg_text_audit"],

@@ -183,9 +183,31 @@ def _draw_numeric_xy(ax, p, opts):
             errs = np.array([np.nan if v is None else float(v) for v in s["errors"]], dtype=float)
         col = _color_for(s["name"], si, colors, scolors)
         lbl = None if s["name"] == "__all__" else s["name"]
-        if kind == "scatter":
-            hh = ax.scatter(xs, ys, s=p.get("point_size", 22), color=col, alpha=0.85,
-                            edgecolors="white", linewidths=0.4, label=lbl, zorder=3)
+        if kind in ("scatter", "bubble", "dotplot"):
+            raw_sz = s.get("sizes")
+            if raw_sz and any(v is not None for v in raw_sz):
+                arr_sz = np.array([float(v) if v is not None else np.nan for v in raw_sz], dtype=float)
+                valid_sz = arr_sz[~np.isnan(arr_sz)]
+                lo_s, hi_s = (float(valid_sz.min()), float(valid_sz.max())) if valid_sz.size else (1.0, 1.0)
+                if hi_s > lo_s:
+                    sz_plot = np.where(np.isnan(arr_sz), 32.0, 24.0 + 136.0 * (arr_sz - lo_s) / (hi_s - lo_s))
+                else:
+                    sz_plot = np.full(len(xs), 64.0)
+            else:
+                sz_plot = p.get("point_size", 22)
+            raw_cv = s.get("cvals")
+            if raw_cv and any(v is not None for v in raw_cv):
+                c_arr = np.array([float(v) if v is not None else np.nan for v in raw_cv], dtype=float)
+                hh = ax.scatter(xs, ys, s=sz_plot, c=c_arr, cmap=opts.get("cmap", "viridis"),
+                                alpha=0.88, edgecolors="#222222", linewidths=0.4, label=lbl, zorder=3)
+                if si == 0 and opts.get("fig") is not None:
+                    cb = opts["fig"].colorbar(hh, ax=ax, shrink=0.78, pad=0.02)
+                    cb.ax.tick_params(labelsize=max(5.5, fpt * 0.8))
+                    if p.get("color_label"):
+                        cb.set_label(p["color_label"], fontsize=max(6.0, fpt * 0.85))
+            else:
+                hh = ax.scatter(xs, ys, s=sz_plot, color=col, alpha=0.85,
+                                edgecolors="white", linewidths=0.4, label=lbl, zorder=3)
             handles.append(hh)
             offs = np.asarray(hh.get_offsets(), dtype=float)
             if offs.size:
@@ -207,6 +229,12 @@ def _draw_numeric_xy(ax, p, opts):
                         "slope": round(float(slope), 6), "intercept": round(float(intercept), 6),
                         "pearson_r": round(r, 4), "r_squared": round(r2, 4),
                     })
+        elif kind == "step":
+            hh = ax.step(xs, ys, where=p.get("step_where", "post"), lw=1.5, color=col, label=lbl)[0]
+            handles.append(hh)
+            yd = np.asarray(hh.get_ydata(), dtype=float)
+            xd = np.asarray(hh.get_xdata(), dtype=float)
+            audit_vals.extend([float(yv) for xv, yv in zip(xd, yd) if not np.isnan(xv) and not np.isnan(yv)])
         else:
             if p.get("error_style") == "band" and errs is not None:
                 hh_list = ax.plot(xs, ys, marker="o", ms=3.5, lw=1.3, color=col, label=lbl)
@@ -227,6 +255,11 @@ def _draw_numeric_xy(ax, p, opts):
                 yd = np.asarray(ln.get_ydata(), dtype=float)
                 audit_vals.extend([float(yv) for xv, yv in zip(xd, yd) if not np.isnan(xv) and not np.isnan(yv)])
     if any(it[2] for it in scatter_label_items):
+        named_its = [it for it in scatter_label_items if it[2]]
+        top_n = int(p.get("label_top_n") or 0)
+        if top_n > 0 and len(named_its) > top_n:
+            named_its = sorted(named_its, key=lambda it: abs(it[1]), reverse=True)[:top_n]
+            scatter_label_items = named_its + [it for it in scatter_label_items if not it[2]]
         fit_pairs = [(fs["slope"], fs["intercept"]) for fs in fit_stats] if fit_stats else None
         _place_scatter_labels(ax, scatter_label_items, fpt, fit_lines=fit_pairs)
     p["_audit_rendered"] = audit_vals
@@ -266,7 +299,7 @@ def _jitter_offsets(n, width, seed=42):
 
 def draw_series_panel(ax, p, opts):
     kind = p["kind"]
-    if p.get("numeric_x") and kind in ("scatter", "line", "errorbar"):
+    if p.get("numeric_x") and kind in ("scatter", "bubble", "dotplot", "line", "errorbar", "step"):
         return _draw_numeric_xy(ax, p, opts)
 
     colors = opts["colors"]
@@ -303,6 +336,39 @@ def draw_series_panel(ax, p, opts):
         return list(wedges)
 
     if kind == "violin":
+        if p.get("grouped_box"):
+            import matplotlib.patches as mpatches
+            G = len(p["groups"])
+            S_b = len(p["series"])
+            w_b = 0.72 / max(1, S_b)
+            handles = []
+            for si, s in enumerate(p["series"]):
+                col = _color_for(s["name"], si, colors, scolors)
+                gvals = s.get("group_values") or []
+                valid_pos, valid_d = [], []
+                for gi in range(G):
+                    arr = [v for v in (gvals[gi] if gi < len(gvals) else []) if v is not None]
+                    if arr:
+                        valid_pos.append(gi + (si - (S_b - 1) / 2.0) * w_b)
+                        valid_d.append(arr)
+                if valid_d:
+                    vp = ax.violinplot(valid_d, positions=valid_pos, widths=w_b * 0.85,
+                                       showmeans=False, showmedians=True, showextrema=True)
+                    for body in vp["bodies"]:
+                        body.set_facecolor(col); body.set_edgecolor(col); body.set_alpha(0.42); body.set_linewidth(0.8)
+                    for k_part in ("cmedians", "cmins", "cmaxes", "cbars"):
+                        if k_part in vp:
+                            vp[k_part].set_color("#222222"); vp[k_part].set_linewidth(0.85)
+                    if p.get("show_points", False):
+                        for xp, arr in zip(valid_pos, valid_d):
+                            offs = _jitter_offsets(len(arr), w_b * 0.45, seed=100 + si)
+                            ax.scatter(np.full(len(arr), xp) + offs, arr, s=10, color=col,
+                                       alpha=0.82, edgecolors="white", lw=0.3, zorder=4)
+                handles.append(mpatches.Patch(facecolor=col, edgecolor=col, alpha=0.5, label=s["name"]))
+            ax.set_xticks(np.arange(G))
+            ax.set_xticklabels([str(g) for g in p["groups"]])
+            ax.set_xlim(-0.6, G - 0.4)
+            return handles
         data = [[v for v in s["values"] if v is not None] for s in p["series"]]
         vp = ax.violinplot(data, showmeans=False, showmedians=True, showextrema=True, widths=0.62)
         handles = []
@@ -328,6 +394,41 @@ def draw_series_panel(ax, p, opts):
         return handles
 
     if kind == "box":
+        if p.get("grouped_box"):
+            import matplotlib.patches as mpatches
+            G = len(p["groups"])
+            S_b = len(p["series"])
+            w_b = 0.72 / max(1, S_b)
+            handles = []
+            meds_ren = []
+            for si, s in enumerate(p["series"]):
+                col = _color_for(s["name"], si, colors, scolors)
+                gvals = s.get("group_values") or []
+                valid_pos, valid_d = [], []
+                for gi in range(G):
+                    arr = [v for v in (gvals[gi] if gi < len(gvals) else []) if v is not None]
+                    if arr:
+                        valid_pos.append(gi + (si - (S_b - 1) / 2.0) * w_b)
+                        valid_d.append(arr)
+                if valid_d:
+                    bp = ax.boxplot(valid_d, positions=valid_pos, widths=w_b * 0.82, patch_artist=True,
+                                    medianprops={"color": "black", "lw": 1.0},
+                                    boxprops={"lw": 0.75}, whiskerprops={"lw": 0.75}, capprops={"lw": 0.75})
+                    for b in bp["boxes"]:
+                        b.set_facecolor(col + "44")
+                        b.set_edgecolor(col)
+                    meds_ren.extend([float(m.get_ydata()[0]) for m in bp.get("medians", []) if len(m.get_ydata())])
+                    if p.get("show_points", False):
+                        for xp, arr in zip(valid_pos, valid_d):
+                            offs = _jitter_offsets(len(arr), w_b * 0.42, seed=100 + si)
+                            ax.scatter(np.full(len(arr), xp) + offs, arr, s=11, color=col,
+                                       alpha=0.8, edgecolors="white", lw=0.3, zorder=4)
+                handles.append(mpatches.Patch(facecolor=col + "55", edgecolor=col, label=s["name"]))
+            ax.set_xticks(np.arange(G))
+            ax.set_xticklabels([str(g) for g in p["groups"]])
+            ax.set_xlim(-0.6, G - 0.4)
+            p["_box_medians_rendered"] = meds_ren
+            return handles
         data = [[v for v in s["values"] if v is not None] for s in p["series"]]
         bp = ax.boxplot(data, patch_artist=True, widths=0.55,
                         medianprops={"color": "black", "lw": 1.1},
@@ -477,6 +578,91 @@ def draw_series_panel(ax, p, opts):
                         for si in range(S) for gi in range(y.shape[1]) if not np.isnan(y[si, gi])), default=1.0)
             p["xlim"] = [0.0, hi_v * 1.18 if hi_v > 0 else 1.0]
         return handles
+    elif kind == "stacked_barh":
+        norm_pct = bool(p.get("normalize_pct"))
+        pos_l = np.zeros(len(x), dtype=float)
+        neg_l = np.zeros(len(x), dtype=float)
+        row_tots = np.nansum(np.abs(y), axis=0) if (norm_pct and y.size) else None
+        if row_tots is not None:
+            row_tots = np.where(row_tots > 0, row_tots, 1.0)
+            p["_audit_expected_override"] = []
+        for si in range(S):
+            valid = ~np.isnan(y[si])
+            col = _color_for(p["series"][si]["name"], si, colors, scolors)
+            lbl = None if p["series"][si]["name"] == "__all__" else p["series"][si]["name"]
+            vals = np.where(valid, y[si], 0.0)
+            if norm_pct and row_tots is not None:
+                vals = np.where(valid, 100.0 * y[si] / row_tots, 0.0)
+                p["_audit_expected_override"].extend([float(v) for v in vals[valid]])
+            lefts = np.where(vals >= 0, pos_l, neg_l)
+            hh = ax.barh(x[valid], vals[valid], 0.72, left=lefts[valid], color=col,
+                         label=lbl, linewidth=0.4, edgecolor="white")
+            audit_vals.extend([float(r.get_width()) for r in hh.patches])
+            pos_l = pos_l + np.where(vals >= 0, vals, 0.0)
+            neg_l = neg_l + np.where(vals < 0, vals, 0.0)
+            if show_vals:
+                for gi in np.where(valid)[0]:
+                    if abs(vals[gi]) >= (7.0 if norm_pct else 0.0):
+                        ax.text(lefts[gi] + vals[gi] / 2.0, x[gi],
+                                (f"{vals[gi]:.0f}%" if norm_pct else val_fmt.format(vals[gi])),
+                                ha="center", va="center", fontsize=max(5.5, fpt * 0.75), color="white")
+            if lbl:
+                handles.append(hh)
+        p["_audit_rendered"] = audit_vals
+        ax.set_yticks(x)
+        ax.set_yticklabels([str(g) for g in p["groups"]])
+        ax.set_ylim(-0.6, len(p["groups"]) - 0.4)
+        ax.invert_yaxis()
+        if norm_pct and not p.get("xlim"):
+            p["xlim"] = [0.0, 103.0]
+        return handles
+    elif kind == "dotplot":
+        s0 = p["series"][0] if p["series"] else {"values": []}
+        xs_d = np.array([np.nan if v is None else float(v) for v in s0.get("values", [])], dtype=float)
+        ys_d = np.arange(len(p["groups"]), dtype=float)
+        raw_sz = s0.get("sizes")
+        if raw_sz and any(v is not None for v in raw_sz):
+            arr_sz = np.array([float(v) if v is not None else np.nan for v in raw_sz], dtype=float)
+            valid_sz = arr_sz[~np.isnan(arr_sz)]
+            lo_s, hi_s = (float(valid_sz.min()), float(valid_sz.max())) if valid_sz.size else (1.0, 1.0)
+            sz_plot = (28.0 + 132.0 * (arr_sz - lo_s) / (hi_s - lo_s)) if hi_s > lo_s else np.full(len(xs_d), 64.0)
+            sz_plot = np.where(np.isnan(arr_sz), 36.0, sz_plot)
+        else:
+            sz_plot = np.full(len(xs_d), float(p.get("point_size", 48)))
+        raw_cv = s0.get("cvals")
+        if raw_cv and any(v is not None for v in raw_cv):
+            c_arr = np.array([float(v) if v is not None else np.nan for v in raw_cv], dtype=float)
+            hh = ax.scatter(xs_d, ys_d, s=sz_plot, c=c_arr, cmap=opts.get("cmap", "viridis_r"),
+                            alpha=0.9, edgecolors="#222222", linewidths=0.45, zorder=3)
+            if opts.get("fig") is not None:
+                cb = opts["fig"].colorbar(hh, ax=ax, shrink=0.78, pad=0.02)
+                cb.ax.tick_params(labelsize=max(5.5, fpt * 0.8))
+                if p.get("color_label"):
+                    cb.set_label(p["color_label"], fontsize=max(6.0, fpt * 0.85))
+        else:
+            hh = ax.scatter(xs_d, ys_d, s=sz_plot, color=colors[0], alpha=0.88,
+                            edgecolors="#222222", linewidths=0.45, zorder=3)
+        offs = np.asarray(hh.get_offsets(), dtype=float)
+        if offs.size:
+            audit_vals.extend([float(xv) for xv, yv in offs if not np.isnan(xv) and not np.isnan(yv)])
+        p["_audit_rendered"] = audit_vals
+        ax.set_yticks(ys_d)
+        ax.set_yticklabels([str(g) for g in p["groups"]])
+        ax.set_ylim(-0.6, len(p["groups"]) - 0.4)
+        ax.invert_yaxis()
+        ax.xaxis.grid(True, linestyle="--", linewidth=0.5, alpha=0.35, zorder=0)
+        ax.set_axisbelow(True)
+        return []
+    elif kind == "step":
+        for si in range(S):
+            col = _color_for(p["series"][si]["name"], si, colors, scolors)
+            lbl = None if p["series"][si]["name"] == "__all__" else p["series"][si]["name"]
+            hh = ax.step(x, y[si], where=p.get("step_where", "post"), lw=1.4, color=col, label=lbl)[0]
+            audit_vals.extend([float(v) for v in np.asarray(hh.get_ydata(), dtype=float) if not np.isnan(v)])
+            if lbl:
+                handles.append(hh)
+        p["_audit_rendered"] = audit_vals
+        ax.set_xticks(x)
     elif kind in ("line", "errorbar"):
         for si in range(S):
             errs = _series_yerr(p, si, e)
@@ -667,8 +853,11 @@ def _audit_rendered_glyphs(ax, p, handles):
             if sec_s and p.get("_ax2") is not None:
                 expected.extend([float(v) for s in sec_s for v in s["values"] if v is not None])
             rendered = list(p.get("_audit_rendered") or [])
-        elif kind == "barh":
-            expected = [float(v) for s in p["series"] for v in s["values"] if v is not None]
+        elif kind in ("barh", "stacked_barh", "dotplot"):
+            if p.get("_audit_expected_override") is not None:
+                expected = list(p["_audit_expected_override"])
+            else:
+                expected = [float(v) for s in p["series"] for v in s["values"] if v is not None]
             rendered = list(p.get("_audit_rendered") or [])
         elif kind in ("pie", "donut"):
             raw = [float(v) for v in (p["series"][0]["values"] if p.get("series") else []) if v is not None and float(v) > 0]
@@ -682,7 +871,7 @@ def _audit_rendered_glyphs(ax, p, handles):
             if handles and hasattr(handles[0], "get_array"):
                 arr = np.asarray(handles[0].get_array(), dtype=float).ravel()
                 rendered = [float(v) for v in arr if not np.isnan(v)]
-        elif kind in ("line", "errorbar", "scatter"):
+        elif kind in ("line", "errorbar", "scatter", "bubble", "step"):
             if p.get("numeric_x"):
                 for s in p["series"]:
                     xs = s.get("x_values") or []
@@ -693,7 +882,11 @@ def _audit_rendered_glyphs(ax, p, handles):
                 expected = [float(v) for s in p["series"] for v in s["values"] if v is not None]
             rendered = list(p.get("_audit_rendered") or [])
         elif kind == "box":
-            gdata = [[float(v) for v in s["values"] if v is not None] for s in p["series"]]
+            if p.get("grouped_box"):
+                gdata = [[float(v) for v in arr if v is not None]
+                         for s in p["series"] for arr in (s.get("group_values") or []) if arr]
+            else:
+                gdata = [[float(v) for v in s["values"] if v is not None] for s in p["series"]]
             expected = [float(np.median(d)) for d in gdata if d]
             rendered = list(p.get("_box_medians_rendered") or [])
             if len(expected) == len(rendered) and expected:
@@ -743,15 +936,15 @@ def draw_panel(ax, fig, p, style):
         handles = draw_series_panel(ax, p, opts)
         ax.set_xlabel(p.get("xlabel", ""), fontsize=fpt)
         ax.set_ylabel(p.get("ylabel", ""), fontsize=fpt)
-        if p.get("xticklabels") and p["kind"] != "barh":
+        if p.get("xticklabels") and p["kind"] not in ("barh", "stacked_barh", "dotplot"):
             ax.set_xticklabels(p["xticklabels"])
         rot = p.get("xticklabels_rotate")
-        if rot is None and p["kind"] not in ("barh", "pie", "donut") and not p.get("numeric_x"):
+        if rot is None and p["kind"] not in ("barh", "stacked_barh", "dotplot", "pie", "donut") and not p.get("numeric_x"):
             cur_labs = [t.get_text() for t in ax.get_xticklabels()]
             if len(cur_labs) >= 5 and (max((len(s) for s in cur_labs), default=0) >= 10
                                        or sum(len(s) for s in cur_labs) > 42):
                 rot = 35
-        if rot and p["kind"] not in ("barh", "pie", "donut"):
+        if rot and p["kind"] not in ("barh", "stacked_barh", "dotplot", "pie", "donut"):
             for t in ax.get_xticklabels():
                 t.set_rotation(rot)
                 t.set_ha("right")

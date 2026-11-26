@@ -450,6 +450,7 @@ def extract_pdf_text(pdf_path, query=None, out_txt=None, render_hits=None):
     )
     captions, matches, mech_sents = [], [], []
     hit_pages = []
+    caption_hit_pages = []
     fig_line_pat = re.compile(
         r"(?m)^(?=\s*(?:Extended\s+Data\s+|Supplementary\s+)?(?:Fig(?:ure)?\.?\s*\d+[A-Za-z]?|图\s*\d+)\b)",
         re.I,
@@ -464,7 +465,8 @@ def extract_pdf_text(pdf_path, query=None, out_txt=None, render_hits=None):
             paras.extend(subs if len(subs) > 1 else [blk])
         for p in paras:
             one = re.sub(r"\s+", " ", p)
-            if fig_pat.search(p[:180]):
+            is_cap = bool(fig_pat.search(p[:180]))
+            if is_cap:
                 captions.append({"page": pi, "text": one[:2500]})
             if q_pat:
                 qm = q_pat.search(one)
@@ -475,8 +477,12 @@ def extract_pdf_text(pdf_path, query=None, out_txt=None, render_hits=None):
                     else:
                         snippet = one
                     matches.append({"page": pi, "text": snippet})
+                    if is_cap and pi not in caption_hit_pages:
+                        caption_hit_pages.append(pi)
                     if pi not in hit_pages:
                         hit_pages.append(pi)
+    if caption_hit_pages:
+        hit_pages = caption_hit_pages + [p for p in hit_pages if p not in caption_hit_pages]
     if not hit_pages and captions:
         hit_pages = sorted({c["page"] for c in captions})[:3]
     seen_s = set()
@@ -505,31 +511,55 @@ def extract_pdf_text(pdf_path, query=None, out_txt=None, render_hits=None):
             if len(mech_sents) >= 25:
                 break
 
-    # 对命中页提取空间坐标标签（帮助准确还原原图 Figure 中的基因/蛋白/区室名及上下游位置）
+    # 对命中页智能隔离 Figure 内部矢量标签（区分于双栏正文行）并提取归一化空间坐标
     spatial_pages = []
     rendered_pages = []
     if fitz_mod and hit_pages:
         try:
+            import collections as _cfont
             doc = fitz_mod.open(str(pdf_path))
             for pi in hit_pages[:4]:
                 pg = doc[pi]
-                short_labels = []
+                pw, ph = max(1.0, float(pg.rect.width)), max(1.0, float(pg.rect.height))
+                all_lines = []
+                font_chars = _cfont.Counter()
                 for b in pg.get_text("dict").get("blocks", []):
+                    if b.get("type", 0) != 0:
+                        continue
                     for ln in b.get("lines", []):
-                        line_txt = "".join(sp.get("text", "") for sp in ln.get("spans", [])).strip()
-                        if not line_txt or len(line_txt) > 65:
+                        sps = ln.get("spans") or []
+                        line_txt = "".join(sp.get("text", "") for sp in sps).strip()
+                        if not line_txt:
                             continue
                         bb = ln.get("bbox", [0, 0, 0, 0])
-                        sz = round(float(ln["spans"][0].get("size", 0)), 1) if ln.get("spans") else 0.0
-                        short_labels.append({"text": line_txt, "x": round(bb[0], 1),
-                                             "y": round(bb[1], 1), "size": sz})
+                        f_name = str(sps[0].get("font", "")) if sps else ""
+                        sz = round(float(sps[0].get("size", 0)), 1) if sps else 0.0
+                        font_chars[(f_name, sz)] += len(line_txt)
+                        all_lines.append({"text": line_txt, "x": round(bb[0], 1), "y": round(bb[1], 1),
+                                          "x1": round(bb[2], 1), "y1": round(bb[3], 1),
+                                          "size": sz, "font": f_name})
+                body_key = font_chars.most_common(1)[0][0] if font_chars else ("", 0.0)
+                fig_labels, short_labels = [], []
+                for r in all_lines:
+                    t = r["text"]
+                    if len(t) > 65:
+                        continue
+                    n_words = len(t.split())
+                    is_body_prose = (r["font"], r["size"]) == body_key and n_words >= 5 and (r["x1"] - r["x"]) > pw * 0.28
+                    item = {"text": t, "x": r["x"], "y": r["y"],
+                            "nx": round(r["x"] / pw, 3), "ny": round(r["y"] / ph, 3), "size": r["size"]}
+                    short_labels.append(item)
+                    if not is_body_prose:
+                        fig_labels.append(item)
+                fig_labels.sort(key=lambda r: (round(r["y"] / 16.0), r["x"]))
                 short_labels.sort(key=lambda r: (round(r["y"] / 18.0), r["x"]))
                 n_imgs = len(pg.get_images(full=False))
                 spatial_pages.append({
-                    "page": pi, "rect": [round(pg.rect.width, 1), round(pg.rect.height, 1)],
+                    "page": pi, "rect": [round(pw, 1), round(ph, 1)],
                     "n_images": n_imgs,
-                    "figure_is_raster_hint": bool(n_imgs > 0 and len(short_labels) < 8),
-                    "spatial_labels": short_labels[:120],
+                    "figure_is_raster_hint": bool(n_imgs > 0 and len(fig_labels) < 8),
+                    "n_labels": len(fig_labels or short_labels),
+                    "figure_interior_labels": (fig_labels or short_labels)[:120],
                 })
                 if render_hits:
                     Path(render_hits).mkdir(parents=True, exist_ok=True)
@@ -546,11 +576,17 @@ def extract_pdf_text(pdf_path, query=None, out_txt=None, render_hits=None):
         r"\b(?:[A-Z][A-Z0-9]{1,8}(?:[-/][A-Za-z0-9α-ωΑ-Ω]{1,6})?|"
         r"p[0-9]{2,3}|mTORC[12]|NF-[κk]B|TGF-[βb][0-9]?|IL-[0-9]{1,2}|TNF-[αa]|IFN-[γg])\b"
     )
+    _ptm_re = re.compile(
+        r"\b(?:(?:Ser|Thr|Tyr|Lys|Arg|His|Cys|Asn|Asp|Pro)\s*\d{1,4}|[STYK]\d{2,4}(?:/[STYK]?\d{2,4})?|"
+        r"K48|K63|p-[A-Z][A-Za-z0-9]{1,6}|[Pp]\s*[<≤=]\s*0?\.\d+|n\s*=\s*\d+|\d+(?:\.\d+)?\s*-?\s*fold)\b"
+    )
     _stop = {"THE", "AND", "FOR", "WITH", "FROM", "FIG", "FIGURE", "TABLE", "PDF", "SVG", "PNG", "DPI", "DOI", "USA"}
     clean_joined = re.sub(r"-\s*\n\s*", "", "\n".join(pages))
     ent_cnt = _coll.Counter(
         t for t in _ent_re.findall(clean_joined) if t.upper() not in _stop and not t.isdigit()
     )
+    hit_text_pool = " ".join(m["text"] for m in matches) + " " + " ".join(c["text"] for c in captions)
+    ptm_facts = list(dict.fromkeys(_ptm_re.findall(hit_text_pool or clean_joined)))[:30]
 
     return {
         "ok": True, "tool": tool, "input": str(pdf_path),
@@ -560,6 +596,7 @@ def extract_pdf_text(pdf_path, query=None, out_txt=None, render_hits=None):
         "query": query, "query_matches": matches[:25],
         "hit_pages": hit_pages,
         "mechanism_sentences": mech_sents[:25],
+        "ptm_and_quant_facts": ptm_facts,
         "candidate_entities": [k for k, _ in ent_cnt.most_common(35)],
         "spatial_pages": spatial_pages,
         "rendered_pages": rendered_pages,
@@ -569,14 +606,49 @@ def extract_pdf_text(pdf_path, query=None, out_txt=None, render_hits=None):
 def inspect_svg(svg_path):
     import re
     import xml.etree.ElementTree as ET
+    try:
+        from check_layout import parse_transform, _mat_mul, _apply
+    except Exception:
+        parse_transform = lambda s: (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+        _mat_mul = lambda a, b: a
+        _apply = lambda m, x, y: (x, y)
+
     root = ET.parse(str(svg_path)).getroot()
-    texts, fills, strokes = [], set(), set()
-    for el in root.iter():
+    texts, fills, strokes, ids = [], set(), set(), []
+
+    def _collect_css_colors(css_txt):
+        for m in re.finditer(r"fill\s*:\s*([^;}\s]+)", css_txt):
+            if m.group(1).lower() not in ("none", "transparent"):
+                fills.add(m.group(1))
+        for m in re.finditer(r"stroke\s*:\s*([^;}\s]+)", css_txt):
+            if m.group(1).lower() not in ("none", "transparent"):
+                strokes.add(m.group(1))
+
+    def _walk(el, m):
+        cm = _mat_mul(m, parse_transform(el.get("transform")))
         tag = el.tag.split("}")[-1]
+        if tag == "style" and el.text:
+            _collect_css_colors(el.text)
+        if el.get("style"):
+            _collect_css_colors(el.get("style"))
         if el.get("fill") and el.get("fill") != "none":
             fills.add(el.get("fill"))
         if el.get("stroke") and el.get("stroke") != "none":
             strokes.add(el.get("stroke"))
+        if tag in ("rect", "ellipse", "circle", "g") and el.get("id"):
+            if tag == "rect":
+                try:
+                    rx, ry = float(el.get("x", 0)), float(el.get("y", 0))
+                    rw, rh = float(el.get("width", 0)), float(el.get("height", 0))
+                    gx0, gy0 = _apply(cm, rx, ry)
+                    gx1, gy1 = _apply(cm, rx + rw, ry + rh)
+                    ids.append({"id": el.get("id"), "tag": tag,
+                                "bbox": [round(min(gx0, gx1), 1), round(min(gy0, gy1), 1),
+                                         round(abs(gx1 - gx0), 1), round(abs(gy1 - gy0), 1)]})
+                except ValueError:
+                    pass
+            elif tag in ("circle", "ellipse"):
+                ids.append({"id": el.get("id"), "tag": tag})
         if tag == "text":
             txt = "".join(el.itertext()).strip()
             if txt:
@@ -584,10 +656,22 @@ def inspect_svg(svg_path):
                 if fs is None and el.get("style"):
                     mfs = re.search(r"font-size:\s*([\d.]+)", el.get("style", ""))
                     fs = mfs.group(1) if mfs else None
+                raw_x = (el.get("x") or "").split()
+                raw_y = (el.get("y") or "").split()
+                try:
+                    lx = float(raw_x[0]) if raw_x else 0.0
+                    ly = float(raw_y[0]) if raw_y else 0.0
+                    gx, gy = _apply(cm, lx, ly)
+                    x_out, y_out = round(gx, 1), round(gy, 1)
+                except ValueError:
+                    x_out, y_out = raw_x[:1], raw_y[:1]
                 texts.append({"text": txt[:80], "id": el.get("id"),
-                              "x": (el.get("x") or "").split()[0:1],
-                              "y": (el.get("y") or "").split()[0:1], "font_size": fs})
-    return {"viewBox": root.get("viewBox", ""), "texts": texts,
+                              "x": x_out, "y": y_out, "font_size": fs})
+        for ch in el:
+            _walk(ch, cm)
+
+    _walk(root, (1.0, 0.0, 0.0, 1.0, 0.0, 0.0))
+    return {"viewBox": root.get("viewBox", ""), "texts": texts, "shape_ids": ids[:60],
             "fill_colors": sorted(fills), "stroke_colors": sorted(strokes)}
 
 
@@ -733,6 +817,8 @@ def _build_diagram_lr(spec, nodes, edges, compartments, lanes, node_dims, font_f
             for bk in ("badge_fill", "badge_stroke", "badge_text_fill"):
                 if nd.get(bk):
                     op_b[bk] = nd[bk]
+        if nd.get("step") is not None:
+            op_b["step"] = nd["step"]
         ops.append(op_b)
 
     def _tb_clear(nid, side):
@@ -906,10 +992,217 @@ def _build_diagram_lr(spec, nodes, edges, compartments, lanes, node_dims, font_f
     return ops, int(round(canvas_w)), int(round(canvas_h)), provenance
 
 
+def _shift_op_coords(op, dx, dy):
+    """将单面板 svg_ops 坐标整体平移 (dx, dy)，用于多面板机制图拼装。"""
+    o = dict(op)
+    for k in ("x", "x1", "x2", "curve_x"):
+        if k in o and isinstance(o[k], (int, float)):
+            o[k] = round(float(o[k]) + dx, 2)
+    for k in ("y", "y1", "y2"):
+        if k in o and isinstance(o[k], (int, float)):
+            o[k] = round(float(o[k]) + dy, 2)
+    if "waypoints" in o and o["waypoints"]:
+        o["waypoints"] = [[round(float(px) + dx, 2), round(float(py) + dy, 2)] for px, py in o["waypoints"]]
+    if "label_pos" in o and o["label_pos"]:
+        o["label_pos"] = [round(float(o["label_pos"][0]) + dx, 2), round(float(o["label_pos"][1]) + dy, 2)]
+    return o
+
+
+def _prefix_panel_spec(pspec, pref):
+    """给子面板内全部节点/复合物/区室/边 id 加前缀，避免多面板拼装时 id 冲突。"""
+    out = dict(pspec)
+    nodes = [dict(n) for n in (pspec.get("nodes") or pspec.get("modules") or [])]
+    id_map = {}
+    for n in nodes:
+        oid = str(n["id"])
+        nid = f"{pref}{oid}"
+        id_map[oid] = nid
+        n["id"] = nid
+    out["nodes"] = nodes
+    out.pop("modules", None)
+    edges = []
+    for ei, e in enumerate(pspec.get("edges") or []):
+        ne = dict(e)
+        ne["id"] = f"{pref}{e.get('id', f'edge-{ei}')}"
+        ne["from"] = id_map.get(str(e["from"]), str(e["from"]))
+        ne["to"] = id_map.get(str(e["to"]), str(e["to"]))
+        edges.append(ne)
+    out["edges"] = edges
+    comps = []
+    for ci, c in enumerate(pspec.get("compartments") or []):
+        nc = dict(c)
+        nc["id"] = f"{pref}{c.get('id', f'comp-{ci}')}"
+        if nc.get("node_ids"):
+            nc["node_ids"] = [id_map.get(str(x), str(x)) for x in nc["node_ids"]]
+        comps.append(nc)
+    out["compartments"] = comps
+    cxs = []
+    for xi, cx in enumerate(pspec.get("complexes") or []):
+        ncx = dict(cx)
+        ncx["id"] = f"{pref}{cx.get('id', f'complex-{xi}')}"
+        if ncx.get("members"):
+            ncx["members"] = [id_map.get(str(x), str(x)) for x in ncx["members"]]
+        cxs.append(ncx)
+    out["complexes"] = cxs
+    out["title"] = ""
+    out["caption"] = ""
+    out["source"] = ""
+    out["legend"] = False
+    return out
+
+
+def _build_multipanel_diagram(spec):
+    """多面板机制图自动拼装：每个子面板独立排版（TB/LR），统一标题、面板角标(a)(b)、共享语义图例与图注。"""
+    panels = spec.get("panels") or []
+    font_fam = spec.get("font_family", DEFAULT_FONT)
+    layout_mode = str(spec.get("panel_layout") or spec.get("layout") or
+                      ("horizontal" if len(panels) <= 2 else "vertical")).strip().lower()
+    is_horiz = layout_mode in ("horizontal", "row", "lr", "side_by_side", "side-by-side")
+    labels = "abcdefgh"
+
+    built = []
+    used_styles = []
+    all_entities, all_rels, all_comps = [], [], []
+    for pi, raw_p in enumerate(panels):
+        pid = str(raw_p.get("id") or labels[pi % len(labels)])
+        pref = f"p{pi}_"
+        sub_spec = _prefix_panel_spec(raw_p, pref)
+        if "font_family" not in sub_spec:
+            sub_spec["font_family"] = font_fam
+        if "font_pt" not in sub_spec and spec.get("font_pt"):
+            sub_spec["font_pt"] = spec["font_pt"]
+        s_ops, sw, sh, s_prov = _build_diagram_ops(sub_spec)
+        built.append((pid, raw_p.get("title") or raw_p.get("panel_title") or "", s_ops, float(sw), float(sh), s_prov))
+        for e in (raw_p.get("edges") or []):
+            st = e.get("style") or e.get("type") or "activate"
+            key = (st, bool(e.get("dashed")))
+            if key not in used_styles:
+                used_styles.append(key)
+        for ent in s_prov.get("entities", []):
+            e_rec = dict(ent)
+            e_rec["panel"] = pid
+            all_entities.append(e_rec)
+        for rel in s_prov.get("relations", []):
+            r_rec = dict(rel)
+            r_rec["panel"] = pid
+            all_rels.append(r_rec)
+        all_comps.extend(s_prov.get("compartments", []))
+
+    label_map = {
+        ("activate", False): "Activation / Direct", ("activate", True): "Indirect / Transport",
+        ("inhibit", False): "Inhibition (T-bar)", ("tbar", False): "Inhibition (T-bar)",
+        ("inhibit", True): "Indirect Inhibition", ("both", False): "Bidirectional",
+        ("line", False): "Association",
+    }
+    want_legend = spec.get("legend", True) and bool(used_styles)
+    leg_items = [(st, dsh, label_map.get((st, dsh), f"{st}" + (" (dashed)" if dsh else "")))
+                 for st, dsh in used_styles[:4]]
+    leg_total_w = (sum(44 + _est_text_w(txt, 10) + 24 for _, _, txt in leg_items) - 24) if want_legend else 0.0
+
+    pad_outer = 24.0
+    panel_gap = 26.0
+    panel_hdr_h = 30.0
+    if is_horiz:
+        body_w = sum(b[3] for b in built) + max(0, len(built) - 1) * panel_gap
+        max_ph = max((b[4] for b in built), default=300.0)
+        canvas_w = float(spec.get("width") or max(body_w + 2 * pad_outer, leg_total_w + 68.0))
+        body_h = max_ph + panel_hdr_h
+    else:
+        max_pw = max((b[3] for b in built), default=680.0)
+        canvas_w = float(spec.get("width") or max(max_pw + 2 * pad_outer, leg_total_w + 68.0))
+        body_h = sum(b[4] + panel_hdr_h for b in built) + max(0, len(built) - 1) * panel_gap
+
+    title_lines = _wrap_text(str(spec["title"]), max(280.0, canvas_w - 64.0), 15.5) if spec.get("title") else []
+    title_h = (32.0 + len(title_lines) * 21.0) if title_lines else 16.0
+    caption_txt = spec.get("caption") or (f"Source: {spec['source']}" if spec.get("source") else "")
+    cap_lines = _wrap_text(str(caption_txt), max(280.0, canvas_w - 64.0), 9.2) if caption_txt else []
+    legend_h = 44.0 if want_legend else 12.0
+    caption_h = (len(cap_lines) * 14.5 + 10.0) if cap_lines else 0.0
+    canvas_h = float(spec.get("height") or (title_h + 10.0 + body_h + 18.0 + legend_h + caption_h))
+
+    ops = []
+    for ti, tl in enumerate(title_lines):
+        ops.append({"op": "add_text", "id": "diagram-title" if ti == 0 else f"diagram-title-{ti}",
+                    "x": canvas_w / 2.0, "y": 30.0 + ti * 21.0,
+                    "text": tl, "font_pt": 15.5, "bold": True,
+                    "fill": "#1A2B3C", "anchor": "middle", "font_family": font_fam})
+
+    cur_x = (canvas_w - body_w) / 2.0 if is_horiz else pad_outer
+    cur_y = title_h + 10.0
+    for pi, (pid, ptitle, s_ops, sw, sh, _) in enumerate(built):
+        px = cur_x if is_horiz else (canvas_w - sw) / 2.0
+        py = cur_y
+        frame_h = (max((b[4] for b in built), default=sh) if is_horiz else sh) + panel_hdr_h
+        ops.append({
+            "op": "add_compartment", "id": f"panel-frame-{pid}",
+            "x": px, "y": py, "w": sw, "h": frame_h,
+            "title": "", "fill": "#FAFCFF", "stroke": "#D0DCE8",
+            "dashed": False, "font_family": font_fam,
+        })
+        hdr_txt = f"({pid}) {ptitle}".strip()
+        ops.append({
+            "op": "add_text", "id": f"panel-hdr-{pid}",
+            "x": px + 14.0, "y": py + 21.0,
+            "text": hdr_txt, "font_pt": 12.5, "bold": True,
+            "fill": "#1A2B3C", "anchor": "start", "font_family": font_fam,
+        })
+        for sop in s_ops:
+            ops.append(_shift_op_coords(sop, px, py + panel_hdr_h))
+        if is_horiz:
+            cur_x += sw + panel_gap
+        else:
+            cur_y += frame_h + panel_gap
+
+    if want_legend:
+        ly = canvas_h - caption_h - 18.0
+        lx = max(32.0, (canvas_w - leg_total_w) / 2.0)
+        for st, dsh, txt in leg_items:
+            ops.append({"op": "add_arrow" if st != "line" else "add_line",
+                        "x1": lx, "y1": ly, "x2": lx + 34, "y2": ly,
+                        "style": st, "dashed": dsh, "width": 1.6})
+            ops.append({"op": "add_text", "x": lx + 42, "y": ly + 4, "text": txt,
+                        "font_pt": 10, "fill": "#334455", "font_family": font_fam})
+            lx += 44 + _est_text_w(txt, 10) + 24
+    for ci_l, cl in enumerate(cap_lines):
+        cy_l = canvas_h - caption_h + 13.0 + ci_l * 14.5
+        ops.append({"op": "add_text", "id": "diagram-caption" if ci_l == 0 else f"diagram-caption-{ci_l}",
+                    "x": canvas_w / 2.0, "y": cy_l,
+                    "text": cl, "font_pt": 9.2, "fill": "#5A6B7C",
+                    "anchor": "middle", "font_family": font_fam})
+
+    provenance = {
+        "generated_by": "sci-figure-studio svg_edit --diagram v3 (multi-panel)",
+        "case_id": spec.get("case_id"),
+        "title": spec.get("title"),
+        "layout": "horizontal" if is_horiz else "vertical",
+        "n_panels": len(built),
+        "source": spec.get("source"),
+        "entities": all_entities,
+        "relations": all_rels,
+        "compartments": all_comps,
+    }
+    return ops, int(round(canvas_w)), int(round(canvas_h)), provenance
+
+
 def _build_diagram_ops(spec):
-    """将紧凑的生物学机制图/流程图 JSON 自动排版为无重叠的 svg_ops 列表 + 画布尺寸 + 溯源对象。"""
+    """将紧凑的生物学机制图/流程图 JSON 自动排版为无重叠的 svg_ops 列表 + 画布尺寸 + 溯源对象（支持单图与多面板）。"""
+    if isinstance(spec.get("panels"), list) and spec["panels"]:
+        return _build_multipanel_diagram(spec)
     nodes = spec.get("nodes") or spec.get("modules") or []
-    edges = spec.get("edges") or []
+    valid_nids = {nd["id"] for nd in nodes if isinstance(nd, dict) and nd.get("id")}
+    edges = []
+    skipped_edges = []
+    for raw_e in (spec.get("edges") or []):
+        if not isinstance(raw_e, dict):
+            continue
+        ef = raw_e.get("from") or raw_e.get("source")
+        et = raw_e.get("to") or raw_e.get("target")
+        if ef in valid_nids and et in valid_nids:
+            en = dict(raw_e)
+            en["from"], en["to"] = ef, et
+            edges.append(en)
+        else:
+            skipped_edges.append({"from": ef, "to": et, "reason": "unknown_node_id"})
     compartments = spec.get("compartments") or []
     font_fam = spec.get("font_family", DEFAULT_FONT)
     fpt = float(spec.get("font_pt", 11.5))
@@ -1027,38 +1320,43 @@ def _build_diagram_ops(spec):
                     "text": tl, "font_pt": 15, "bold": True,
                     "fill": "#1A2B3C", "anchor": "middle", "font_family": font_fam})
 
-    # 区室框（自动统一所有区室左右宽度，形成整齐分层膜结构）
+    # 区室框：lanes 级区室自动统一左右宽度（整齐分层膜结构），node_ids/nodes 级子区室紧贴成员节点（支持细胞质内并排线粒体/细胞核等嵌套细胞器）
     comp_boxes = []
     for ci, c in enumerate(compartments):
+        c_nids = c.get("node_ids") or c.get("nodes")
         c_nodes = []
-        if c.get("node_ids"):
-            c_nodes = [pos[nid] for nid in c["node_ids"] if nid in pos]
+        is_subset = bool(c_nids)
+        if is_subset:
+            c_nodes = [pos[nid] for nid in c_nids if nid in pos]
         elif c.get("lanes"):
             for ln in c["lanes"]:
                 for m in lanes.get(ln, []):
                     c_nodes.append(pos[m["id"]])
         if not c_nodes:
             continue
-        x0 = min(b[0] for b in c_nodes) - 26
-        c_top_ids = set(c.get("node_ids") or [])
+        x0 = min(b[0] for b in c_nodes) - (18 if is_subset else 26)
+        c_top_ids = set(c_nids or [])
         if not c_top_ids and c.get("lanes"):
             min_ln = min(c["lanes"])
             c_top_ids = {m["id"] for m in lanes.get(min_ln, [])}
-        top_pad = 46.0 if (c_top_ids & cx_members) else 28.0
+        top_pad = 46.0 if (c_top_ids & cx_members) else (24.0 if is_subset else 28.0)
         y0 = min(b[1] for b in c_nodes) - top_pad
-        x1 = max(b[0] + b[2] for b in c_nodes) + 26
-        y1 = max(b[1] + b[3] for b in c_nodes) + 18
-        comp_boxes.append((ci, c, x0, y0, x1, y1))
+        x1 = max(b[0] + b[2] for b in c_nodes) + (18 if is_subset else 26)
+        y1 = max(b[1] + b[3] for b in c_nodes) + (14 if is_subset else 18)
+        comp_boxes.append((ci, c, x0, y0, x1, y1, is_subset))
     if comp_boxes:
-        gx0 = max(24.0, min(b[2] for b in comp_boxes))
-        gx1 = min(canvas_w - 24.0, max(b[4] for b in comp_boxes))
-        for ci, c, _, y0, _, y1 in comp_boxes:
+        lane_boxes = [b for b in comp_boxes if not b[6]]
+        gx0 = max(24.0, min(b[2] for b in (lane_boxes or comp_boxes)))
+        gx1 = min(canvas_w - 24.0, max(b[4] for b in (lane_boxes or comp_boxes)))
+        for ci, c, x0, y0, x1, y1, is_subset in comp_boxes:
             ctitle = c.get("title") or c.get("label") or c.get("name") or ""
+            bx0 = max(28.0, x0) if is_subset else gx0
+            bx1 = min(canvas_w - 28.0, x1) if is_subset else gx1
             ops.append({
                 "op": "add_compartment",
                 "id": c.get("id", f"comp-{ci}"),
-                "x": gx0, "y": max(title_h, y0),
-                "w": gx1 - gx0, "h": y1 - max(title_h, y0),
+                "x": bx0, "y": max(title_h, y0),
+                "w": max(60.0, bx1 - bx0), "h": y1 - max(title_h, y0),
                 "title": ctitle,
                 "fill": c.get("fill", "#F5F8FC"),
                 "stroke": c.get("stroke", "#8FA6C0"),
@@ -1087,6 +1385,8 @@ def _build_diagram_ops(spec):
             for bk in ("badge_fill", "badge_stroke", "badge_text_fill"):
                 if nd.get(bk):
                     op_b[bk] = nd[bk]
+        if nd.get("step") is not None:
+            op_b["step"] = nd["step"]
         ops.append(op_b)
 
     # 连线（1) 常规边按目标框入边方向 top/bottom/left/right 分组错开，同泳道水平边不被顶部入边带歪；
@@ -1192,36 +1492,134 @@ def _build_diagram_ops(spec):
                 for k, idx in enumerate(ordered):
                     edge_bias[idx] = -0.24 + (0.48 * k / max(1, m - 1))
 
+    # 常规边按 (fid, exit_side) 错开出射点（枢纽节点多分支防重叠）
+    outgoing = {}
+    for ei, e in enumerate(edges):
+        if edge_routes[ei][0] != "detour":
+            eside = _entry_side(e["from"], e["to"])
+            ex_side = {"top": "bottom", "bottom": "top", "left": "right", "right": "left"}[eside]
+            outgoing.setdefault((e["from"], ex_side), []).append(ei)
+    src_bias_map = {}
+    for (fid, ex_side), eidxs in outgoing.items():
+        if len(eidxs) > 1 and fid in pos:
+            fx, fy, fw, fh = pos[fid]
+            fcx, fcy = fx + fw / 2.0, fy + fh / 2.0
+            horiz = ex_side in ("left", "right")
+            ordered = sorted(
+                eidxs,
+                key=lambda idx: ((pos[edges[idx]["to"]][1] + pos[edges[idx]["to"]][3] / 2.0 - fcy)
+                                 if horiz else (pos[edges[idx]["to"]][0] + pos[edges[idx]["to"]][2] / 2.0 - fcx))
+                if edges[idx]["to"] in pos else 0.0,
+            )
+            m = len(ordered)
+            for k, idx in enumerate(ordered):
+                src_bias_map[idx] = -0.24 + (0.48 * k / max(1, m - 1))
+
     non_detour_pairs_tb = {(edges[i]["from"], edges[i]["to"]) for i in range(len(edges))
                            if edge_routes[i][0] != "detour"}
     detour_count = {"left": 0, "right": 0}
+    hop_count = {}
+    placed_lbl_boxes = []
+
+    def _place_edge_label(lx, ly, txt, lbl_fpt, axis="y"):
+        if not txt:
+            return [lx, ly]
+        hw = (_est_text_w(txt, lbl_fpt) + 8.0) / 2.0
+        hh = lbl_fpt * 0.68
+        offsets = [0.0, -14.0, 14.0, -26.0, 26.0] if axis == "y" else [0.0, -16.0, 16.0]
+        for off in offsets:
+            cx_c = lx + (off if axis == "x" else 0.0)
+            cy_c = ly + (off if axis == "y" else 0.0)
+            cx_c = min(canvas_w - 14.0 - hw, max(14.0 + hw, cx_c))
+            bx = (cx_c - hw, cy_c - hh, cx_c + hw, cy_c + hh)
+            hit = any(not (bx[2] < pb[0] - 2 or bx[0] > pb[2] + 2 or bx[3] < pb[1] - 2 or bx[1] > pb[3] + 2)
+                      for pb in placed_lbl_boxes)
+            if not hit:
+                placed_lbl_boxes.append(bx)
+                return [round(cx_c, 1), round(cy_c, 1)]
+        placed_lbl_boxes.append((lx - hw, ly - hh, lx + hw, ly + hh))
+        return [round(lx, 1), round(ly, 1)]
+
     for ei, e in enumerate(edges):
         st = e.get("style") or e.get("type") or "activate"
         route, side = edge_routes[ei]
+        lbl_txt = str(e.get("label") or "")
+        lbl_fpt = max(9.5, fpt - 1.5)
         op_e = {
             "op": "add_arrow" if st != "line" else "add_line",
             "id": e.get("id", f"edge-{ei}"),
             "from_id": e["from"], "to_id": e["to"],
             "dst_bias": edge_bias.get(ei, 0.0),
+            "src_bias": src_bias_map.get(ei, 0.0),
             "style": st, "dashed": bool(e.get("dashed", False)),
             "route": route,
-            "label": e.get("label", ""),
-            "font_pt": max(9.5, fpt - 1.5), "font_family": font_fam,
+            "label": lbl_txt,
+            "font_pt": lbl_fpt, "font_family": font_fam,
         }
         if route != "detour" and (e["to"], e["from"]) in non_detour_pairs_tb and e["from"] in pos and e["to"] in pos:
             x1, y1, x2, y2, lpos, lanch = _antiparallel_coords(pos[e["from"]], pos[e["to"]])
             op_e.pop("from_id", None)
             op_e.pop("to_id", None)
             op_e["x1"], op_e["y1"], op_e["x2"], op_e["y2"] = x1, y1, x2, y2
-            op_e["label_pos"], op_e["label_anchor"] = lpos, lanch
+            op_e["label_pos"], op_e["label_anchor"] = _place_edge_label(lpos[0], lpos[1], lbl_txt, lbl_fpt), lanch
         elif route == "straight" and e["from"] in pos and e["to"] in pos:
             fl, tl = node_lane.get(e["from"], 0), node_lane.get(e["to"], 0)
-            if fl != tl:
-                b1, b2 = pos[e["from"]], pos[e["to"]]
-                cx1, cx2 = b1[0] + b1[2] / 2.0, b2[0] + b2[2] / 2.0
-                if abs(cx2 - cx1) > 18.0:
+            b1, b2 = pos[e["from"]], pos[e["to"]]
+            if fl == tl:
+                # 检测同泳道非相邻节点间是否存在中间节点遮挡：若有则自动走泳道上方/下方圆角跨跳，绝不穿框
+                lo_x = min(b1[0] + b1[2], b2[0] + b2[2])
+                hi_x = max(b1[0], b2[0])
+                mid_nodes = [
+                    m["id"] for m in lanes.get(fl, [])
+                    if m["id"] not in (e["from"], e["to"]) and m["id"] in pos
+                    and pos[m["id"]][0] + pos[m["id"]][2] > lo_x + 2 and pos[m["id"]][0] < hi_x - 2
+                ]
+                if mid_nodes:
+                    hk = hop_count.get(fl, 0)
+                    hop_count[fl] = hk + 1
+                    go_below = (hk % 2 == 1)
+                    hop_side = "bottom" if go_below else "top"
+                    cx1 = b1[0] + b1[2] / 2.0
+                    cx2 = b2[0] + b2[2] / 2.0
+                    if incoming.get((e["from"], hop_side)) or outgoing.get((e["from"], hop_side)):
+                        cx1 += (b1[2] * 0.24 if cx2 > cx1 else -b1[2] * 0.24)
+                    if incoming.get((e["to"], hop_side)) or outgoing.get((e["to"], hop_side)):
+                        cx2 += (-b2[2] * 0.24 if cx2 > cx1 else b2[2] * 0.24)
+                    ly0, ly1 = lane_y_bounds.get(fl, (min(b1[1], b2[1]), max(b1[1] + b1[3], b2[1] + b2[3])))
+                    cx_extra = 12.0 if (not go_below and any(mn in cx_members for mn in mid_nodes)) else 0.0
+                    hy = (ly1 + 20.0 + 14.0 * (hk // 2)) if go_below else (ly0 - 20.0 - cx_extra - 14.0 * (hk // 2))
+                    sy = (b1[1] + b1[3]) if go_below else b1[1]
+                    ty = (b2[1] + b2[3]) if go_below else b2[1]
+                    op_e["route"] = "detour"
+                    op_e["waypoints"] = [(cx1, sy), (cx1, hy), (cx2, hy), (cx2, ty)]
+                    op_e["label_pos"] = _place_edge_label((cx1 + cx2) / 2.0, hy + (12.0 if go_below else -6.0), lbl_txt, lbl_fpt)
+                    op_e["label_anchor"] = "middle"
+                elif lbl_txt:
+                    # 同泳道相邻边：若标签宽度接近水平间隙，自动上移至箭头上方避免压到邻框边界
+                    gap_h = max(10.0, hi_x - lo_x)
+                    mx_h = (lo_x + hi_x) / 2.0
+                    my_h = (b1[1] + b1[3] / 2.0 + b2[1] + b2[3] / 2.0) / 2.0
+                    if _est_text_w(lbl_txt, lbl_fpt) + 10.0 > gap_h:
+                        op_e["label_pos"] = _place_edge_label(mx_h, my_h - 13.0, lbl_txt, lbl_fpt)
+                        op_e["label_anchor"] = "middle"
+                    else:
+                        op_e["label_pos"] = _place_edge_label(mx_h, my_h - 6.0, lbl_txt, lbl_fpt)
+                        op_e["label_anchor"] = "middle"
+            else:
+                sx_est = b1[0] + b1[2] * (0.5 + src_bias_map.get(ei, 0.0))
+                tx_est = b2[0] + b2[2] * (0.5 + edge_bias.get(ei, 0.0))
+                if abs(tx_est - sx_est) > 6.0:
                     op_e["route"] = "smooth"
                     op_e["smooth_axis"] = "vertical"
+                if lbl_txt:
+                    sy_est = (b1[1] + b1[3]) if tl > fl else b1[1]
+                    ty_est = b2[1] if tl > fl else (b2[1] + b2[3])
+                    mx_v = (sx_est + tx_est) / 2.0
+                    my_v = (sy_est + ty_est) / 2.0
+                    if abs(tx_est - sx_est) <= 6.0:
+                        mx_v += 10.0 + _est_text_w(lbl_txt, lbl_fpt) / 2.0
+                    op_e["label_pos"] = _place_edge_label(mx_v, my_v, lbl_txt, lbl_fpt)
+                    op_e["label_anchor"] = "middle"
         if route == "detour" and e["from"] in pos and e["to"] in pos:
             side = side or "left"
             k_slot = detour_count[side]
@@ -1232,7 +1630,6 @@ def _build_diagram_ops(spec):
             corridor_x = (max(26.0, comp_x0 - 30.0 - 22.0 * k_slot) if side == "left"
                           else min(canvas_w - 26.0, comp_x1 + 30.0 + 22.0 * k_slot))
             going_up = cy2 < cy1
-            # 起点：外侧无兄弟时水平直出，有兄弟时从顶/底退入行间空隙再横移至外侧走廊
             if _side_clear(e["from"], side):
                 sx = b1[0] if side == "left" else (b1[0] + b1[2])
                 sy = cy1
@@ -1241,27 +1638,28 @@ def _build_diagram_ops(spec):
                 sy = b1[1] if going_up else (b1[1] + b1[3])
                 gy = (b1[1] - 18.0 - 8.0 * k_slot) if going_up else (b1[1] + b1[3] + 18.0 + 8.0 * k_slot)
                 wpts = [(cx1, sy), (cx1, gy), (corridor_x, gy)]
-            # 终点：外侧无兄弟时水平直入，有兄弟时经行间空隙折入顶/底
             if _side_clear(e["to"], side):
                 tx = b2[0] if side == "left" else (b2[0] + b2[2])
                 ty = cy2 + (10.0 * k_slot if going_up else -10.0 * k_slot)
                 wpts += [(corridor_x, ty), (tx, ty)]
             else:
+                tside = "bottom" if going_up else "top"
+                tx_in = cx2
+                if incoming.get((e["to"], tside)) or outgoing.get((e["to"], tside)):
+                    tx_in = cx2 + (-b2[2] * 0.26 if side == "left" else b2[2] * 0.26)
                 ty = (b2[1] + b2[3]) if going_up else b2[1]
                 gy2 = (b2[1] + b2[3] + 18.0 + 8.0 * k_slot) if going_up else (b2[1] - 18.0 - 8.0 * k_slot)
-                wpts += [(corridor_x, gy2), (cx2, gy2), (cx2, ty)]
+                wpts += [(corridor_x, gy2), (tx_in, gy2), (tx_in, ty)]
             op_e["waypoints"] = wpts
-            # 标签放在外侧走廊垂直段上，自动避让各泳道节点中心 y（防与同侧其他水平连线重叠）
             y_lo_v, y_hi_v = sorted((wpts[1][1], wpts[-2][1]))
             vy_mid = (y_lo_v + y_hi_v) / 2.0 + (k_slot * 26.0 - 10.0)
             lane_cys = [(yb[0] + yb[1]) / 2.0 for yb in lane_y_bounds.values()]
             if any(abs(vy_mid - lcy) < 18.0 for lcy in lane_cys):
                 cands = [y_lo_v + (y_hi_v - y_lo_v) * f for f in (0.72, 0.28, 0.82, 0.18, 0.5)]
                 vy_mid = max(cands, key=lambda yv: min((abs(yv - lcy) for lcy in lane_cys), default=99.0))
-            lbl_fpt = max(9.5, fpt - 1.5)
-            half_lw = (_est_text_w(e.get("label", ""), lbl_fpt) + 8.0) / 2.0
+            half_lw = (_est_text_w(lbl_txt, lbl_fpt) + 8.0) / 2.0
             lx_clamped = min(canvas_w - 14.0 - half_lw, max(14.0 + half_lw, corridor_x))
-            op_e["label_pos"] = [lx_clamped, vy_mid]
+            op_e["label_pos"] = _place_edge_label(lx_clamped, vy_mid, lbl_txt, lbl_fpt)
             op_e["label_anchor"] = "middle"
         if e.get("stroke"):
             op_e["stroke"] = e["stroke"]
@@ -1354,6 +1752,8 @@ def main():
             ap.error("--diagram 需配合 --out-svg")
         spec = json.loads(Path(args.diagram).read_text(encoding="utf-8"))
         ops, w, h, prov = _build_diagram_ops(spec)
+        if isinstance(spec.get("custom_ops"), list):
+            ops.extend(spec["custom_ops"])
         out_svg = Path(args.out_svg)
         prov_path = out_svg.with_suffix(".provenance.json")
         _write_blank_svg(out_svg, w, h,
@@ -1385,9 +1785,12 @@ def main():
         prov["reproducibility"] = {
             "spec_file": Path(args.diagram).name,
             "spec_sha256": sha256_of(args.diagram),
+            "verify_pdf": str(verify_pdf) if verify_pdf else None,
+            "verify_pdf_sha256": sha256_of(verify_pdf) if verify_pdf and Path(verify_pdf).exists() else None,
             "command": f"python3 svg_edit.py --diagram {Path(args.diagram).name} --out-svg {out_svg.name}"
                        + (f" --out-pdf {Path(args.out_pdf).name}" if args.out_pdf else "")
                        + (f" --out-png {Path(args.out_png).name} --png-dpi {args.png_dpi}" if args.out_png else ""),
+            "spec_embedded": spec,
         }
         prov["export_params"] = {
             "canvas_px": [w, h], "svg_fonttype": "none",
@@ -1403,15 +1806,19 @@ def main():
             prov["self_check"]["png_edge"] = png_edge
         if entity_audit is not None:
             prov["self_check"]["entity_grounding_audit"] = entity_audit
+        prov["change_log"] = log_all
         dump_json(prov, prov_path)
+        n_app = sum(1 for e in log_all if e.get("status") == "applied")
+        n_fail = sum(1 for e in log_all if e.get("status") == "failed")
+        n_miss = sum(1 for e in log_all if e.get("status") == "not_found")
         rep = {"mode": "diagram", "out_svg": str(out_svg), "out_pdf": args.out_pdf,
                "out_png": args.out_png, "provenance": str(prov_path), "canvas": [w, h], "n_ops": len(ops),
                "editable_svg": editable, "svg_geometry": geo, "png": png_res, "png_edge": png_edge,
                "preview": preview, "entity_grounding_audit": entity_audit,
-               "change_log": log_all,
+               "change_log_summary": {"applied": n_app, "failed": n_fail, "not_found": n_miss},
                "ok": bool(geo.get("ok")) and bool(editable.get("ok"))
                and not (png_edge or {}).get("clipping_suspect")
-               and all(e.get("status") != "failed" for e in log_all)}
+               and n_fail == 0}
         print(json.dumps(rep, ensure_ascii=False, indent=2, default=str))
         if args.report:
             dump_json(rep, args.report)
@@ -1596,6 +2003,7 @@ def main():
         "ops_file": str(args.ops),
         "reproducibility": {
             "ops_sha256": sha256_of(args.ops) if Path(args.ops).exists() else None,
+            "ops_embedded": ops,
             "command": f"python3 svg_edit.py --input {src.name} --page {args.page} --ops {Path(args.ops).name} --out-svg {out_svg.name}"
                        + (f" --out-pdf {Path(args.out_pdf).name}" if args.out_pdf else "")
                        + (f" --out-png {Path(args.out_png).name} --png-dpi {args.png_dpi}" if args.out_png else ""),

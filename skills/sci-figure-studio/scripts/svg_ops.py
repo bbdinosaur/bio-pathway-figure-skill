@@ -72,14 +72,18 @@ def _set_text(el, new):
     tspans = [c for c in el if c.tag.split("}")[-1] == "tspan"]
     if tspans:
         t0 = tspans[0]
-        if len(new) != len(old) and t0.get("x") and len(t0.get("x").split()) > 1:
+        if new != old and t0.get("x") and len(t0.get("x").split()) > 1:
             t0.set("x", t0.get("x").split()[0])
+            if t0.get("dx"):
+                t0.attrib.pop("dx", None)
         t0.text = new
         for t in tspans[1:]:
             el.remove(t)
     else:
-        if len(new) != len(old) and el.get("x") and len(el.get("x").split()) > 1:
+        if new != old and el.get("x") and len(el.get("x").split()) > 1:
             el.set("x", el.get("x").split()[0])
+            if el.get("dx"):
+                el.attrib.pop("dx", None)
         el.text = new
 
 
@@ -122,11 +126,25 @@ def find_target(root, spec):
     return hits
 
 
+_NAMED_COLORS = {
+    "black": (0, 0, 0), "white": (255, 255, 255), "red": (255, 0, 0), "green": (0, 128, 0),
+    "blue": (0, 0, 255), "yellow": (255, 255, 0), "cyan": (0, 255, 255), "magenta": (255, 0, 255),
+    "gray": (128, 128, 128), "grey": (128, 128, 128), "silver": (192, 192, 192),
+    "orange": (255, 165, 0), "purple": (128, 0, 128), "pink": (255, 192, 203),
+    "brown": (165, 42, 42), "navy": (0, 0, 128), "teal": (0, 128, 128), "maroon": (128, 0, 0),
+    "olive": (128, 128, 0), "gold": (255, 215, 0), "coral": (255, 127, 80),
+    "crimson": (220, 20, 60), "tomato": (255, 99, 71), "steelblue": (70, 130, 180),
+    "darkgreen": (0, 100, 0), "darkblue": (0, 0, 139), "darkred": (139, 0, 0),
+}
+
+
 def _parse_color(s):
-    """解析 #rgb/#rrggbb/rgb(r,g,b)/rgb(r%,g%,b%) 为 0-255 三元组，失败返回 None。"""
+    """解析 #rgb/#rrggbb/rgb(r,g,b)/rgb(r%,g%,b%)/CSS命名色 为 0-255 三元组，失败返回 None。"""
     if not s:
         return None
     s = s.strip().lower()
+    if s in _NAMED_COLORS:
+        return _NAMED_COLORS[s]
     if s.startswith("#"):
         h = s[1:]
         if len(h) == 3:
@@ -161,30 +179,68 @@ def _style_get(el, prop):
 
 
 def _collect_boxes(root):
-    """扫描已有带 id 的 rect/ellipse，供 from_id/to_id 自动贴边连线。"""
+    """扫描已有带 id 的 rect/ellipse/circle 及 <g> 分组，解析累计 transform 得到全局 bbox，供 from_id/to_id 贴边连线。"""
+    try:
+        from check_layout import parse_transform, _mat_mul, _apply
+    except Exception:
+        parse_transform = lambda s: (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+        _mat_mul = lambda a, b: a
+        _apply = lambda m, x, y: (x, y)
+
     boxes = {}
-    for el in root.iter():
-        eid = el.get("id")
-        if not eid:
-            continue
+
+    def _shape_bbox(el, m):
         tag = el.tag.split("}")[-1]
         try:
             if tag == "rect":
                 x, y = float(el.get("x", 0)), float(el.get("y", 0))
                 w, h = float(el.get("width", 0)), float(el.get("height", 0))
-                boxes[eid] = (x, y, w, h)
+                pts = [_apply(m, x, y), _apply(m, x + w, y), _apply(m, x, y + h), _apply(m, x + w, y + h)]
             elif tag == "ellipse":
                 cx, cy = float(el.get("cx", 0)), float(el.get("cy", 0))
                 rx, ry = float(el.get("rx", 0)), float(el.get("ry", 0))
-                boxes[eid] = (cx - rx, cy - ry, 2 * rx, 2 * ry)
+                pts = [_apply(m, cx - rx, cy - ry), _apply(m, cx + rx, cy + ry)]
+            elif tag == "circle":
+                cx, cy, r = float(el.get("cx", 0)), float(el.get("cy", 0)), float(el.get("r", 0))
+                pts = [_apply(m, cx - r, cy - r), _apply(m, cx + r, cy + r)]
+            else:
+                return None
+            xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+            return (min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys))
         except ValueError:
-            pass
+            return None
+
+    def _walk(el, m):
+        cm = _mat_mul(m, parse_transform(el.get("transform")))
+        eid = el.get("id")
+        sb = _shape_bbox(el, cm)
+        if sb and eid:
+            boxes[eid] = sb
+        child_bbs = []
+        for ch in el:
+            cb = _walk(ch, cm)
+            if cb:
+                child_bbs.append(cb)
+        if sb:
+            return sb
+        if child_bbs:
+            x0 = min(b[0] for b in child_bbs)
+            y0 = min(b[1] for b in child_bbs)
+            x1 = max(b[0] + b[2] for b in child_bbs)
+            y1 = max(b[1] + b[3] for b in child_bbs)
+            ub = (x0, y0, x1 - x0, y1 - y0)
+            if eid and eid not in boxes and el.tag.split("}")[-1] == "g":
+                boxes[eid] = ub
+            return ub
+        return None
+
+    _walk(root, (1.0, 0.0, 0.0, 1.0, 0.0, 0.0))
     return boxes
 
 
-def _anchor_pair(b1, b2, dst_bias=0.0):
+def _anchor_pair(b1, b2, dst_bias=0.0, src_bias=0.0):
     """根据两个框 (x,y,w,h) 的相对位置计算最干净的边缘起止点 (x1,y1,x2,y2)。
-    dst_bias ∈ [-0.35, 0.35] 用于多条边汇入同一目标框时错开接点，避免箭头重叠。"""
+    src_bias / dst_bias ∈ [-0.35, 0.35] 用于多条边从同一枢纽分出或汇入同一目标框时错开接点。"""
     x1, y1, w1, h1 = b1
     x2, y2, w2, h2 = b2
     cx1, cy1 = x1 + w1 / 2.0, y1 + h1 / 2.0
@@ -192,15 +248,16 @@ def _anchor_pair(b1, b2, dst_bias=0.0):
     dx, dy = cx2 - cx1, cy2 - cy1
     same_row = abs(dy) < min(h1, h2) * 0.5
     if same_row and abs(dx) > 1e-3:
+        sy = cy1 + src_bias * h1
         ty = cy2 + dst_bias * h2
         if dx > 0:
-            return x1 + w1, cy1, x2, ty
-        return x1, cy1, x2 + w2, ty
-    # 跨泳道优先用顶边/底边接入，并按相对水平方向微调接入点，避免斜穿节点边缘或撞上水平边起点
+            return x1 + w1, sy, x2, ty
+        return x1, sy, x2 + w2, ty
+    sx = cx1 + src_bias * w1
     tx = cx2 + dst_bias * w2
     if dy >= 0:
-        return cx1, y1 + h1, tx, y2
-    return cx1, y1, tx, y2 + h2
+        return sx, y1 + h1, tx, y2
+    return sx, y1, tx, y2 + h2
 
 
 def apply_ops(svg_path, ops):
@@ -242,8 +299,10 @@ def apply_ops(svg_path, ops):
                         for t in matched_ts:
                             t_old = "".join(t.itertext())
                             t_new = _do_sub(t_old)
-                            if len(t_new) != len(t_old) and t.get("x") and len(t.get("x").split()) > 1:
+                            if t_new != t_old and t.get("x") and len(t.get("x").split()) > 1:
                                 t.set("x", t.get("x").split()[0])
+                                if t.get("dx"):
+                                    t.attrib.pop("dx", None)
                             t.text = t_new
                         applied_pairs.append((old, _full_text(el)))
                     else:
@@ -262,41 +321,85 @@ def apply_ops(svg_path, ops):
                     entry.update(status="applied", after=op["text"])
             elif kind == "recolor":
                 n = 0
+                fill_from = op.get("fill_from") or op.get("from_fill")
+                stroke_from = op.get("stroke_from") or op.get("from_stroke")
+                to_fill = op.get("to_fill") or op.get("fill_to")
+                to_stroke = op.get("to_stroke") or op.get("stroke_to")
+                shape_tags = {"rect", "circle", "ellipse", "polygon", "polyline", "path", "line"}
+
+                def _recolor_one(node, allow_direct_id=False):
+                    nonlocal n
+                    cur_fill = node.get("fill") or _style_get(node, "fill") or ""
+                    cur_stroke = node.get("stroke") or _style_get(node, "stroke") or ""
+                    if fill_from and _color_close(cur_fill, fill_from):
+                        to = to_fill or cur_fill
+                        if node.get("fill") is not None:
+                            node.set("fill", to)
+                        else:
+                            node.set("style", re.sub(r"fill\s*:\s*[^;]+", f"fill:{to}", node.get("style", "")))
+                        n += 1
+                    elif allow_direct_id and not fill_from and to_fill:
+                        if node.get("style") and re.search(r"fill\s*:", node.get("style", "")):
+                            node.set("style", re.sub(r"fill\s*:\s*[^;]+", f"fill:{to_fill}", node.get("style", "")))
+                        else:
+                            node.set("fill", to_fill)
+                        n += 1
+                    if stroke_from and _color_close(cur_stroke, stroke_from):
+                        to = to_stroke or cur_stroke
+                        if node.get("stroke") is not None:
+                            node.set("stroke", to)
+                        else:
+                            node.set("style", re.sub(r"stroke\s*:\s*[^;]+", f"stroke:{to}", node.get("style", "")))
+                        n += 1
+                    elif allow_direct_id and not stroke_from and to_stroke:
+                        if node.get("style") and re.search(r"stroke\s*:", node.get("style", "")):
+                            node.set("style", re.sub(r"stroke\s*:\s*[^;]+", f"stroke:{to_stroke}", node.get("style", "")))
+                        else:
+                            node.set("stroke", to_stroke)
+                        n += 1
+
                 for el in root.iter():
-                    if op.get("id") and el.get("id") != op["id"]:
-                        continue
-                    cur_fill = el.get("fill") or _style_get(el, "fill") or ""
-                    cur_stroke = el.get("stroke") or _style_get(el, "stroke") or ""
-                    if op.get("fill_from") and _color_close(cur_fill, op["fill_from"]):
-                        to = op.get("to_fill", cur_fill)
-                        if el.get("fill") is not None:
-                            el.set("fill", to)
+                    if op.get("id"):
+                        if el.get("id") != op["id"]:
+                            continue
+                        if el.tag.split("}")[-1] == "g":
+                            kids = [c for c in el.iter() if c is not el and c.tag.split("}")[-1] in shape_tags]
+                            for kd in (kids or [el]):
+                                _recolor_one(kd, allow_direct_id=True)
                         else:
-                            el.set("style", re.sub(r"fill\s*:\s*[^;]+", f"fill:{to}", el.get("style", "")))
-                        n += 1
-                    elif op.get("id") and not op.get("fill_from") and op.get("to_fill"):
-                        to = op["to_fill"]
-                        if el.get("style") and re.search(r"fill\s*:", el.get("style", "")):
-                            el.set("style", re.sub(r"fill\s*:\s*[^;]+", f"fill:{to}", el.get("style", "")))
-                        else:
-                            el.set("fill", to)
-                        n += 1
-                    if op.get("stroke_from") and _color_close(cur_stroke, op["stroke_from"]):
-                        to = op.get("to_stroke", cur_stroke)
-                        if el.get("stroke") is not None:
-                            el.set("stroke", to)
-                        else:
-                            el.set("style", re.sub(r"stroke\s*:\s*[^;]+", f"stroke:{to}", el.get("style", "")))
-                        n += 1
-                    elif op.get("id") and not op.get("stroke_from") and op.get("to_stroke"):
-                        to = op["to_stroke"]
-                        if el.get("style") and re.search(r"stroke\s*:", el.get("style", "")):
-                            el.set("style", re.sub(r"stroke\s*:\s*[^;]+", f"stroke:{to}", el.get("style", "")))
-                        else:
-                            el.set("stroke", to)
-                        n += 1
+                            _recolor_one(el, allow_direct_id=True)
+                    else:
+                        _recolor_one(el, allow_direct_id=False)
+                if not op.get("id"):
+                    for st_el in root.iter():
+                        if st_el.tag.split("}")[-1] == "style" and st_el.text:
+                            css_txt = st_el.text
+                            if fill_from and to_fill:
+                                def _sub_f(m):
+                                    nonlocal n
+                                    if _color_close(m.group(2).strip(), fill_from):
+                                        n += 1
+                                        return m.group(1) + to_fill
+                                    return m.group(0)
+                                css_txt = re.sub(r"(fill\s*:\s*)([^;}]+)", _sub_f, css_txt)
+                            if stroke_from and to_stroke:
+                                def _sub_s(m):
+                                    nonlocal n
+                                    if _color_close(m.group(2).strip(), stroke_from):
+                                        n += 1
+                                        return m.group(1) + to_stroke
+                                    return m.group(0)
+                                css_txt = re.sub(r"(stroke\s*:\s*)([^;}]+)", _sub_s, css_txt)
+                            st_el.text = css_txt
                 entry.update(status="applied" if n else "not_found", n=n,
-                             detail=f"fill={op.get('fill_from')}->{op.get('to_fill')}")
+                             detail=f"fill={fill_from}->{to_fill}")
+            elif kind == "set_attrs":
+                hits = find_target(root, op)
+                attrs = op.get("attrs") or {}
+                for el in hits:
+                    for ak, av in attrs.items():
+                        el.set(str(ak), str(av))
+                entry.update(status="applied" if (hits and attrs) else "not_found", n=len(hits))
             elif kind == "set_style":
                 hits = find_target(root, op)
                 style_map = {
@@ -352,20 +455,20 @@ def apply_ops(svg_path, ops):
 
 
 def _draw_head(root, x1, y1, x2, y2, stroke, width, style):
-    """在 (x2, y2) 处画箭头或抑制 T-bar。"""
+    """在 (x2, y2) 处画箭头或抑制 T-bar（T-bar 清晰加宽，与框边保持可读间距）。"""
     ang = math.atan2(y2 - y1, x2 - x1)
     if style in ("inhibit", "tbar"):
-        L = 5.5
+        L = 7.2
         px, py = -math.sin(ang) * L, math.cos(ang) * L
         bar = ET.Element(_q("line"), {
             "x1": f"{x2 - px:.1f}", "y1": f"{y2 - py:.1f}",
             "x2": f"{x2 + px:.1f}", "y2": f"{y2 + py:.1f}",
-            "stroke": stroke, "stroke-width": f"{max(2.0, float(width) * 1.35):.1f}",
+            "stroke": stroke, "stroke-width": f"{max(2.2, float(width) * 1.45):.1f}",
             "stroke-linecap": "round",
         })
         root.append(bar)
     elif style in ("activate", "both", "arrow"):
-        L, W = 7.5, 3.8
+        L, W = 8.0, 4.0
         pts = [
             (x2, y2),
             (x2 - L * math.cos(ang) + W * math.sin(ang), y2 - L * math.sin(ang) - W * math.cos(ang)),
@@ -421,13 +524,16 @@ def _add_new(root, op, boxes):
             "stroke": op.get("stroke", "#8FA6C0"),
             "stroke-width": str(op.get("stroke_w", 1.5 if cstyle == "membrane" else 1.2)),
         })
-        if cstyle == "membrane":
+        if cstyle in ("membrane", "bilayer", "nucleus"):
+            if cstyle == "nucleus":
+                rect.set("stroke-dasharray", "8,4")
+                rect.set("rx", str(op.get("rx", 18)))
             inner = ET.Element(_q("rect"), {
-                "x": f"{x + 3.5:.1f}", "y": f"{y + 3.5:.1f}",
-                "width": f"{max(4.0, w - 7.0):.1f}", "height": f"{max(4.0, h - 7.0):.1f}",
-                "rx": str(max(2, float(op.get("rx", 10)) - 2)),
+                "x": f"{x + 4.0:.1f}", "y": f"{y + 4.0:.1f}",
+                "width": f"{max(4.0, w - 8.0):.1f}", "height": f"{max(4.0, h - 8.0):.1f}",
+                "rx": str(max(2, float(op.get("rx", 18 if cstyle == "nucleus" else 10)) - 2)),
                 "fill": "none", "stroke": op.get("stroke", "#8FA6C0"),
-                "stroke-width": "0.9", "stroke-dasharray": "4,3",
+                "stroke-width": "1.0", "stroke-dasharray": "6,4" if cstyle == "nucleus" else "4,3",
             })
             g.append(rect)
             g.append(inner)
@@ -465,24 +571,65 @@ def _add_new(root, op, boxes):
         fill = op.get("fill", "#EEF3FA")
         stroke = op.get("stroke", "#33506B")
         sw = str(op.get("stroke_w", 1.3))
-        if shape == "ellipse":
+        if shape in ("ellipse", "mitochondria", "vesicle"):
             el = ET.Element(_q("ellipse"), {
                 "cx": f"{x + w / 2:.1f}", "cy": f"{y + h / 2:.1f}",
                 "rx": f"{w / 2:.1f}", "ry": f"{h / 2:.1f}",
                 "fill": fill, "stroke": stroke, "stroke-width": sw, "id": eid,
             })
+            root.append(el)
+            if shape == "vesicle":
+                root.append(ET.Element(_q("ellipse"), {
+                    "cx": f"{x + w / 2:.1f}", "cy": f"{y + h / 2:.1f}",
+                    "rx": f"{max(4.0, w / 2 - 4.5):.1f}", "ry": f"{max(4.0, h / 2 - 4.5):.1f}",
+                    "fill": "none", "stroke": stroke, "stroke-width": "0.9", "stroke-dasharray": "3,2",
+                }))
+            elif shape == "mitochondria":
+                # 极简线粒体内膜嵴轮廓（位于下缘不遮挡居中文字）
+                mx0, mx1 = x + w * 0.16, x + w * 0.84
+                my = y + h * 0.78
+                step_m = (mx1 - mx0) / 4.0
+                cd = (f"M {mx0:.1f},{my:.1f} Q {mx0 + step_m * 0.5:.1f},{my - 6.5:.1f} {mx0 + step_m:.1f},{my:.1f} "
+                      f"Q {mx0 + step_m * 1.5:.1f},{my + 4.5:.1f} {mx0 + step_m * 2:.1f},{my:.1f} "
+                      f"Q {mx0 + step_m * 2.5:.1f},{my - 6.5:.1f} {mx0 + step_m * 3:.1f},{my:.1f} "
+                      f"Q {mx0 + step_m * 3.5:.1f},{my + 4.5:.1f} {mx1:.1f},{my:.1f}")
+                root.append(ET.Element(_q("path"), {
+                    "d": cd, "fill": "none", "stroke": stroke, "stroke-width": "0.95", "stroke-opacity": "0.55",
+                }))
         elif shape == "diamond":
             pts = f"{x + w / 2:.1f},{y:.1f} {x + w:.1f},{y + h / 2:.1f} {x + w / 2:.1f},{y + h:.1f} {x:.1f},{y + h / 2:.1f}"
             el = ET.Element(_q("polygon"), {
                 "points": pts, "fill": fill, "stroke": stroke, "stroke-width": sw, "id": eid,
             })
+            root.append(el)
         else:
-            rx = h / 2.0 if shape == "pill" else float(op.get("rx", 6 if shape == "rounded" else 0))
+            rx = h / 2.0 if shape == "pill" else float(op.get("rx", 6 if shape in ("rounded", "receptor", "outcome", "process") else (2 if shape in ("dna", "gene") else 0)))
             el = ET.Element(_q("rect"), {
                 "x": f"{x:.1f}", "y": f"{y:.1f}", "width": f"{w:.1f}", "height": f"{h:.1f}",
                 "rx": f"{rx:.1f}", "fill": fill, "stroke": stroke, "stroke-width": sw, "id": eid,
             })
-        root.append(el)
+            root.append(el)
+            if shape == "receptor":
+                # 顶部跨膜受体配体结合凹槽装饰线（极简出版风格）
+                cx_r = x + w / 2.0
+                root.append(ET.Element(_q("path"), {
+                    "d": f"M {cx_r - 12:.1f},{y:.1f} L {cx_r - 12:.1f},{y - 6.5:.1f} Q {cx_r:.1f},{y - 1.5:.1f} {cx_r + 12:.1f},{y - 6.5:.1f} L {cx_r + 12:.1f},{y:.1f}",
+                    "fill": fill, "stroke": stroke, "stroke-width": sw,
+                }))
+            elif shape in ("dna", "gene"):
+                # Nature/Cell 经典基因转录起始折弯箭头 (↱)，带 step 徽章时自动右移避让
+                px_g, py_g = x + (24.0 if op.get("step") is not None else 10.0), y
+                root.append(ET.Element(_q("path"), {
+                    "d": f"M {px_g:.1f},{py_g:.1f} L {px_g:.1f},{py_g - 11.0:.1f} L {px_g + 16.0:.1f},{py_g - 11.0:.1f}",
+                    "fill": "none", "stroke": stroke, "stroke-width": "1.5",
+                }))
+                _draw_head(root, px_g, py_g - 11.0, px_g + 18.0, py_g - 11.0, stroke, 1.4, "activate")
+            elif shape in ("outcome", "process"):
+                # 左侧 4px 语义色条强调生物表型/结局
+                root.append(ET.Element(_q("rect"), {
+                    "x": f"{x + 1.0:.1f}", "y": f"{y + 4.0:.1f}", "width": "4.0",
+                    "height": f"{max(8.0, h - 8.0):.1f}", "rx": "2", "fill": stroke, "stroke": "none",
+                }))
 
         # 居中 + 自动多行换行（支持 sublabel；粗体主标题按 1.07x 宽度估算留足内边距）
         label = op.get("label") or ""
@@ -545,6 +692,22 @@ def _add_new(root, op, boxes):
             bt.text = btxt
             root.append(circ)
             root.append(bt)
+        if op.get("step") is not None and str(op.get("step")).strip() != "":
+            stxt = str(op["step"]).strip()
+            sr = 9.0
+            sx_b, sy_b = x + 6.0, y + 2.0
+            root.append(ET.Element(_q("circle"), {
+                "cx": f"{sx_b:.1f}", "cy": f"{sy_b:.1f}", "r": f"{sr:.1f}",
+                "fill": op.get("step_fill", "#1E3A5F"), "stroke": "#FFFFFF", "stroke-width": "1.2",
+                "id": f"{eid}-step",
+            }))
+            st_el = ET.Element(_q("text"), {
+                "x": f"{sx_b:.1f}", "y": f"{sy_b + 3.1:.1f}",
+                "font-size": "8.8", "font-family": font_fam, "font-weight": "bold",
+                "text-anchor": "middle", "fill": "#FFFFFF", "id": f"{eid}-step-txt",
+            })
+            st_el.text = stxt
+            root.append(st_el)
         return el
 
     # add_arrow / add_line
@@ -553,8 +716,22 @@ def _add_new(root, op, boxes):
     stroke = op.get("stroke", "#C0392B" if style in ("inhibit", "tbar") else "#33506B")
     width = float(op.get("width", 1.5))
 
+    def _trim_end(p_prev, p_end, backoff):
+        dx_t, dy_t = p_end[0] - p_prev[0], p_end[1] - p_prev[1]
+        dist_t = math.hypot(dx_t, dy_t)
+        if dist_t <= backoff + 4.0 or backoff <= 0:
+            return p_end
+        return (p_end[0] - dx_t / dist_t * backoff, p_end[1] - dy_t / dist_t * backoff)
+
+    end_backoff = 4.5 if style in ("inhibit", "tbar") else (1.5 if style in ("activate", "both", "arrow") else 0.0)
+    start_backoff = 1.5 if style == "both" else 0.0
+
     if route == "detour" and op.get("waypoints") and len(op["waypoints"]) >= 2:
         pts = [(float(px), float(py)) for px, py in op["waypoints"]]
+        if end_backoff > 0:
+            pts[-1] = _trim_end(pts[-2], pts[-1], end_backoff)
+        if start_backoff > 0:
+            pts[0] = _trim_end(pts[1], pts[0], start_backoff)
         # 构造圆角正交折线（半径 r<=10），视觉接近手工矢量通道图
         d_parts = [f"M {pts[0][0]:.1f},{pts[0][1]:.1f}"]
         for i in range(1, len(pts) - 1):
@@ -598,7 +775,8 @@ def _add_new(root, op, boxes):
                     x2, y2 = b2[0] + b2[2], b2[1] + b2[3] / 2.0
             else:
                 x1, y1, x2, y2 = _anchor_pair(boxes[op["from_id"]], boxes[op["to_id"]],
-                                              dst_bias=float(op.get("dst_bias", 0.0)))
+                                              dst_bias=float(op.get("dst_bias", 0.0)),
+                                              src_bias=float(op.get("src_bias", 0.0)))
         else:
             x1, y1 = float(op["x1"]), float(op["y1"])
             x2, y2 = float(op["x2"]), float(op["y2"])
@@ -607,6 +785,8 @@ def _add_new(root, op, boxes):
             side = op.get("curve_side", "right")
             offset = float(op.get("curve_offset", 65.0))
             cx = float(op["curve_x"]) if "curve_x" in op else ((min(x1, x2) - offset) if side == "left" else (max(x1, x2) + offset))
+            x2, y2 = _trim_end((cx, y2), (x2, y2), end_backoff)
+            x1, y1 = _trim_end((cx, y1), (x1, y1), start_backoff)
             d_str = f"M {x1:.1f},{y1:.1f} C {cx:.1f},{y1:.1f} {cx:.1f},{y2:.1f} {x2:.1f},{y2:.1f}"
             el = ET.Element(_q("path"), {
                 "d": d_str, "fill": "none", "stroke": stroke, "stroke-width": f"{width:.1f}",
@@ -622,11 +802,15 @@ def _add_new(root, op, boxes):
                 axis = "horizontal" if abs(x2 - x1) >= abs(y2 - y1) else "vertical"
             if axis == "horizontal":
                 xm = (x1 + x2) / 2.0
+                x2, y2 = _trim_end((xm, y2), (x2, y2), end_backoff)
+                x1, y1 = _trim_end((xm, y1), (x1, y1), start_backoff)
                 d_str = f"M {x1:.1f},{y1:.1f} C {xm:.1f},{y1:.1f} {xm:.1f},{y2:.1f} {x2:.1f},{y2:.1f}"
                 last_p1, last_p2 = (xm, y2), (x2, y2)
                 first_p1, first_p2 = (xm, y1), (x1, y1)
             else:
                 ym = (y1 + y2) / 2.0
+                x2, y2 = _trim_end((x2, ym), (x2, y2), end_backoff)
+                x1, y1 = _trim_end((x1, ym), (x1, y1), start_backoff)
                 d_str = f"M {x1:.1f},{y1:.1f} C {x1:.1f},{ym:.1f} {x2:.1f},{ym:.1f} {x2:.1f},{y2:.1f}"
                 last_p1, last_p2 = (x2, ym), (x2, y2)
                 first_p1, first_p2 = (x1, ym), (x1, y1)
@@ -637,7 +821,9 @@ def _add_new(root, op, boxes):
             lx, ly = (x1 + x2) / 2.0, (y1 + y2) / 2.0
         elif route == "elbow" and abs(x2 - x1) > 10 and abs(y2 - y1) > 10:
             mx = (x1 + x2) / 2.0
-            pts = [(x1, y1), (mx, y1), (mx, y2), (x2, y2)]
+            p_end = _trim_end((mx, y2), (x2, y2), end_backoff)
+            p_st = _trim_end((mx, y1), (x1, y1), start_backoff)
+            pts = [p_st, (mx, y1), (mx, y2), p_end]
             el = ET.Element(_q("polyline"), {
                 "points": " ".join(f"{px:.1f},{py:.1f}" for px, py in pts),
                 "fill": "none", "stroke": stroke, "stroke-width": f"{width:.1f}",
@@ -647,13 +833,15 @@ def _add_new(root, op, boxes):
             first_p1, first_p2 = pts[1], pts[0]
             lx, ly = mx, (y1 + y2) / 2.0
         else:
+            p_end = _trim_end((x1, y1), (x2, y2), end_backoff)
+            p_st = _trim_end((x2, y2), (x1, y1), start_backoff)
             el = ET.Element(_q("line"), {
-                "x1": f"{x1:.1f}", "y1": f"{y1:.1f}", "x2": f"{x2:.1f}", "y2": f"{y2:.1f}",
+                "x1": f"{p_st[0]:.1f}", "y1": f"{p_st[1]:.1f}", "x2": f"{p_end[0]:.1f}", "y2": f"{p_end[1]:.1f}",
                 "stroke": stroke, "stroke-width": f"{width:.1f}",
                 "id": op.get("id", "added-line"),
             })
-            last_p1, last_p2 = (x1, y1), (x2, y2)
-            first_p1, first_p2 = (x2, y2), (x1, y1)
+            last_p1, last_p2 = p_st, p_end
+            first_p1, first_p2 = p_end, p_st
             lx, ly = (x1 + x2) / 2.0, (y1 + y2) / 2.0
 
     if op.get("dashed"):

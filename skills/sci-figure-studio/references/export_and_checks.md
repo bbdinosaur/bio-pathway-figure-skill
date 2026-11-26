@@ -25,21 +25,21 @@ spec 加 `"export": {"pptx": true}` 额外产出 {base}.pptx：可编辑标题/�
 ```json
 {
   "case_id": "…",
-  "status": "ok | partial | failed",
+  "status": "complete | partial | failed",
   "deliverables": {"editable_source": [...], "exports": [...], "previews": [...]},
   "source_mapping": { …provenance.json 原样内嵌… },
   "checks": {"svg_geometry": …, "png_edge": …},
   "change_log": [{"change": "…"}],
   "uncertainty": ["…"],
-  "limits": ["…"]
+  "limits": []
 }
 ```
-- status=partial/failed 时 limits 必须写清缺什么、为什么。
+- status=complete 且无真实缺口时 limits 为空列表 `[]`；status=partial/failed 时 limits 必须写清缺什么、为什么。
 - 不确定 ≠ 失败：字体回退、单位缺失、显著性无依据等写进 uncertainty。
-- **示例（Example，非正式结果）**：`python3 make_result.py --case-json case.json --out result.json --status ok --deliverable editable_source:fig1.svg --deliverable export:fig1.pdf --deliverable export:fig1.png --provenance fig1.provenance.json --check fig1.layout.json`
+- **示例（Example，非正式结果）**：`python3 make_result.py --case-json case.json --out result.json --status auto --deliverable editable_source:fig1.svg --deliverable export:fig1.pdf --deliverable export:fig1.png --provenance fig1.provenance.json --check fig1.layout.json`
 
-## 自查方法（渲染视觉复核）
+## 自查方法（纯文本 JSON 闭环核验）
 1. `python3 check_layout.py fig.svg --json fig.layout.json`（几何：越界/重叠）。
-2. `python3 check_layout.py --png fig.png`（边缘裁切/留白比例）。
-3. 有视觉能力时用 read 工具直接看 PNG：文字重叠、越界截断、对比度、箭头连接。
+2. `python3 check_layout.py --png fig.png`（边缘裁切/留白比例/空白检测）。
+3. 严禁对二进制 `.png`/`.pdf` 调用 `read`（避免纯文本执行环境报错或上下文膨胀），统一依据脚本输出的几何/边缘/数值核验 JSON 闭环修正。
 4. 修复顺序：先 error（越界/重叠>50%）→ 再 warning → 最后美学微调。

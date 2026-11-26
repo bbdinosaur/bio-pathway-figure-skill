@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from kit_common import read_table, to_num, sha256_of  # noqa: E402
+from kit_common import read_table, to_num, parse_val_err, sha256_of  # noqa: E402
 
 PALETTE = ["#0072B2", "#D55E00", "#009E73", "#CC79A7",
            "#E69F00", "#56B4E9", "#F0E442", "#000000"]
@@ -78,9 +78,13 @@ def _read_xlsx_stdlib(fpath, sheet_name=None):
                     break
         wsroot = ET.fromstring(zf.read(chosen_path))
         grid = []
+        seq_no = 0
         for row_el in wsroot.iter():
             if not row_el.tag.endswith("row"):
                 continue
+            seq_no += 1
+            r_attr = row_el.get("r")
+            r_num = int(r_attr) if (r_attr and r_attr.isdigit()) else seq_no
             row_vals = {}
             for c_el in row_el:
                 if not c_el.tag.endswith("c"):
@@ -101,8 +105,41 @@ def _read_xlsx_stdlib(fpath, sheet_name=None):
                 row_vals[ci] = val
             if row_vals:
                 max_c = max(row_vals.keys())
-                grid.append([row_vals.get(i, "") for i in range(max_c + 1)])
+                grid.append((r_num, [row_vals.get(i, "") for i in range(max_c + 1)]))
         return chosen_nm, grid
+
+
+def _extract_xlsx_table(indexed_rows, header_row=None):
+    """从 [(1-based row_no, cells), ...] 智能定位表头（自动跳过 Nature/Cell 首行单列标题横幅），保留真实 Excel 行号。"""
+    non_empty = [(rn, r) for rn, r in indexed_rows if any(v is not None and str(v).strip() != "" for v in r)]
+    if not non_empty:
+        return [], [], 1
+    hdr_idx = 0
+    if header_row is not None and int(header_row) >= 1:
+        tgt = int(header_row)
+        for i, (rn, _) in enumerate(non_empty):
+            if rn >= tgt:
+                hdr_idx = i
+                break
+    else:
+        counts = [sum(1 for v in r if v is not None and str(v).strip() != "") for _, r in non_empty[:8]]
+        if max(counts) >= 2 and counts[0] == 1:
+            for i, cc in enumerate(counts):
+                if cc >= 2:
+                    hdr_idx = i
+                    break
+    header_line, h_cells = non_empty[hdr_idx]
+    cols = [str(c).strip() if c is not None else "" for c in h_cells]
+    # 剔除末尾空表头列
+    while cols and cols[-1] == "":
+        cols.pop()
+    rows = []
+    for rn, r in non_empty[hdr_idx + 1:]:
+        rec = {cols[i]: ("" if (i >= len(r) or r[i] is None) else str(r[i]).strip())
+               for i in range(len(cols))}
+        rec["__line__"] = rn
+        rows.append(rec)
+    return cols, rows, header_line
 
 
 def _apply_filter(rows, flt, src):
@@ -161,25 +198,17 @@ def _load_rows(data):
                 import openpyxl
                 wb = openpyxl.load_workbook(str(fpath), data_only=True, read_only=True)
                 ws = wb[data["sheet"]] if data.get("sheet") and data["sheet"] in wb.sheetnames else wb.active
-                raw_rows = list(ws.iter_rows(values_only=True))
+                indexed_rows = [(idx, list(r)) for idx, r in enumerate(ws.iter_rows(values_only=True), start=1)]
                 sheet_title = ws.title
                 wb.close()
             except ImportError:
-                sheet_title, raw_rows = _read_xlsx_stdlib(fpath, sheet_name=data.get("sheet"))
-            cols = [str(c).strip() if c is not None else "" for c in (raw_rows[0] if raw_rows else [])]
-            rows = []
-            for idx, r in enumerate(raw_rows[1:], start=2):
-                if all(v is None or str(v).strip() == "" for v in r):
-                    continue
-                rec = {cols[i]: ("" if (i >= len(r) or r[i] is None) else str(r[i]))
-                       for i in range(len(cols))}
-                rec["__line__"] = idx
-                rows.append(rec)
+                sheet_title, indexed_rows = _read_xlsx_stdlib(fpath, sheet_name=data.get("sheet"))
+            cols, rows, hline = _extract_xlsx_table(indexed_rows, header_row=data.get("header_row"))
             src = {"file": str(fpath), "sheet": sheet_title, "sha256": sha256_of(fpath),
-                   "header_line": 1, "columns": cols, "n_rows": len(rows)}
+                   "header_line": hline, "columns": cols, "n_rows": len(rows)}
             rows, src = _apply_filter(rows, flt, src)
             return cols, rows, src
-        cols, rows, hline = read_table(data["file"], return_meta=True)
+        cols, rows, hline = read_table(data["file"], return_meta=True, header_row=data.get("header_row"))
         src = {"file": str(data["file"]), "sha256": sha256_of(data["file"]),
                "header_line": hline, "columns": cols, "n_rows": len(rows)}
         rows, src = _apply_filter(rows, flt, src)
@@ -225,7 +254,7 @@ def _get_mapping(panel):
 
 
 def _from_xy_points(panel):
-    """连续数值 X 轴模式（scatter 或 numeric_x=true 的 line/errorbar）：保留每个原始 (x,y) 点不覆盖。"""
+    """连续数值 X 轴模式（scatter/bubble/dotplot/step 或 numeric_x=true 的 line/errorbar）：保留每个原始 (x,y) 点不覆盖。"""
     data = panel.get("data", {})
     mp = _get_mapping(panel)
     cols, rows, src = _load_rows(data)
@@ -234,15 +263,19 @@ def _from_xy_points(panel):
     scol = mp.get("series")
     ecol = mp.get("error")
     lcol = mp.get("label")
+    szcol = mp.get("size")
+    ccol = mp.get("color")
     by_s, order, missing, elements = {}, [], [], []
     for r in rows:
         sname = str(r.get(scol, "__all__")) if scol else "__all__"
         xv = to_num(r.get(xcol))
         yv = to_num(r.get(ycol))
         ev = to_num(r.get(ecol)) if ecol else None
+        szv = to_num(r.get(szcol)) if szcol else None
+        cv = to_num(r.get(ccol)) if ccol else None
         lbl = str(r.get(lcol, "")).strip() if lcol else ""
         if sname not in by_s:
-            by_s[sname] = {"xs": [], "ys": [], "errs": [], "labels": [], "lines": []}
+            by_s[sname] = {"xs": [], "ys": [], "errs": [], "sizes": [], "cvals": [], "labels": [], "lines": []}
             order.append(sname)
         if xv is None or yv is None:
             missing.append({"series": sname, "line": r.get("__line__"),
@@ -251,33 +284,115 @@ def _from_xy_points(panel):
         by_s[sname]["xs"].append(xv)
         by_s[sname]["ys"].append(yv)
         by_s[sname]["errs"].append(ev)
+        by_s[sname]["sizes"].append(szv)
+        by_s[sname]["cvals"].append(cv)
         by_s[sname]["labels"].append(lbl)
         by_s[sname]["lines"].append(r.get("__line__"))
-        elements.append({"glyph": "point", "series": sname, "x": xv, "value": yv,
-                         "error": ev, "label": lbl or None, "source_line": r.get("__line__"),
-                         "col_x": xcol, "col_y": ycol, "col_err": ecol})
+        el_rec = {"glyph": "point", "series": sname, "x": xv, "value": yv,
+                  "error": ev, "label": lbl or None, "source_line": r.get("__line__"),
+                  "col_x": xcol, "col_y": ycol, "col_err": ecol}
+        if szcol:
+            el_rec["size"] = szv
+            el_rec["col_size"] = szcol
+        if ccol:
+            el_rec["color_value"] = cv
+            el_rec["col_color"] = ccol
+        elements.append(el_rec)
     series = []
     for s in order:
         d = by_s[s]
-        # 折线/误差棒按 x 升序排列以便连线
-        if panel.get("kind") in ("line", "errorbar"):
+        if panel.get("kind") in ("line", "errorbar", "step"):
             idx = sorted(range(len(d["xs"])), key=lambda i: d["xs"][i])
             d = {k: [v[i] for i in idx] for k, v in d.items()}
         series.append({"name": s, "x_values": d["xs"], "values": d["ys"],
                        "errors": d["errs"] if any(e is not None for e in d["errs"]) else None,
+                       "sizes": d["sizes"] if any(v is not None for v in d["sizes"]) else None,
+                       "cvals": d["cvals"] if any(v is not None for v in d["cvals"]) else None,
                        "point_labels": d["labels"], "lines": d["lines"]})
     return {"kind": panel["kind"], "numeric_x": True, "groups": [], "series": series,
             "missing": missing, "source": src, "elements": elements, "warnings": []}
 
 
+def _from_dotplot(panel):
+    """富集气泡图/点图（Y=分类通路/条目，X=数值，可选 size 与 color 连续映射）。"""
+    data = panel.get("data", {})
+    mp = _get_mapping(panel)
+    cols, rows, src = _load_rows(data)
+    ycol = mp.get("y") or (cols[0] if cols else "pathway")
+    xcol = mp.get("x") or (cols[1] if len(cols) > 1 else "value")
+    szcol = mp.get("size")
+    ccol = mp.get("color")
+    groups, xs, sizes, cvals, lines, missing, elements = [], [], [], [], [], [], []
+    for r in rows:
+        g = str(r.get(ycol, "")).strip()
+        xv = to_num(r.get(xcol))
+        szv = to_num(r.get(szcol)) if szcol else None
+        cv = to_num(r.get(ccol)) if ccol else None
+        if not g or xv is None:
+            missing.append({"group": g, "line": r.get("__line__"), "raw_x": r.get(xcol)})
+            continue
+        groups.append(g)
+        xs.append(xv)
+        sizes.append(szv)
+        cvals.append(cv)
+        lines.append(r.get("__line__"))
+        elements.append({"glyph": "dot", "group": g, "value": xv, "size": szv, "color_value": cv,
+                         "source_line": r.get("__line__"), "col_x": xcol, "col_y": ycol,
+                         "col_size": szcol, "col_color": ccol})
+    return {
+        "kind": "dotplot", "numeric_x": False, "groups": groups,
+        "series": [{"name": "__all__", "values": xs,
+                    "sizes": sizes if any(v is not None for v in sizes) else None,
+                    "cvals": cvals if any(v is not None for v in cvals) else None,
+                    "errors": None, "lines": lines}],
+        "missing": missing, "source": src, "elements": elements, "warnings": [],
+    }
+
+
 def _from_tidy_box(panel):
-    """box 图支持 tidy 表：按 mapping.x（或 series）分组收集所有观测值。"""
+    """box / violin 图支持 tidy 表：按 mapping.x 分组，若同时提供 mapping.series 则自动构建多系列分组箱线/小提琴图。"""
     data = panel.get("data", {})
     mp = _get_mapping(panel)
     cols, rows, src = _load_rows(data)
     gcol = mp.get("x") or mp.get("series") or (cols[0] if cols else "group")
+    scol = mp.get("series") if (mp.get("x") and mp.get("series") and mp.get("series") != mp.get("x")) else None
     ycol = mp.get("y") or (cols[1] if len(cols) > 1 else "y")
-    buckets, order, missing, elements = {}, [], [], []
+    missing, elements = [], []
+    if scol:
+        order_g, order_s = [], []
+        grid = {}
+        for r in rows:
+            g = str(r.get(gcol, ""))
+            s = str(r.get(scol, ""))
+            v = to_num(r.get(ycol))
+            if g not in order_g:
+                order_g.append(g)
+            if s not in order_s:
+                order_s.append(s)
+            grid.setdefault((s, g), {"vals": [], "lines": []})
+            if v is None:
+                missing.append({"group": g, "series": s, "line": r.get("__line__"), "raw": r.get(ycol)})
+                continue
+            grid[(s, g)]["vals"].append(v)
+            grid[(s, g)]["lines"].append(r.get("__line__"))
+            elements.append({"glyph": "box_point", "group": g, "series": s, "value": v,
+                             "source_line": r.get("__line__"), "col_y": ycol})
+        if panel.get("x_order"):
+            w = [str(x) for x in panel["x_order"]]
+            order_g = [g for g in w if g in order_g] + [g for g in order_g if g not in w]
+        if panel.get("series_order"):
+            ws = [str(x) for x in panel["series_order"]]
+            order_s = [s for s in ws if s in order_s] + [s for s in order_s if s not in ws]
+        series = []
+        for s in order_s:
+            gvals = [grid.get((s, g), {"vals": []})["vals"] for g in order_g]
+            glines = [grid.get((s, g), {"lines": []})["lines"] for g in order_g]
+            flat = [v for sub in gvals for v in sub]
+            series.append({"name": s, "values": flat, "group_values": gvals, "errors": None,
+                           "lines": glines, "n": len(flat)})
+        return {"kind": panel.get("kind", "box"), "grouped_box": True, "groups": order_g, "series": series,
+                "missing": missing, "source": src, "elements": elements, "warnings": []}
+    buckets, order = {}, []
     for r in rows:
         g = str(r.get(gcol, ""))
         v = to_num(r.get(ycol))
@@ -291,6 +406,9 @@ def _from_tidy_box(panel):
         buckets[g]["lines"].append(r.get("__line__"))
         elements.append({"glyph": "box_point", "group": g, "series": g, "value": v,
                          "source_line": r.get("__line__"), "col_y": ycol})
+    if panel.get("x_order"):
+        w = [str(x) for x in panel["x_order"]]
+        order = [g for g in w if g in order] + [g for g in order if g not in w]
     series = [{"name": g, "values": buckets[g]["vals"], "errors": None,
                "lines": buckets[g]["lines"], "n": len(buckets[g]["vals"])}
               for g in order]
@@ -314,6 +432,24 @@ def _from_tidy(panel):
 
     # 宽表自动转长表（如 mapping={"x":"Gene", "y_cols":["WT","KO"]}）
     y_cols = mp.get("y_cols")
+    inferred_warn = None
+    if not y_cols and cols and (not mp.get("y") and ycol not in cols):
+        num_cols = [c for c in cols if any(to_num(r.get(c)) is not None for r in rows[:20])]
+        cat_cols = [c for c in cols if c not in num_cols]
+        err_cand = [c for c in num_cols if any(k in c.lower() for k in ("sd", "sem", "err", "std", "ci"))]
+        val_cands = [c for c in num_cols if c not in err_cand]
+        if not mp.get("x") and xcol not in cols:
+            xcol = cat_cols[0] if cat_cols else cols[0]
+        if not scol and len(cat_cols) >= 2 and xcol in cat_cols:
+            scol = [c for c in cat_cols if c != xcol][0]
+        if val_cands:
+            ycol = val_cands[0]
+        elif num_cols:
+            ycol = num_cols[0]
+        if not ecol and err_cand and err_cand[0] != ycol:
+            ecol = err_cand[0]
+        inferred_warn = f"未显式指定 mapping，已自动推断列映射: x={xcol}, series={scol}, y={ycol}, error={ecol}"
+
     if y_cols:
         unpivoted = []
         for r in rows:
@@ -325,7 +461,7 @@ def _from_tidy(panel):
         scol = "__series__"
         ycol = "__val__"
 
-    cells, order_s, gnames, missing, warnings = {}, [], [], [], []
+    cells, order_s, gnames, missing, warnings = {}, [], [], [], ([] if not inferred_warn else [inferred_warn])
     for r in rows:
         g = str(r.get(xcol, ""))
         s = str(r.get(scol, "__all__")) if scol else "__all__"
@@ -334,8 +470,15 @@ def _from_tidy(panel):
             order_s.append(s)
         if g not in gnames:
             gnames.append(g)
-        v = to_num(r.get(ycol))
+        raw_y = r.get(ycol)
+        v = to_num(raw_y)
         e = to_num(r.get(ecol)) if ecol else None
+        if v is None:
+            pv, pe = parse_val_err(raw_y)
+            if pv is not None:
+                v = pv
+                if e is None:
+                    e = pe
         elo = to_num(r.get(elo_col)) if elo_col else None
         ehi = to_num(r.get(ehi_col)) if ehi_col else None
         ln = r.get("__line__")
@@ -554,7 +697,15 @@ def resolve_panel(panel):
                     el["glyph"] = "wedge"
                     el["pct"] = round(100.0 * el["value"] / tot, 3)
         return res
-    if kind == "scatter" or panel.get("numeric_x"):
+    if kind in ("dotplot", "bubble"):
+        cols, rows, _ = _load_rows(data)
+        mp = _get_mapping(panel)
+        ycol = mp.get("y", "y")
+        sample_y = [r.get(ycol) for r in rows[:20] if str(r.get(ycol, "")).strip() != ""]
+        if sample_y and not all(to_num(v) is not None for v in sample_y):
+            return _from_dotplot(panel)
+        return _from_xy_points(panel)
+    if kind in ("scatter", "step") or panel.get("numeric_x"):
         # 若 x 列全是数值则走连续 X 轴；否则仍回退分类 tidy
         cols, rows, _ = _load_rows(data)
         xcol = _get_mapping(panel).get("x", "x")

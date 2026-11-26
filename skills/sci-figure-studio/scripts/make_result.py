@@ -3,14 +3,15 @@
 """make_result.py — 组装并校验 /app/output/result.json。
 用法:
   python3 make_result.py --case-json /input/case.json --out /app/output/result.json \
-      --status ok --case-id auto \
+      --status auto --case-id auto \
       --deliverable editable_source:fig1.svg --deliverable export:fig1.png \
       --deliverable export:fig1.pdf --deliverable preview:preview.png \
       --provenance fig1.provenance.json --check layout.json \
       --change '替换错误实体名 TP53→BRCA1（SVG+PDF 双路）' \
-      --uncertainty '颜色操作仅应用于 SVG 副本' --limit '无'
+      --uncertainty '颜色操作仅应用于 SVG 副本'
 行为: 幂等——若 result.json 已存在则合并，保留此前已填的未知契约字段；
-      对 case.json 中 output_contract 列出的每个字段，缺失则置 null 并列入 missing_fields。
+      对 case.json 中 output_contract 列出的每个字段，缺失则置 null 并列入 missing_fields；
+      终态成功值统一为 complete（传入 --status ok 自动归一为 complete）。
 """
 from __future__ import annotations
 
@@ -20,9 +21,30 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from kit_common import load_json, dump_json, sha256_of, verify_svg_editable  # noqa: E402
+from kit_common import load_json, dump_json, sha256_of, verify_svg_editable, png_edge_check  # noqa: E402
 
 CONTRACT_KEYS = ("output_contract", "required_outputs", "output_fields", "outputs_contract")
+_NO_LIMIT_TOKENS = {"无", "none", "n/a", "na", "nil", "null", ""}
+_AUTO_LIMIT_PREFIXES = (
+    "Step-0 bootstrap partial record:",
+    "Draft partial record:",
+    "缺少可编辑源文件",
+    "可编辑 SVG 校验未通过",
+    "缺少导出文件",
+    "缺失 output_contract 字段:",
+    "SVG 存在 ",
+    "PNG 存在边缘疑似裁切",
+    "PNG 内容占比 <0.5%",
+    "glyph_value_audit 数值核验不通过",
+    "data_fidelity 存在空面板",
+)
+
+
+def _is_placeholder_limit(val) -> bool:
+    t = str(val).strip()
+    if t.lower() in _NO_LIMIT_TOKENS:
+        return True
+    return any(t.startswith(p) for p in _AUTO_LIMIT_PREFIXES)
 
 
 def find_contract(obj):
@@ -64,8 +86,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--case-json")
     ap.add_argument("--out", default="result.json")
-    ap.add_argument("--status", choices=["auto", "ok", "partial", "failed"], default="auto",
-                    help="auto(默认): 有可编辑源+导出文件且无缺失必需契约字段时自动为 ok，否则 partial")
+    ap.add_argument("--status", choices=["auto", "complete", "ok", "partial", "failed"], default="auto",
+                    help="auto(默认): 有可编辑源+导出文件且无缺失必需契约字段与严重告警时自动为 complete，否则 partial（ok 自动归一为 complete）")
     ap.add_argument("--case-id", default="auto")
     ap.add_argument("--deliverable", action="append", default=[],
                     help="role:path[:format]，role ∈ editable_source|export|preview|provenance")
@@ -120,7 +142,7 @@ def main():
                     continue
                 if sfx in (".svg", ".pptx"):
                     args.deliverable.append(f"editable_source:{f}")
-                elif sfx == ".pdf":
+                elif sfx in (".pdf", ".eps", ".tiff", ".tif"):
                     args.deliverable.append(f"export:{f}")
                 elif sfx == ".png":
                     args.deliverable.append(f"{'preview' if 'preview' in n else 'export'}:{f}")
@@ -156,8 +178,10 @@ def main():
         elif len(loaded) > 1:
             out["source_mapping"] = {"figures": loaded}
     out["checks"] = out.get("checks", {})
+    explicit_checks = set()
     for p in args.check:
         name = Path(p).stem
+        explicit_checks.add(name)
         out["checks"][name] = load_json(p) if Path(p).exists() else {"missing": p}
     if isinstance(out.get("source_mapping"), dict):
         sm0 = out["source_mapping"]
@@ -168,6 +192,42 @@ def main():
                 if isinstance(fobj, dict) and fobj.get("self_check"):
                     fk = str(fobj.get("figure") or fobj.get("title") or f"fig_{fi + 1}")
                     out["checks"][fk] = fobj["self_check"]
+    # 自动对收集到的 SVG 与主 PNG 执行真实几何与边缘自检（每次重跑刷新，剔除旧草稿残留，本次显式 --check 优先）
+    if args.auto_collect:
+        try:
+            from check_layout import check_svg as _check_svg
+        except Exception:
+            _check_svg = None
+        active_svg_keys = set()
+        active_png_keys = set()
+        for d_rec in deliverables.get("editable_source", []):
+            dp = d_rec.get("path", "")
+            if dp.lower().endswith(".svg") and Path(dp).exists() and _check_svg:
+                ck = f"layout_{Path(dp).stem}"
+                active_svg_keys.add(ck)
+                if ck not in explicit_checks and "layout" not in explicit_checks:
+                    try:
+                        out["checks"][ck] = _check_svg(dp)
+                    except Exception:
+                        pass
+        for d_rec in deliverables.get("exports", []):
+            dp = d_rec.get("path", "")
+            if dp.lower().endswith(".png") and Path(dp).exists():
+                ck = f"png_edge_{Path(dp).stem}"
+                active_png_keys.add(ck)
+                if ck not in explicit_checks:
+                    try:
+                        out["checks"][ck] = png_edge_check(dp)
+                    except Exception:
+                        pass
+        # 清理已被替换或删除的旧图遗留自动检查键，避免草稿报错污染终版 status
+        for k in list(out["checks"].keys()):
+            if k in explicit_checks:
+                continue
+            if k.startswith("layout_") and k not in active_svg_keys:
+                out["checks"].pop(k, None)
+            elif k.startswith("png_edge_") and k not in active_png_keys:
+                out["checks"].pop(k, None)
     if args.change:
         out["change_log"] = (out.get("change_log") or []) + [{"change": c} for c in args.change]
     elif isinstance(out.get("source_mapping"), dict) and not out.get("change_log"):
@@ -184,22 +244,36 @@ def main():
             }]
     if args.uncertainty:
         out["uncertainty"] = sorted(set((out.get("uncertainty") or []) + args.uncertainty))
+    else:
+        out.setdefault("uncertainty", [])
+    prev_real_limits = [x for x in (out.get("limits") or []) if not _is_placeholder_limit(x)]
     if args.limit:
-        out["limits"] = sorted(set((out.get("limits") or []) + args.limit))
+        new_real_limits = [x for x in args.limit if str(x).strip().lower() not in _NO_LIMIT_TOKENS]
+        if not new_real_limits:
+            # 显式传入 无/none/n/a 表示清空草稿占位限制，终态无真实缺口时保持 []
+            out["limits"] = []
+        else:
+            out["limits"] = sorted(set(prev_real_limits + new_real_limits))
+    else:
+        out["limits"] = prev_real_limits
     if args.note:
         out["notes"] = (out.get("notes") or []) + args.note
+    explicit_keys = set()
     for ep in args.extra:
         if Path(ep).exists():
             extra_obj = load_json(ep)
             if isinstance(extra_obj, dict):
+                explicit_keys.update(extra_obj.keys())
                 out.update(extra_obj)
     for kv in args.sets:
         if "=" in kv:
             k, v = kv.split("=", 1)
+            ks = k.strip()
+            explicit_keys.add(ks)
             try:
-                out[k.strip()] = json.loads(v)
+                out[ks] = json.loads(v)
             except Exception:
-                out[k.strip()] = v
+                out[ks] = v
 
     # 基于真实运行产物与自检数据生成结构化六检查点证据汇总（支持单图与多图，绝不虚构或因误报自我抹黑）
     sm = out.get("source_mapping") if isinstance(out.get("source_mapping"), dict) else {}
@@ -234,7 +308,30 @@ def main():
     missing_lbls = [m for t in txt_checks for m in (t.get("missing_labels") or [])]
     ed_text_cnt = sum(int(e.get("text_count", 0)) for e in ed_checks)
     exp_fmts = sorted({d.get("format", "") for d in deliverables.get("exports", []) if d.get("format")})
-    clip_any = any(bool(ec.get("clipping_suspect")) for ec in edge_checks)
+    edge_checks_all = list(edge_checks) + [
+        cv for cv in out.get("checks", {}).values()
+        if isinstance(cv, dict) and "clipping_suspect" in cv
+    ]
+    clip_any = any(bool(ec.get("clipping_suspect")) for ec in edge_checks_all)
+    blank_any = any(bool(ec.get("blank_suspect")) for ec in edge_checks_all)
+    gva_ok = all(g.get("ok", True) for g in gva_checks)
+    df_checks = [s["data_fidelity"] for s in scs if isinstance(s.get("data_fidelity"), dict)]
+    df_ok = all(d.get("ok", True) for d in df_checks)
+    ed_ok = bool(deliverables.get("editable_source")) and all(e.get("ok", True) for e in ed_checks)
+
+    repro_items = []
+    for f in figs:
+        if isinstance(f, dict) and isinstance(f.get("reproducibility"), dict):
+            rp = f["reproducibility"]
+            repro_items.append({
+                "figure": f.get("figure") or f.get("title"),
+                "command": rp.get("command"),
+                "spec_sha256": rp.get("spec_sha256"),
+                "input_file_hashes": rp.get("input_file_hashes"),
+                "export_params": f.get("export_params"),
+            })
+    if repro_items:
+        out["reproducibility"] = repro_items[0] if len(repro_items) == 1 else repro_items
 
     six_cp = {
         "scientific_entities": {
@@ -301,29 +398,64 @@ def main():
     }
     missing = []
     got = find_contract(case)
+    contract_f_list = contract_fields(got[0]) if got else []
+    _EMPTY_LIST_OK_ALIASES = {"limitations", "uncertainties", "limits", "uncertainty"}
     if got:
         _, key = got
-        for f in contract_fields(got[0]):
+        for f in contract_f_list:
+            if f in explicit_keys and out.get(f) is not None:
+                continue
+            if f in alias_map:
+                av = alias_map[f]
+                if av not in (None, [], {}) or (f in _EMPTY_LIST_OK_ALIASES and isinstance(av, list)):
+                    out[f] = av
+                    continue
             if f not in out or out[f] is None:
-                if f in alias_map and alias_map[f] not in (None, [], {}):
-                    out[f] = alias_map[f]
-                else:
-                    out[f] = None
-                    missing.append(f)
+                out[f] = None
+                missing.append(f)
         out["output_contract_source"] = key
+    action_required = []
+    if not deliverables.get("editable_source"):
+        action_required.append("缺少可编辑源文件 (.svg/.pptx)")
+    elif not ed_ok:
+        action_required.append("可编辑 SVG 校验未通过 (text_count==0，请勿将文字转曲)")
+    if not deliverables.get("exports"):
+        action_required.append("缺少导出文件 (.pdf/.png)")
+    if missing:
+        action_required.append(f"缺失 output_contract 字段: {missing}")
+    if geo_errors > 0:
+        action_required.append(f"SVG 存在 {geo_errors} 处几何越界/严重重叠错误，请修正后重跑")
+    if clip_any:
+        action_required.append("PNG 存在边缘疑似裁切 (clipping_suspect=true)，请增大画布或留白")
+    if blank_any:
+        action_required.append("PNG 内容占比 <0.5% (blank_suspect=true)，请检查绘图数据与坐标范围")
+    if not gva_ok:
+        action_required.append("glyph_value_audit 数值核验不通过，请检查图元与源表一致性")
+    if not df_ok:
+        action_required.append("data_fidelity 存在空面板，请检查 mapping 列名与源数据")
+
     if args.status == "auto":
-        has_editable = any(d.get("path") and Path(d["path"]).exists()
-                           for d in (deliverables.get("editable_source") or []))
-        has_exports = any(d.get("path") and Path(d["path"]).exists()
-                          for d in (deliverables.get("exports") or []))
-        resolved_status = "ok" if (has_editable and has_exports and not missing) else "partial"
+        resolved_status = "complete" if not action_required else "partial"
+    elif args.status == "ok":
+        resolved_status = "complete"
     else:
         resolved_status = args.status
     out["status"] = resolved_status
 
+    if resolved_status == "complete":
+        if not action_required:
+            out["limits"] = [x for x in (out.get("limits") or []) if not _is_placeholder_limit(x)]
+    else:
+        if not out.get("limits"):
+            out["limits"] = (list(action_required) if action_required else
+                             ["Draft partial record: initial deliverable saved; final scientific review and verification pending."])
+    if got and "limitations" in contract_f_list and "limitations" not in explicit_keys:
+        out["limitations"] = out["limits"]
+
     dump_json(out, out_path)
     print(json.dumps({"written": str(out_path), "case_id": case_id, "status": resolved_status,
                       "missing_contract_fields": missing,
+                      "action_required": action_required,
                       "deliverables": {k: len(v) for k, v in deliverables.items()}},
                      ensure_ascii=False, indent=2))
     if args.strict and missing:

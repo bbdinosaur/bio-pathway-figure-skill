@@ -99,8 +99,8 @@ def setup_matplotlib(font_pt=None):
 
 # ---------------- 读取表格（无 pandas 依赖） ----------------
 
-def read_table(path, return_meta=False):
-    """读 CSV/TSV（支持 utf-8-sig/gb18030/latin-1 容错、跳过 # 注释行，保留真实 1-based 物理行号）。"""
+def read_table(path, return_meta=False, header_row=None):
+    """读 CSV/TSV（支持 utf-8-sig/gb18030/latin-1 容错、跳过 # 注释行与首行单列标题横幅，保留真实 1-based 物理行号）。"""
     p = Path(path)
     text = None
     for enc in ("utf-8-sig", "gb18030", "latin-1"):
@@ -111,37 +111,67 @@ def read_table(path, return_meta=False):
             continue
     if text is None:
         return ([], [], 1) if return_meta else ([], [])
-    raw_lines = text.splitlines()
-    first = next((ln for ln in raw_lines if ln.strip() and not ln.lstrip().startswith("#")), "")
-    if not first:
+    raw_lines = [ln for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    if not raw_lines:
         return ([], [], 1) if return_meta else ([], [])
-    if "\t" in first and first.count("\t") >= first.count(","):
+    sample = raw_lines[:10]
+    scores = {d: sum(ln.count(d) for ln in sample) for d in ("\t", ",", ";")}
+    if scores["\t"] > 0 and scores["\t"] >= scores[","]:
         delim = "\t"
-    elif ";" in first and first.count(";") > first.count(","):
+    elif scores[";"] > scores[","] and scores[";"] >= len(sample):
         delim = ";"
     else:
         delim = ","
-    reader = csv.reader(io.StringIO(text), delimiter=delim)
-    header = None
-    header_line = 1
-    rows = []
-    for line_no, vals in enumerate(reader, start=1):
+    parsed = []
+    for line_no, vals in enumerate(csv.reader(io.StringIO(text), delimiter=delim), start=1):
         if not any(v.strip() for v in vals):
-            continue
-        if header is None and vals[0].lstrip().startswith("#"):
-            continue
-        if header is None:
-            header = [c.strip() for c in vals]
-            header_line = line_no
             continue
         if vals[0].lstrip().startswith("#"):
             continue
+        parsed.append((line_no, vals))
+    if not parsed:
+        return ([], [], 1) if return_meta else ([], [])
+    hdr_idx = 0
+    if header_row is not None and int(header_row) >= 1:
+        target_ln = int(header_row)
+        for i, (ln, _) in enumerate(parsed):
+            if ln >= target_ln:
+                hdr_idx = i
+                break
+    else:
+        # 自动跳过 Nature/Cell Source Data 常见的单列标题横幅行（仅当后续存在 ≥2 列数据表头时）
+        col_counts = [sum(1 for x in vals if x.strip()) for _, vals in parsed[:8]]
+        max_cc = max(col_counts) if col_counts else 1
+        if max_cc >= 2 and col_counts[0] == 1:
+            for i, cc in enumerate(col_counts):
+                if cc >= 2:
+                    hdr_idx = i
+                    break
+    header_line, hvals = parsed[hdr_idx]
+    header = [c.strip() for c in hvals]
+    rows = []
+    for line_no, vals in parsed[hdr_idx + 1:]:
         rec = {header[j]: (vals[j].strip() if j < len(vals) else "") for j in range(len(header))}
         rec["__line__"] = line_no
         rows.append(rec)
     if return_meta:
         return header or [], rows, header_line
     return header or [], rows
+
+
+_VAL_ERR_PAT = re.compile(
+    r"^\s*([-+\u2212\u2013]?\d[\d,]*(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*(?:±|\+/-|\+-)\s*(\d[\d,]*(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*%?\s*$"
+)
+
+
+def parse_val_err(v):
+    """解析 '12.4 ± 1.2' 或 '12.4 +/- 1.2' 单元格为 (val, err)，否则返回 (None, None)。"""
+    if v is None or isinstance(v, (int, float)):
+        return None, None
+    m = _VAL_ERR_PAT.match(str(v).strip())
+    if not m:
+        return None, None
+    return to_num(m.group(1)), to_num(m.group(2))
 
 
 def to_num(v):
@@ -159,6 +189,36 @@ def to_num(v):
         return None if (math.isnan(fv) or math.isinf(fv)) else fv
     except ValueError:
         return None
+
+
+def _parse_svg_len_px(val_str):
+    """将 SVG 长度属性（含 pt/mm/cm/in/px 单位）精确换算为 CSS px（96 DPI 基准）。"""
+    if not val_str or "%" in val_str:
+        return None
+    m = re.match(r"^\s*([\d.]+)\s*(px|pt|mm|cm|in|pc)?\s*$", str(val_str), re.I)
+    if not m:
+        return None
+    v = float(m.group(1))
+    unit = (m.group(2) or "px").lower()
+    mul = {"px": 1.0, "pt": 96.0 / 72.0, "pc": 16.0, "mm": 96.0 / 25.4, "cm": 96.0 / 2.54, "in": 96.0}
+    return v * mul.get(unit, 1.0)
+
+
+def _svg_css_size(src):
+    """解析 SVG 在浏览器/PDF 中的真实 CSS 渲染宽高 (vw_px, vh_px)，彻底修复 pt/mm/in 单位裁切。"""
+    svg_text = Path(src).read_text(encoding="utf-8", errors="ignore")[:8000]
+    m_tag = re.search(r"<svg\b[^>]*>", svg_text, re.S)
+    hdr = m_tag.group(0) if m_tag else svg_text[:2000]
+    mw = re.search(r'\bwidth="([^"]+)"', hdr)
+    mh = re.search(r'\bheight="([^"]+)"', hdr)
+    mvb = re.search(r'\bviewBox="\s*[-+\d.]+\s+[-+\d.]+\s+([\d.]+)\s+([\d.]+)\s*"', hdr)
+    w_px = _parse_svg_len_px(mw.group(1)) if mw else None
+    h_px = _parse_svg_len_px(mh.group(1)) if mh else None
+    vb_w = float(mvb.group(1)) if mvb else None
+    vb_h = float(mvb.group(2)) if mvb else None
+    vw = w_px if (w_px and w_px > 1) else (vb_w if (vb_w and vb_w > 1) else 800.0)
+    vh = h_px if (h_px and h_px > 1) else (vb_h if (vb_h and vb_h > 1) else 600.0)
+    return vw, vh
 
 
 # ---------------- 栅格化（多级回退） ----------------
@@ -184,18 +244,13 @@ def rasterize_any(src, out_png, dpi=150):
             if r.returncode == 0 and out.exists():
                 return {"ok": True, "tool": "pdftoppm"}
         return {"ok": False, "error": "no pdf rasterizer (pymupdf/pdftoppm 均不可用)"}
-    # SVG：优先 Chrome headless（渲染最正确），再试 PyMuPDF 与外部命令
+    # SVG：优先 Chrome headless（按真实 CSS 物理尺寸渲染，彻底避免 pt/mm/in 裁切）
     try:
-        svg_text = src.read_text(encoding="utf-8", errors="ignore")[:4000]
-        mvb = re.search(r'viewBox="\s*[-+\d.]+\s+[-+\d.]+\s+([\d.]+)\s+([\d.]+)\s*"', svg_text)
-        mw = re.search(r'<svg[^>]*\swidth="([\d.]+)', svg_text)
-        mh = re.search(r'<svg[^>]*\sheight="([\d.]+)', svg_text)
-        vw = float(mvb.group(1)) if mvb else (float(mw.group(1)) if mw else 800.0)
-        vh = float(mvb.group(2)) if mvb else (float(mh.group(1)) if mh else 600.0)
+        vw, vh = _svg_css_size(src)
         scale = dpi / 96.0
         chrome = shutil.which("google-chrome") or shutil.which("chromium") or shutil.which("chromium-browser")
         if chrome:
-            win_w = max(120, int(math.ceil(vw)) + 16)
+            win_w = max(120, int(math.ceil(vw)) + 24)
             win_h = max(120, int(math.ceil(vh)) + 140)  # 预留 Chrome headless=new UI 栏高度，避免底部裁切
             r = subprocess.run([chrome, "--headless=new", "--disable-gpu", "--no-sandbox",
                                 "--hide-scrollbars", "--default-background-color=FFFFFFFF",
@@ -241,17 +296,44 @@ def rasterize_any(src, out_png, dpi=150):
 
 
 def svg_to_pdf_chrome(src_svg, out_pdf):
-    """Chrome headless 将 SVG 打印为 PDF（无需 fitz，交付双格式）。"""
+    """Chrome headless 将 SVG 按精确画布尺寸打印为单页紧贴矢量 PDF（无 US Letter 留白/分页）。"""
+    import tempfile
     chrome = shutil.which("google-chrome") or shutil.which("chromium") or shutil.which("chromium-browser")
     if not chrome:
         return {"ok": False, "error": "no chrome/chromium"}
     Path(out_pdf).parent.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run([chrome, "--headless=new", "--disable-gpu", "--no-sandbox",
-                        "--no-pdf-header-footer", f"--print-to-pdf={Path(out_pdf).resolve()}",
-                        Path(src_svg).resolve().as_uri()], capture_output=True, timeout=90)
-    ok = r.returncode == 0 and Path(out_pdf).exists() and Path(out_pdf).stat().st_size > 500
-    return {"ok": bool(ok), "tool": "chrome" if ok else None,
-            "error": None if ok else "chrome print-to-pdf failed"}
+    tmp_html = None
+    try:
+        vw, vh = _svg_css_size(src_svg)
+        w_in = max(1.0, (vw + 1.0) / 96.0)
+        h_in = max(1.0, (vh + 1.0) / 96.0)
+        svg_body = Path(src_svg).read_text(encoding="utf-8", errors="ignore")
+        # 去掉 XML 声明，直接内联至精确 @page 尺寸的 HTML 中保持 100% 矢量与可编辑文字
+        svg_body = re.sub(r"<\?xml[^>]*\?>", "", svg_body, count=1).strip()
+        html = (
+            f"<!doctype html><html><head><meta charset='utf-8'><style>"
+            f"@page {{ size: {w_in:.4f}in {h_in:.4f}in; margin: 0; }}"
+            f"html, body {{ margin: 0; padding: 0; width: {vw:.2f}px; height: {vh:.2f}px; overflow: hidden; background: #fff; }}"
+            f"svg {{ display: block; }}"
+            f"</style></head><body>{svg_body}</body></html>"
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".html", delete=False, encoding="utf-8") as tf:
+            tf.write(html)
+            tmp_html = Path(tf.name)
+        r = subprocess.run([chrome, "--headless=new", "--disable-gpu", "--no-sandbox",
+                            "--no-pdf-header-footer", f"--print-to-pdf={Path(out_pdf).resolve()}",
+                            tmp_html.resolve().as_uri()], capture_output=True, timeout=90)
+        ok = r.returncode == 0 and Path(out_pdf).exists() and Path(out_pdf).stat().st_size > 500
+        return {"ok": bool(ok), "tool": "chrome-exact" if ok else None,
+                "error": None if ok else "chrome print-to-pdf failed"}
+    except Exception as ex:
+        return {"ok": False, "error": f"{type(ex).__name__}: {ex}"}
+    finally:
+        if tmp_html and tmp_html.exists():
+            try:
+                tmp_html.unlink()
+            except Exception:
+                pass
 
 
 def svg_to_pdf_any(src_svg, out_pdf):
@@ -353,16 +435,80 @@ def png_edge_check(png, bg_thresh=245, border_px=2):
     x1 = int(w - 1 - cols[::-1].argmax()) if cols.any() else w - 1
     y0 = int(rows.argmax()) if rows.any() else 0
     y1 = int(h - 1 - rows[::-1].argmax()) if rows.any() else h - 1
+    cov_pct = round(100.0 * float(nonbg.mean()), 3) if (w * h) else 0.0
     return {
         "ok": True,
         "size_px": [w, h],
         "mode": orig_mode,
         "dpi": [round(float(raw_dpi[0]), 2), round(float(raw_dpi[1]), 2)] if raw_dpi else None,
         "content_bbox_px": [x0, y0, x1, y1],
+        "content_coverage_pct": cov_pct,
+        "blank_suspect": cov_pct < 0.5,
         "margins_pct": {"left": round(x0 / w, 4), "right": round((w - 1 - x1) / w, 4),
                         "top": round(y0 / h, 4), "bottom": round((h - 1 - y1) / h, 4)},
         "clipping_suspect": any(edges.values()),
         "edge_hits": edges,
+    }
+
+
+def apply_journal_style(preset="nature_double", font_pt=None):
+    """自定义 Matplotlib 脚本 1 行接入出版级样式预设与可编辑 SVG/PDF 字体设置。"""
+    pfile = Path(__file__).resolve().parent.parent / "assets" / "journal_presets.json"
+    st = {"width_mm": 180, "panel_h_mm": 68, "font_pt": 8.0, "dpi": 300}
+    if pfile.exists():
+        try:
+            presets = json.loads(pfile.read_text(encoding="utf-8"))
+            if preset in presets:
+                st.update(presets[preset])
+        except Exception:
+            pass
+    if font_pt is not None:
+        st["font_pt"] = float(font_pt)
+    finfo = setup_matplotlib(st["font_pt"])
+    st["fonts"] = finfo
+    return st
+
+
+def export_and_audit_figure(fig, outdir, base="figure", provenance=None,
+                            png_dpi=300, preview_dpi=100, transparent=False):
+    """自定义 Matplotlib 脚本 1 行导出 SVG(<text>可编辑)+PDF+300 DPI PNG+100 DPI 预览+自检+溯源 JSON。"""
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    svg_path = outdir / f"{base}.svg"
+    pdf_path = outdir / f"{base}.pdf"
+    png_path = outdir / f"{base}.png"
+    prev_path = outdir / f"{base}_preview.png"
+    prov_path = outdir / f"{base}.provenance.json"
+    fig.savefig(svg_path, bbox_inches=None, transparent=transparent)
+    fig.savefig(pdf_path, transparent=transparent)
+    fig.savefig(png_path, dpi=png_dpi, transparent=transparent)
+    fig.savefig(prev_path, dpi=min(108, max(72, int(preview_dpi))), transparent=transparent)
+    svg_txt = svg_path.read_text(encoding="utf-8")
+    if "<metadata" not in svg_txt:
+        meta = f'<metadata id="sci-provenance">figure={base}; provenance={prov_path.name}</metadata>'
+        svg_path.write_text(svg_txt.replace("</svg>", meta + "</svg>", 1), encoding="utf-8")
+    ed = verify_svg_editable(svg_path)
+    ec = png_edge_check(png_path)
+    try:
+        from check_layout import check_svg
+        geo = check_svg(str(svg_path))
+    except Exception as e:
+        geo = {"ok": None, "error": f"{type(e).__name__}: {e}"}
+    prov = dict(provenance or {})
+    prov.setdefault("generated_by", "sci-figure-studio custom matplotlib + kit_common")
+    prov.setdefault("figure", base)
+    prov["export_params"] = {
+        "png_dpi": png_dpi, "preview_dpi": min(108, max(72, int(preview_dpi))),
+        "colorspace": ec.get("mode") or ("RGBA" if transparent else "RGB"),
+        "transparent": transparent, "svg_fonttype": "none", "pdf_fonttype": 42,
+    }
+    prov["self_check"] = {"editable_svg": ed, "svg_geometry": geo, "png_edge": ec}
+    dump_json(prov, prov_path)
+    return {
+        "ok": bool(ed.get("ok")) and bool(geo.get("ok")) and not ec.get("clipping_suspect") and not ec.get("blank_suspect"),
+        "outputs": {"svg": str(svg_path), "pdf": str(pdf_path), "png": str(png_path), "preview": str(prev_path)},
+        "provenance": str(prov_path),
+        "checks": prov["self_check"],
     }
 
 

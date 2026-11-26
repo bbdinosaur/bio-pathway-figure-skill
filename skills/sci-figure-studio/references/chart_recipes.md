@@ -16,8 +16,10 @@
 
 ### panel 公共字段
 - `id`: 面板标号（多面板自动加 `(a)(b)…` 左上角粗体）。
-- `kind`: `bar | grouped_bar | stacked_bar | barh | line | errorbar | scatter | box | violin | pie | donut | heatmap`
-  - 长分类名优先 `barh`；组成占比（扇区角度）用 `pie`/`donut`（provenance 自动记 `pct`）；分布密度用 `violin`/`box`。
+- `kind`: `bar | grouped_bar | stacked_bar | barh | stacked_barh | line | errorbar | step | scatter | bubble | dotplot | box | violin | pie | donut | heatmap`
+  - 长分类名优先 `barh`/`stacked_barh`；富集/多变量气泡用 `dotplot`/`bubble`（配 `mapping.size` + `mapping.color` + `color_label`）；生存/阶梯曲线用 `step`；分布用 `violin`/`box`；组成占比用 `pie`/`donut`。
+  - `layout`: `{"cols": 2, "width_ratios": [1.4, 1.0], "height_ratios": [1.0, 1.0]}` 支持非等宽多面板网格；内置视觉自愈引擎渲染前自动旋转碰撞的 X 刻度并外移遮挡数据的图例。
+  - `label_top_n`: 火山图/密集散点自动仅标注 Y 绝对值前 N 个命名点（配合 `mapping.label`）。
 - `xlabel` / `ylabel`: **必须带单位**，如 `"相对表达量 (a.u.)"`、`"浓度 (μM)"`（`annotation_audit` 自动检查轴单位与误差线声明）。
 - `series_colors`: 按系列/扇区名精准锁定颜色，如 `{"WT":"#888888","KO":"#0072B2"}`；`grid: true` 加淡灰 y 轴网格线；整图底部图注用顶层 `caption`。
 - `numeric_x`: `true` 时按真实数值坐标画 X 轴（`scatter` 数值 X 自动开启，适合回归/剂量曲线/火山图，保留全部点不覆写）。
@@ -36,8 +38,8 @@
    `"data": {"file": "data.csv", "filter": {"CellLine": "HeLa"}}`（`filter` 原生按列值或值列表过滤行并 **100% 保留原始物理行号**；`.xlsx` 可加 `"sheet": "Sheet1"`）
    + `"mapping": {"x": "列", "y": "列", "series": "列(可省)", "error": "对称误差列(可省)", "error_low": "下界(可省)", "error_high": "上界(可省)", "label": "点标注列(可省)"}`
    - 面板级排序：`"sort_x": "asc" | "desc" | "by_value_desc" | "by_value_asc"`（适合富集通路/基因排行图）。
-   - **宽表直读**：`"mapping": {"x": "Gene", "y_cols": ["WT", "KO"]}` 自动转长表并保留原列名与行号。
-   - `box` / `violin` 同样支持 tidy 表（按 `mapping.x` 分组收集全部样本值）。
+   - **宽表直读**：`"mapping": {"x": "Gene", "y_cols": ["WT", "KO"]}` 自动转长表并保留原列名与行号；自动跳过 Nature/Cell 源数据表首行单列标题横幅（或用 `data.header_row` 显式指定），并自动拆分 `"12.4 ± 1.2"` / `"12.4 +/- 1.2"` 单元格为数值与误差。
+   - `box` / `violin` 同样支持 tidy 表：按 `mapping.x` 分组，同时指定 `mapping.series` 自动渲染多系列分组箱线/小提琴图并核验中位数。
 2. **显式 series**：
    `"data": {"x_labels": ["WT","KO"], "series": [{"name":"TP53","y":[5.2,8.7],"error":[0.4,0.6]}]}`（连续 X 可加 `"x": [...]`）。
 3. **热图**：`"data": {"matrix": [[...]], "row_labels": [...], "col_labels": [...]}`、tidy `{"file":…, "mapping":{"row","col","value"}}` 或**宽矩阵 CSV 自动识别**（首列为行标签、其余列为热图数值列，逐格保留 `source_line`/`source_col`）；`panel.unit` 写色条标签；设 `"vcenter": 0` 自动启用零中心对称发散色带 (`RdBu_r`)，`NaN` 格以浅灰显示。
@@ -77,9 +79,10 @@
 - `direction`（兼容别名 `layout`/`orientation`）: `"TB"`(默认纵向细胞分层) | `"LR"`(横向左→右流程/通路，区室自动等高列对齐，反馈走顶/底走廊)。
 - `role`: 节点生物学角色自动科研配色 `ligand|receptor|kinase|protein|tf|gene|drug|inhibitor|process`（可用 `fill`/`stroke` 覆盖）；节点兼容 `sublabel`/`subtitle`，区室兼容 `title`/`label`/`name`。
 - `complexes`: `[{"id":"cx1","label":"mTORC1","members":["mtor","raptor"]}]` 自动绘制多蛋白复合物虚线包络框。
-- `shape`: `rounded`(默认) | `rect` | `pill`(小分子/药物/配体) | `ellipse`(复合物/细胞器) | `diamond`(开关/判断)；节点可加 `"badge": "P"`/`"Ub"`/`"Ac"` 在右上角画可编辑生化修饰徽章。
-- 区室可设 `"style": "membrane"` 绘制生物质膜双线边界；顶层可设 `"caption"`（缺省时自动以 `"source"` 生成底部来源行）。
-- `style`: `activate`(实心箭头) | `inhibit`/`tbar`(平头抑制 T-bar，严禁把抑制画成箭头！) | `both`(双向) | `line`(关联)；`dashed: true` 表间接/转运/转录；`route`: `straight`/`smooth`(斜向跨泳道自动 90° 平滑正交入框，消除斜 T-bar)/`elbow`/`detour`(反馈或跨 ≥2 泳道自动走外侧圆角走廊)；同层双向边自动 ±10px 平行分离。
+- `shape`: `rounded`(默认) | `rect` | `pill`(小分子/药物/配体) | `ellipse`(复合物/细胞器) | `diamond`(开关/判断) | `receptor`(跨膜受体凹槽) | `dna`/`gene`(转录起始折弯箭头 `↱`) | `mitochondria`(线粒体嵴) | `vesicle`(双膜囊泡) | `outcome`/`process`(左侧色条表型横幅)；节点可加 `"badge": "P"`/`"Ub"`/`"Ac"`（右上角 PTM 徽章）与 `"step": 1`（左上角因果步骤圆标）。
+- 区室支持 `"lanes": [...]`（通栏分层）或 `"nodes": [...]`（嵌套/并排细胞器如细胞质内并排线粒体+细胞核）；`"style": "membrane"|"bilayer"|"nucleus"` 绘制双线质膜或双虚线核膜；支持 `"custom_ops": [...]` 叠加自定义矢量标注；顶层可设 `"caption"`。
+- `panels`（多面板机制图，适合 `(a) Normal` vs `(b) Disease/Inhibition` 对照或分阶段机制）：`{"title":"...","panel_layout":"horizontal|vertical","panels":[{"id":"a","title":"...","direction":"TB|LR","nodes":[...],"edges":[...],"compartments":[...],"complexes":[...]},{"id":"b",...}],"caption":"..."}`，自动分配角标 `(a)(b)`、共享图例并汇总全部实体供 `--verify-pdf` 审计。
+- `style`: `activate`(实心箭头) | `inhibit`/`tbar`(平头抑制 T-bar，严禁把抑制画成箭头！) | `both`(双向) | `line`(关联)；`dashed: true` 表间接/转运/转录；`route`: `straight`/`smooth`(斜向跨泳道自动 90° 平滑正交入框)/`elbow`/`detour`(反馈或跨 ≥2 泳道自动走外侧圆角走廊)；同层双向边自动 ±10px 平行分离；同泳道非相邻跳过边自动拱形跨跳防穿框；多分支枢纽自动错开出射/入射端口。
 
 ---
 
@@ -100,4 +103,5 @@
   {"op":"delete","target":{"find":"…","match":"contains"}}
 ]}
 ```
+- `recolor` 兼容 `fill_from`/`from_fill`、`stroke_from`/`from_stroke`、`to_fill`/`fill_to`、`to_stroke`/`stroke_to`，同时支持内联 `style`、CSS `<style>` 规则块及 `<g id=...>` 子矢量穿透；`set_attrs`（`{"op":"set_attrs","id":"bar-1","attrs":{"y":120,"height":80}}`）支持精确源保留几何/数值改图；`--inspect` 自动解析 `<g transform>` 全局坐标与 CSS 色板。
 - PDF 输入自动导出保留 `<text>` 的 SVG 副本与同名 `.provenance.json`，文字替换(`exact/contains/regex`)与新增元素同步写入 PDF；含 `move/delete/recolor` 时单页与多页 PDF 均自动同步重导该页保持视觉一致。

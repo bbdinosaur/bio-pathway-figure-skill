@@ -232,14 +232,51 @@ def text_bbox(el, m, defs, depth=0):
     return (xs0, ys0, xs1, ys1)
 
 
+def _text_quad(el, m):
+    """返回 text 的 4 顶点有向包围四边形（支持任意旋转矩阵），无旋转时为轴对齐矩形。"""
+    fs = _font_size_of(el, 12.0)
+    anchor = _anchor_of(el)
+    x0 = float(el.get("x", 0)); y0 = float(el.get("y", 0))
+    tspans = [c for c in el if c.tag.split("}")[-1] == "tspan"]
+    if len(tspans) == 1:
+        t = tspans[0]
+        fs = _font_size_of(t, fs)
+        anchor = _anchor_of(t) or anchor
+        x0 = float(str(t.get("x", x0)).split()[0])
+        y0 = float(str(t.get("y", y0)).split()[0])
+        txt = "".join(t.itertext())
+    else:
+        txt = "".join(el.itertext())
+    w = est_text_width(txt, fs)
+    lx = x0 - (w / 2.0 if anchor == "middle" else (w if anchor == "end" else 0.0))
+    ly0, ly1 = y0 - fs * 0.85, y0 + fs * 0.25
+    return [_apply(m, lx, ly0), _apply(m, lx + w, ly0), _apply(m, lx + w, ly1), _apply(m, lx, ly1)]
+
+
+def _quads_intersect(q1, q2):
+    """2D 分离轴定理 (SAT) 精确判断两个凸四边形是否相交（彻底消除旋转刻度 AABB 误报）。"""
+    for poly in (q1, q2):
+        for i in range(4):
+            p1, p2 = poly[i], poly[(i + 1) % 4]
+            nx, ny = -(p2[1] - p1[1]), (p2[0] - p1[0])
+            if nx == 0 and ny == 0:
+                continue
+            p1_proj = [p[0] * nx + p[1] * ny for p in q1]
+            p2_proj = [p[0] * nx + p[1] * ny for p in q2]
+            if max(p1_proj) <= min(p2_proj) + 1e-6 or max(p2_proj) <= min(p1_proj) + 1e-6:
+                return False
+    return True
+
+
 def _anchored_box(x, y, w, fs, anchor, m):
     if anchor == "middle":
         x -= w / 2
     elif anchor == "end":
         x -= w
-    p1 = _apply(m, x, y - fs * 0.85)
-    p2 = _apply(m, x + w, y + fs * 0.25)
-    return (min(p1[0], p2[0]), min(p1[1], p2[1]), max(p1[0], p2[0]), max(p1[1], p2[1]))
+    pts = [_apply(m, x, y - fs * 0.85), _apply(m, x + w, y - fs * 0.85),
+           _apply(m, x + w, y + fs * 0.25), _apply(m, x, y + fs * 0.25)]
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    return (min(xs), min(ys), max(xs), max(ys))
 
 
 # ---------------- 主检查 ----------------
@@ -295,7 +332,9 @@ def check_svg(svg_path, tol=1.0):
             txt = "".join(el.itertext()).strip()
             if txt:
                 bb = text_bbox(el, cm, defs)
-                texts.append({"tag": "text", "text": txt[:60], "bbox": bb,
+                rot_flag = abs(cm[1]) > 1e-3 or abs(cm[2]) > 1e-3
+                quad = _text_quad(el, cm) if rot_flag else None
+                texts.append({"tag": "text", "text": txt[:60], "bbox": bb, "quad": quad,
                               "font_size": fs, "clipped": in_clip(el, parents)})
         elif tag in ("rect", "circle", "ellipse", "line", "polyline", "polygon", "path", "image"):
             bb = element_bbox(el, cm, defs)
@@ -335,6 +374,14 @@ def check_svg(svg_path, tol=1.0):
             inter = ix * iy
             if inter <= 0:
                 continue
+            # 若任一文本带旋转矩阵，改用精确有向四边形 SAT 检测，消除平行斜刻度的 AABB 误报
+            if a.get("quad") is not None or b.get("quad") is not None:
+                qa = a["quad"] or [(a["bbox"][0], a["bbox"][1]), (a["bbox"][2], a["bbox"][1]),
+                                   (a["bbox"][2], a["bbox"][3]), (a["bbox"][0], a["bbox"][3])]
+                qb = b["quad"] or [(b["bbox"][0], b["bbox"][1]), (b["bbox"][2], b["bbox"][1]),
+                                   (b["bbox"][2], b["bbox"][3]), (b["bbox"][0], b["bbox"][3])]
+                if not _quads_intersect(qa, qb):
+                    continue
             aa = (a["bbox"][2] - a["bbox"][0]) * (a["bbox"][3] - a["bbox"][1])
             ab = (b["bbox"][2] - b["bbox"][0]) * (b["bbox"][3] - b["bbox"][1])
             denom = max(aa, ab, 1e-6)
